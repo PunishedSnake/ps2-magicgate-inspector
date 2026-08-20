@@ -139,10 +139,14 @@ static int FindUnusedTempName(int port, char *name)
         memset(&DirEntry, 0, sizeof(DirEntry));
         mcGetDir(port, 0, name, 0, 1, &DirEntry);
         rc = McSyncResult();
-        if (rc == 0)
+
+        if (rc == 0 || rc == sceMcResNoEntry)
             return 0;
-        if (rc < 0 && rc != sceMcResNoEntry)
+
+        if (rc < 0)
             return rc;
+
+        /* A positive result means that exact filename already exists. */
     }
 
     return -1000;
@@ -242,11 +246,6 @@ static void InspectCard(int port)
     mcGetInfo(port, 0, &r->type, &r->free_clusters, &r->formatted);
     r->info_rc = McSyncResult();
 
-    if (r->type == MC_TYPE_NONE) {
-        r->health = CARD_NO_CARD;
-        return;
-    }
-
     if (r->info_rc == sceMcResFailAuth) {
         r->health = CARD_AUTH_FAILURE;
         return;
@@ -254,6 +253,11 @@ static void InspectCard(int port)
 
     if (r->info_rc <= sceMcResFailDetect) {
         r->health = CARD_DETECT_FAILURE;
+        return;
+    }
+
+    if (r->type == MC_TYPE_NONE) {
+        r->health = CARD_NO_CARD;
         return;
     }
 
