@@ -1,6 +1,12 @@
-upstream/
-fmcb/
-out/
+# PS2SDK / local build products
+*.o
+*_irx.c
+MC_INSPECTOR.ELF
+
+# CI/local staging directories
 artifacts/
+out/
+
+# Local editor or migration backups
 *.bak
 *.mgci.bak
