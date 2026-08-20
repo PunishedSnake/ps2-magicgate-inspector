@@ -1,18 +1,18 @@
-name: Build PS2 MagicGate Card Inspector
+name: Build PS2 Memory Card Inspector
 
 on:
   workflow_dispatch:
   pull_request:
     branches: [ main ]
     paths:
-      - 'overlay/**'
-      - 'apply_magicgate_patch.py'
+      - 'src/**'
+      - 'Makefile'
       - '.github/workflows/build.yml'
   push:
     branches: [ main ]
     paths:
-      - 'overlay/**'
-      - 'apply_magicgate_patch.py'
+      - 'src/**'
+      - 'Makefile'
       - '.github/workflows/build.yml'
 
 permissions:
@@ -23,67 +23,33 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout MGCI repository
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          path: mgci
 
-      - name: Fetch pinned FreeMcBoot Installer upstream
+      - name: Build standalone ELF in PS2DEV v1.0
         shell: bash
         run: |
           set -euo pipefail
-          git clone https://github.com/israpps/FreeMcBoot-Installer.git fmcb
-          git -C fmcb checkout ac53a47a5c6eae675cc2611c7bebe62f56c7845c
-
-      - name: Apply MGCI patch
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 mgci/apply_magicgate_patch.py "$GITHUB_WORKSPACE/fmcb"
-          grep -n "mg_inspector" fmcb/installer/Makefile fmcb/installer/menu.c fmcb/installer/system.c
-
-      - name: Build standard installer in PS2DEV v1.0
-        shell: bash
-        run: |
-          set -euo pipefail
-          SHA8="$(printf '%s\n' "$GITHUB_SHA" | cut -c1-8)"
-          mkdir -p out artifacts/standard
+          mkdir -p artifacts
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/work" \
-            -w /work/fmcb/installer \
+            -w /work \
             ps2dev/ps2dev:v1.0 \
-            sh -c "apk add --no-cache build-base >/dev/null && ee-gcc --version && make rebuild FMCB_INSTALLER_VERSION=MGCI-${SHA8} EE_BIN_DIR=/work/out/"
-          cp out/FMCBInstaller.elf artifacts/standard/FMCBInstaller-MGCI.elf
-          cp out/UNC_FMCBInstaller.elf artifacts/standard/UNC_FMCBInstaller-MGCI.elf
+            sh -c 'apk add --no-cache build-base >/dev/null && ee-gcc --version && make clean && make'
+          cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR.ELF
 
-      - name: Build EXFAT installer in PS2DEV v1.0
+      - name: Verify output
         shell: bash
         run: |
           set -euo pipefail
-          SHA8="$(printf '%s\n' "$GITHUB_SHA" | cut -c1-8)"
-          mkdir -p artifacts/exfat
-          docker run --rm \
-            -v "$GITHUB_WORKSPACE:/work" \
-            -w /work/fmcb/installer \
-            ps2dev/ps2dev:v1.0 \
-            sh -c "apk add --no-cache build-base >/dev/null && make rebuild FMCB_INSTALLER_VERSION=MGCI-${SHA8} EE_BIN_DIR=/work/out/ EXFAT=1"
-          cp out/FMCBInstaller_EXFAT.elf artifacts/exfat/FMCBInstaller-MGCI-EXFAT.elf
-          cp out/UNC_FMCBInstaller_EXFAT.elf artifacts/exfat/UNC_FMCBInstaller-MGCI-EXFAT.elf
+          file artifacts/MC_INSPECTOR.ELF
+          ls -lh artifacts/MC_INSPECTOR.ELF
+          sha256sum artifacts/MC_INSPECTOR.ELF | tee artifacts/SHA256SUMS.txt
 
-      - name: Verify and checksum outputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          file artifacts/standard/*.elf artifacts/exfat/*.elf
-          ls -lh artifacts/standard/*.elf artifacts/exfat/*.elf
-          cd artifacts
-          find . -type f -name '*.elf' -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
-          cat SHA256SUMS.txt
-
-      - name: Upload ELF artifacts
+      - name: Upload standalone ELF
         uses: actions/upload-artifact@v4
         with:
-          name: PS2-MGCI-${{ github.sha }}
+          name: PS2-Memory-Card-Inspector-${{ github.sha }}
           path: artifacts/
           if-no-files-found: error
           retention-days: 30
