@@ -1,0 +1,6 @@
+upstream/
+fmcb/
+out/
+artifacts/
+*.bak
+*.mgci.bak

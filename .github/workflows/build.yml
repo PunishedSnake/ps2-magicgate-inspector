@@ -1,0 +1,79 @@
+name: Build PS2 MagicGate Card Inspector
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'overlay/**'
+      - 'apply_magicgate_patch.py'
+      - '.github/workflows/build.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: ps2dev/ps2dev:v1.0
+
+    steps:
+      - name: Install host dependencies
+        run: apk add --no-cache build-base git zip p7zip python3
+
+      - name: Checkout MGCI patch repository
+        uses: actions/checkout@v4
+        with:
+          path: mgci
+
+      - name: Fetch pinned FreeMcBoot Installer upstream
+        run: |
+          git clone https://github.com/israpps/FreeMcBoot-Installer.git fmcb
+          cd fmcb
+          git checkout ac53a47a5c6eae675cc2611c7bebe62f56c7845c
+          git status --short
+
+      - name: Apply MGCI patch
+        run: |
+          python3 mgci/apply_magicgate_patch.py "$GITHUB_WORKSPACE/fmcb"
+          cp mgci/overlay/installer/mg_inspector.c fmcb/installer/mg_inspector.c
+          cp mgci/overlay/installer/mg_inspector.h fmcb/installer/mg_inspector.h
+          grep -n "mg_inspector" fmcb/installer/Makefile fmcb/installer/menu.c fmcb/installer/system.c
+
+      - name: Build standard installer
+        run: |
+          mkdir -p out
+          cd fmcb/installer
+          make rebuild FMCB_INSTALLER_VERSION="MGCI-${GITHUB_SHA::8}" EE_BIN_DIR="$GITHUB_WORKSPACE/out/"
+
+      - name: Preserve standard outputs
+        run: |
+          mkdir -p artifacts/standard
+          cp out/FMCBInstaller.elf artifacts/standard/FMCBInstaller-MGCI.elf
+          cp out/UNC_FMCBInstaller.elf artifacts/standard/UNC_FMCBInstaller-MGCI.elf
+
+      - name: Build EXFAT installer
+        run: |
+          rm -f out/FMCBInstaller*.elf out/UNC_FMCBInstaller*.elf
+          cd fmcb/installer
+          make rebuild FMCB_INSTALLER_VERSION="MGCI-${GITHUB_SHA::8}" EE_BIN_DIR="$GITHUB_WORKSPACE/out/" EXFAT=1
+
+      - name: Preserve EXFAT outputs
+        run: |
+          mkdir -p artifacts/exfat
+          cp out/FMCBInstaller_EXFAT.elf artifacts/exfat/FMCBInstaller-MGCI-EXFAT.elf
+          cp out/UNC_FMCBInstaller_EXFAT.elf artifacts/exfat/UNC_FMCBInstaller-MGCI-EXFAT.elf
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          find . -type f -name '*.elf' -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload ELF artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS2-MGCI-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
