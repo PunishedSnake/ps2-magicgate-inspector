@@ -1,3 +1,19 @@
+/*
+ * PS2 Memory Card Inspector
+ * -------------------------
+ * Standalone diagnostic utility for PlayStation 2 memory cards.
+ *
+ * Design goals for this file are intentionally conservative:
+ *   - inspection must be non-destructive;
+ *   - raw MCMAN results stay visible for diagnosis;
+ *   - formatting is never inferred from a generic I/O failure;
+ *   - every destructive action requires an explicit second confirmation.
+ *
+ * v0.1.x only investigates card/filesystem behavior. MagicGate/KELF probing
+ * belongs to later standalone milestones and must not be confused with the
+ * old experimental FreeMcBoot patcher that previously lived in this repo.
+ */
+
 #include <tamtypes.h>
 #include <kernel.h>
 #include <sifrpc.h>
@@ -12,10 +28,16 @@
 #include <string.h>
 #include <sys/fcntl.h>
 
-#define APP_VERSION "0.1.0-standalone"
+#define APP_VERSION "0.1.0"
+#define APP_CODENAME "Columbo"
 #define TEST_SIZE 4096
 #define SLOT_COUNT 2
 
+/*
+ * The IOP modules are converted to C objects by the Makefile and linked into
+ * the ELF. This keeps the Inspector self-contained: users do not need a
+ * companion IRX directory next to MC_INSPECTOR.ELF.
+ */
 extern unsigned char freesio2_irx[];
 extern unsigned int size_freesio2_irx;
 extern unsigned char freepad_irx[];
@@ -25,6 +47,11 @@ extern unsigned int size_mcman_irx;
 extern unsigned char mcserv_irx[];
 extern unsigned int size_mcserv_irx;
 
+/*
+ * User-facing health classification. These states are deliberately broader
+ * than individual MCMAN return codes. CardReport keeps the raw values so the
+ * classification can be refined later without throwing evidence away.
+ */
 typedef enum CardHealth {
     CARD_UNKNOWN = 0,
     CARD_OK,
@@ -50,12 +77,18 @@ typedef struct CardReport {
     CardHealth health;
 } CardReport;
 
+/* libpad/libmc DMA-facing buffers need cache-friendly alignment on the EE. */
 static unsigned char PadBuffer[256] __attribute__((aligned(64)));
 static unsigned char WriteBuffer[TEST_SIZE] __attribute__((aligned(64)));
 static unsigned char ReadBuffer[TEST_SIZE] __attribute__((aligned(64)));
 static sceMcTblGetDir DirEntry __attribute__((aligned(64)));
 static CardReport Reports[SLOT_COUNT];
 
+/*
+ * libmc operations are asynchronous RPC requests. Every call in the Inspector
+ * is followed by this blocking sync so a return code always belongs to the
+ * immediately preceding memory-card operation.
+ */
 static int McSyncResult(void)
 {
     int result = -999;
@@ -69,6 +102,11 @@ static int ExecIrx(void *buffer, unsigned int size)
     return SifExecModuleBuffer(buffer, size, 0, NULL, &status);
 }
 
+/*
+ * Reset the IOP into a known state and boot only the services this standalone
+ * program needs. The load order matters: SIO2 first, then pad, then MCMAN and
+ * MCSERV before libmc starts issuing RPC requests.
+ */
 static int InitIopAndDevices(void)
 {
     int rc;
@@ -106,10 +144,15 @@ static int InitIopAndDevices(void)
     return 0;
 }
 
+/*
+ * Generate a deterministic but non-trivial test payload. Determinism makes
+ * failures reproducible, while the changing byte pattern catches more than a
+ * simple all-zero/all-FF write would.
+ */
 static void FillPattern(void)
 {
     unsigned int i;
-    unsigned int state = 0x4D43494Eu; /* MCIN */
+    unsigned int state = 0x4D43494Eu; /* "MCIN" */
 
     for (i = 0; i < sizeof(WriteBuffer); i++) {
         state = state * 1664525u + 1013904223u;
@@ -129,6 +172,14 @@ static int DeleteFile(int port, const char *name)
     return McSyncResult();
 }
 
+/*
+ * Never overwrite a user's file. We probe a small reserved-looking namespace
+ * and only accept a filename when MCMAN says the exact entry does not exist.
+ *
+ * Depending on MCMAN implementation/path handling, an absent exact filename
+ * can surface as either 0 entries or sceMcResNoEntry. A positive result means
+ * that the candidate exists and the search must continue.
+ */
 static int FindUnusedTempName(int port, char *name)
 {
     int i;
@@ -146,12 +197,23 @@ static int FindUnusedTempName(int port, char *name)
         if (rc < 0)
             return rc;
 
-        /* A positive result means that exact filename already exists. */
+        /* Positive result: exact filename already exists. Try the next one. */
     }
 
+    /* Refuse to reuse an existing candidate even in this pathological case. */
     return -1000;
 }
 
+/*
+ * End-to-end filesystem integrity test.
+ *
+ * The sequence intentionally crosses close/reopen boundaries:
+ *   create -> write -> flush -> close -> reopen -> read -> compare -> delete
+ *
+ * This catches failures that would be invisible if we only compared buffers
+ * before the data had actually travelled through MCMAN and back from the card.
+ * Cleanup is part of the test result, not a best-effort afterthought.
+ */
 static int RunReadWriteTest(int port, int *cleanup_rc)
 {
     char path[24];
@@ -223,6 +285,7 @@ static int RunReadWriteTest(int port, int *cleanup_rc)
     if (*cleanup_rc < 0)
         return -1004;
 
+    /* Verify cleanup rather than trusting mcDelete() alone. */
     memset(&DirEntry, 0, sizeof(DirEntry));
     mcGetDir(port, 0, path, 0, 1, &DirEntry);
     rc = McSyncResult();
@@ -232,6 +295,17 @@ static int RunReadWriteTest(int port, int *cleanup_rc)
     return 0;
 }
 
+/*
+ * Classify one physical memory-card port.
+ *
+ * Ordering is important. Authentication/detection errors are evaluated before
+ * MC_TYPE_NONE because a failed probe can leave the type field at NONE; doing
+ * the type check first would hide the more useful failure reason.
+ *
+ * Formatting permission is only granted for a reported PS2 card with an
+ * explicit no-format condition. Generic I/O failure never implies permission
+ * to destroy the filesystem.
+ */
 static void InspectCard(int port)
 {
     CardReport *r = &Reports[port];
@@ -267,6 +341,7 @@ static void InspectCard(int port)
         return;
     }
 
+    /* A formatted flag alone is not enough; prove that root traversal works. */
     memset(&DirEntry, 0, sizeof(DirEntry));
     mcGetDir(port, 0, "/*", 0, 1, &DirEntry);
     r->root_rc = McSyncResult();
@@ -336,12 +411,13 @@ static const char *TypeText(int type)
     }
 }
 
+/* Redraw only when state changes; there is no reason to spam the GS every loop. */
 static void Render(int selected, int confirm_format, int last_format_rc)
 {
     CardReport *r = &Reports[selected];
 
     scr_clear();
-    scr_printf("PS2 Memory Card Inspector v%s\n", APP_VERSION);
+    scr_printf("PS2 Memory Card Inspector v%s - %s\n", APP_VERSION, APP_CODENAME);
     scr_printf("Standalone diagnostic build - no FMCB installation code\n\n");
     scr_printf("< LEFT / RIGHT > select slot    X test    START test both\n");
     scr_printf("SELECT exit\n\n");
@@ -377,6 +453,12 @@ static void Render(int selected, int confirm_format, int last_format_rc)
     scr_printf("\nRaw MCMAN errors are shown intentionally for diagnosis.\n");
 }
 
+/*
+ * Destructive primitive. Callers must already have passed both gates:
+ * InspectCard() must set format_allowed and the UI must receive the explicit
+ * L1+R1+Triangle confirmation. Re-inspection after success verifies the new
+ * filesystem through the same code path as any other card.
+ */
 static int FormatCard(int port)
 {
     int rc;
@@ -388,6 +470,7 @@ static int FormatCard(int port)
     return rc;
 }
 
+/* Return edge-triggered button presses while also exposing the held state. */
 static u32 ReadPadPressed(u32 *held)
 {
     struct padButtonStatus buttons;
@@ -403,6 +486,7 @@ static u32 ReadPadPressed(u32 *held)
     }
 
     if (padRead(0, 0, &buttons) != 0) {
+        /* libpad buttons are active-low, so invert them into a normal bitset. */
         state = 0xFFFFu ^ buttons.btns;
         pressed = state & ~old_state;
         old_state = state;
@@ -436,6 +520,7 @@ int main(int argc, char *argv[])
         SleepThread();
     }
 
+    /* Seed both reports so switching slots immediately shows useful state. */
     InspectCard(0);
     InspectCard(1);
 
@@ -451,6 +536,7 @@ int main(int argc, char *argv[])
             break;
 
         if (confirm_format) {
+            /* While armed, ordinary actions are ignored until confirm/cancel. */
             if (pressed & PAD_CIRCLE) {
                 confirm_format = 0;
                 dirty = 1;
@@ -483,6 +569,7 @@ int main(int argc, char *argv[])
             }
         }
 
+        /* UI throttle only; card protocol timing is handled by libmc/mcSync. */
         DelayThread(16000);
     }
 
