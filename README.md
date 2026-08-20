@@ -1,44 +1,63 @@
-# PS2 MagicGate Card Inspector & Forced FMCB Installer
+# PS2 Memory Card Inspector
 
-Private CI/build repository for the experimental MagicGate Card Inspector and gated FMCB force-install path.
+A standalone PlayStation 2 homebrew utility for inspecting memory-card health without depending on FreeMcBoot or another installer.
 
-## What this repository contains
+> **Current status:** v0.1.0 **Columbo** is build-verified with PS2SDK/PS2DEV, but has not yet been validated on real hardware. Treat the results as experimental until hardware testing is completed.
 
-GitHub Actions clones the pinned upstream `israpps/FreeMcBoot-Installer` commit `ac53a47a5c6eae675cc2611c7bebe62f56c7845c`, applies the MGCI patch plus the non-interactive emulator harness, and builds with `ps2dev/ps2dev:v1.0`.
+## What it does today
 
-The resulting artifact contains:
+`MC_INSPECTOR.ELF` currently supports both PS2 memory-card ports and can:
 
-- `standard/FMCBInstaller-MGCI.elf`
-- `standard/UNC_FMCBInstaller-MGCI.elf`
-- `exfat/FMCBInstaller-MGCI-EXFAT.elf`
-- `exfat/UNC_FMCBInstaller-MGCI-EXFAT.elf`
-- `SHA256SUMS.txt`
+- query the card with `mcGetInfo()` and preserve the raw MCMAN result;
+- report the card type, format state and free-cluster count;
+- verify access to the root directory;
+- run a non-destructive 4 KiB write/read/compare test;
+- verify that its temporary test file was deleted afterwards;
+- distinguish common states such as healthy, full, unformatted, filesystem failure, authentication failure, detection failure and no card;
+- offer manual formatting **only** when a PS2 card is reported as unformatted or the filesystem reports `sceMcResNoFormat`.
+
+The program does **not** install FreeMcBoot and does not currently perform MagicGate/KELF qualification. Those features belong to later standalone Inspector milestones.
 
 ## Safety model
 
-The force-install path is not a blind `MC_TYPE_PS2` bypass. On real hardware a card must pass filesystem read/write integrity, verified temporary-file cleanup, KELF loading, and the real `SecrDownloadFile()` MagicGate binding path before `full_pass` can become true.
+Inspection should be non-destructive. The R/W test creates a uniquely named temporary file (`/__MCIxx.TMP`), writes a deterministic 4096-byte pattern, reads it back, compares every byte, deletes the file and verifies that it is gone.
 
-The emulator qualification path is deliberately separate. It can validate card detection, expected rejection of an unformatted card, `mcFormat()`, read/write integrity, cleanup, KELF loading and KELF structure parsing, but it always forces `full_pass = 0`. Upstream PCSX2 therefore cannot unlock the production force-install path.
+Formatting is deliberately harder to trigger than an ordinary test. It is never automatic. The user must first request formatting with **Triangle**, then confirm by holding **L1 + R1** and pressing **Triangle** again. Authentication, detection and generic I/O failures never unlock the formatter.
 
-### Non-interactive emulator modes
+## Controls
 
-The patched installer recognizes:
-
-- `--mgci-pcsx2-test --mgci-mode=fresh-format --mgci-port=0`
-- `--mgci-pcsx2-test --mgci-mode=formatted --mgci-port=0`
-- `--mgci-pcsx2-test --mgci-mode=unformatted-reject --mgci-port=0`
-- use `--mgci-port=1` for the second memory-card port
-
-The harness writes `host:mgci-result.json` for automated runners.
-
-## Emulator targets
-
-For normal regression testing, use the current **PCSX2 nightly** rather than the stable channel so the test suite tracks current emulator behavior and CLI support.
-
-A second experimental backend is planned for the archived `987123879113/pcsx2` P2IO/Python 2 fork. That fork contains MagicGate-related emulation and requires user-supplied MagicGate key material. Its results must remain distinguishable from both upstream-PCXS2 qualification and real-hardware qualification.
-
-No BIOS dumps or MagicGate key files belong in this repository.
+| Control | Action |
+| --- | --- |
+| Left / Right | Select `mc0:` or `mc1:` |
+| Cross | Inspect selected card |
+| Start | Inspect both cards |
+| Triangle | Enter format confirmation when formatting is allowed |
+| L1 + R1 + Triangle | Confirm destructive format |
+| Circle | Cancel format confirmation |
+| Select | Exit |
 
 ## Build
 
-Push to `main` or run **Actions -> Build PS2 MagicGate Card Inspector -> Run workflow**.
+The repository builds a self-contained `MC_INSPECTOR.ELF` with embedded PS2SDK IOP modules (`freesio2`, `freepad`, `mcman`, `mcserv`). CI currently uses the proven `ps2dev/ps2dev:v1.0` environment for compatibility with the toolchain used during initial bring-up.
+
+```sh
+make
+```
+
+The GitHub Actions workflow additionally verifies the output with `file(1)`, calculates SHA-256 and publishes the ELF as an Actions artifact.
+
+## Project documentation
+
+- [Architecture](docs/ARCHITECTURE.md) — runtime structure, card classification and safety decisions.
+- [Testing](docs/TESTING.md) — hardware test matrix and what counts as a valid result.
+- [Roadmap](docs/ROADMAP.md) — planned milestones and feature boundaries.
+- [Release codenames](docs/CODENAMES.md) — the detective/police naming scheme.
+- [Changelog](CHANGELOG.md) — user-visible changes by version.
+
+## Repository policy
+
+`main` is the current standalone application. The earlier FreeMcBoot patch/forced-install prototype remains available through Git history but is intentionally no longer part of the active source tree. We prefer keeping the current tree small and understandable over retaining dead experimental glue indefinitely.
+
+## v0.1.0 — Columbo
+
+The first standalone release is named **Columbo**: not flashy, slightly suspicious of everything, and mostly interested in asking the memory card *just one more question*.
