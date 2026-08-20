@@ -36,15 +36,14 @@ jobs:
       - name: Apply MGCI patch
         run: |
           python3 mgci/apply_magicgate_patch.py "$GITHUB_WORKSPACE/fmcb"
-          cp mgci/overlay/installer/mg_inspector.c fmcb/installer/mg_inspector.c
-          cp mgci/overlay/installer/mg_inspector.h fmcb/installer/mg_inspector.h
           grep -n "mg_inspector" fmcb/installer/Makefile fmcb/installer/menu.c fmcb/installer/system.c
 
       - name: Build standard installer
         run: |
+          SHA8="$(printf '%s\n' "$GITHUB_SHA" | cut -c1-8)"
           mkdir -p out
           cd fmcb/installer
-          make rebuild FMCB_INSTALLER_VERSION="MGCI-${GITHUB_SHA::8}" EE_BIN_DIR="$GITHUB_WORKSPACE/out/"
+          make rebuild FMCB_INSTALLER_VERSION="MGCI-${SHA8}" EE_BIN_DIR="$GITHUB_WORKSPACE/out/"
 
       - name: Preserve standard outputs
         run: |
@@ -54,9 +53,9 @@ jobs:
 
       - name: Build EXFAT installer
         run: |
-          rm -f out/FMCBInstaller*.elf out/UNC_FMCBInstaller*.elf
+          SHA8="$(printf '%s\n' "$GITHUB_SHA" | cut -c1-8)"
           cd fmcb/installer
-          make rebuild FMCB_INSTALLER_VERSION="MGCI-${GITHUB_SHA::8}" EE_BIN_DIR="$GITHUB_WORKSPACE/out/" EXFAT=1
+          make rebuild FMCB_INSTALLER_VERSION="MGCI-${SHA8}" EE_BIN_DIR="$GITHUB_WORKSPACE/out/" EXFAT=1
 
       - name: Preserve EXFAT outputs
         run: |
@@ -64,11 +63,12 @@ jobs:
           cp out/FMCBInstaller_EXFAT.elf artifacts/exfat/FMCBInstaller-MGCI-EXFAT.elf
           cp out/UNC_FMCBInstaller_EXFAT.elf artifacts/exfat/UNC_FMCBInstaller-MGCI-EXFAT.elf
 
-      - name: Generate checksums
+      - name: Generate checksums and inspect ELFs
         run: |
           cd artifacts
           find . -type f -name '*.elf' -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
           cat SHA256SUMS.txt
+          find . -type f -name '*.elf' -exec ls -lh {} \;
 
       - name: Upload ELF artifacts
         uses: actions/upload-artifact@v4
@@ -80,6 +80,7 @@ jobs:
 
       - name: Publish ELF files to private repository
         run: |
+          SHA8="$(printf '%s\n' "$GITHUB_SHA" | cut -c1-8)"
           rm -rf mgci/dist
           mkdir -p mgci/dist
           cp -r artifacts/* mgci/dist/
@@ -88,5 +89,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- dist
           git diff --cached --quiet && exit 0
-          git commit -m "Publish MGCI ELF build ${GITHUB_SHA::8}"
+          git commit -m "Publish MGCI ELF build ${SHA8}"
           git push origin HEAD:main
