@@ -52,7 +52,7 @@ jobs:
             -v "$GITHUB_WORKSPACE:/work" \
             -w /work/fmcb/installer \
             ps2dev/ps2dev:v1.0 \
-            sh -lc "ee-gcc --version && make rebuild FMCB_INSTALLER_VERSION=MGCI-${SHA8} EE_BIN_DIR=/work/out/"
+            sh -c "ee-gcc --version && make rebuild FMCB_INSTALLER_VERSION=MGCI-${SHA8} EE_BIN_DIR=/work/out/"
           cp out/FMCBInstaller.elf artifacts/standard/FMCBInstaller-MGCI.elf
           cp out/UNC_FMCBInstaller.elf artifacts/standard/UNC_FMCBInstaller-MGCI.elf
 
@@ -66,7 +66,7 @@ jobs:
             -v "$GITHUB_WORKSPACE:/work" \
             -w /work/fmcb/installer \
             ps2dev/ps2dev:v1.0 \
-            sh -lc "make rebuild FMCB_INSTALLER_VERSION=MGCI-${SHA8} EE_BIN_DIR=/work/out/ EXFAT=1"
+            sh -c "make rebuild FMCB_INSTALLER_VERSION=MGCI-${SHA8} EE_BIN_DIR=/work/out/ EXFAT=1"
           cp out/FMCBInstaller_EXFAT.elf artifacts/exfat/FMCBInstaller-MGCI-EXFAT.elf
           cp out/UNC_FMCBInstaller_EXFAT.elf artifacts/exfat/UNC_FMCBInstaller-MGCI-EXFAT.elf
 
