@@ -1,8 +1,15 @@
-#include <unistd.h>
-
-/* PS2SDK v1.0 does not export DelayThread(), while newer code often uses it.
- * Keep the standalone inspector source portable by providing the tiny shim here. */
+/* Compatibility helpers for the old PS2DEV v1.0 EE toolchain. */
 int DelayThread(int usec)
 {
-    return usleep(usec);
+    volatile unsigned int loops;
+
+    if (usec <= 0)
+        return 0;
+
+    /* UI throttling only. No memory-card protocol timing depends on this. */
+    loops = (unsigned int)usec * 24u;
+    while (loops-- != 0u)
+        __asm__ __volatile__("nop");
+
+    return 0;
 }
