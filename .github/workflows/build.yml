@@ -35,7 +35,7 @@ jobs:
             -v "$GITHUB_WORKSPACE:/work" \
             -w /work \
             ps2dev/ps2dev:v1.0 \
-            sh -c 'apk add --no-cache build-base >/dev/null && ee-gcc --version && make clean && make'
+            sh -c 'apk add --no-cache build-base >/dev/null && ee-gcc --version && make'
           cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR.ELF
 
       - name: Verify output
