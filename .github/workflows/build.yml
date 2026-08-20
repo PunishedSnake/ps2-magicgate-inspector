@@ -2,6 +2,12 @@ name: Build PS2 MagicGate Card Inspector
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'overlay/**'
+      - 'apply_magicgate_patch.py'
+      - '.github/workflows/build.yml'
   push:
     branches: [ main ]
     paths:
@@ -104,7 +110,7 @@ jobs:
           exit 0
 
       - name: Publish diagnostics and successful ELFs
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         shell: sh
         run: |
           SHA8="$(printf '%s\n' "$GITHUB_SHA" | cut -c1-8)"
@@ -117,11 +123,13 @@ jobs:
           git commit -m "CI result for MGCI ${SHA8}"
           git push origin HEAD:main
 
-      - name: Upload successful ELF artifacts
+      - name: Upload diagnostics and ELF artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: PS2-MGCI-${{ github.sha }}
-          path: artifacts/
-          if-no-files-found: ignore
+          path: |
+            artifacts/
+            mgci/ci/
+          if-no-files-found: warn
           retention-days: 30
