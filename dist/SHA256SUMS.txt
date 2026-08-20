@@ -1,4 +1,0 @@
-0c72ba9d72ac11f2ade289057baa699e4e3a0d8c79414ae0eb908ede886774fd  ./exfat/FMCBInstaller-MGCI-EXFAT.elf
-9d386d125e712935401979bba480eae56ecefaa6dcab852392aae89349b1ffd0  ./exfat/UNC_FMCBInstaller-MGCI-EXFAT.elf
-8bae989a03535802454dd304d0f375b418c60f51508b8ee36e6f1db7d537ea12  ./standard/FMCBInstaller-MGCI.elf
-b32ca6f88feec8190d2830712a405770d44b8513403ed7dfac5aa22d32776eac  ./standard/UNC_FMCBInstaller-MGCI.elf
