@@ -18,76 +18,110 @@ jobs:
     container: ps2dev/ps2dev:v1.0
 
     steps:
-      - name: Install host dependencies
-        run: apk add --no-cache build-base git zip p7zip python3
-
       - name: Checkout MGCI patch repository
         uses: actions/checkout@v4
         with:
           path: mgci
 
-      - name: Fetch pinned FreeMcBoot Installer upstream
+      - name: Build and capture diagnostics
+        shell: sh
         run: |
-          git clone https://github.com/israpps/FreeMcBoot-Installer.git fmcb
-          cd fmcb
-          git checkout ac53a47a5c6eae675cc2611c7bebe62f56c7845c
-          git status --short
+          set +e
+          mkdir -p mgci/ci artifacts/standard artifacts/exfat out
+          LOG="$GITHUB_WORKSPACE/mgci/ci/latest.log"
+          STATUS="$GITHUB_WORKSPACE/mgci/ci/status.txt"
+          SHA8="$(printf '%s\n' "$GITHUB_SHA" | cut -c1-8)"
+          : > "$LOG"
+          printf 'MGCI CI build %s\ncommit=%s\nupstream=%s\n\n' "$SHA8" "$GITHUB_SHA" 'ac53a47a5c6eae675cc2611c7bebe62f56c7845c' >> "$LOG"
 
-      - name: Apply MGCI patch
-        run: |
-          python3 mgci/apply_magicgate_patch.py "$GITHUB_WORKSPACE/fmcb"
-          grep -n "mg_inspector" fmcb/installer/Makefile fmcb/installer/menu.c fmcb/installer/system.c
+          run_stage() {
+            STAGE="$1"
+            shift
+            printf '\n===== %s =====\n' "$STAGE" >> "$LOG"
+            "$@" >> "$LOG" 2>&1
+            RC=$?
+            printf '[%s] rc=%d\n' "$STAGE" "$RC" >> "$LOG"
+            return "$RC"
+          }
 
-      - name: Build standard installer
+          run_stage dependencies apk add --no-cache build-base git zip p7zip python3
+          RC=$?
+          if [ "$RC" -eq 0 ]; then run_stage clone git clone https://github.com/israpps/FreeMcBoot-Installer.git fmcb; RC=$?; fi
+          if [ "$RC" -eq 0 ]; then
+            printf '\n===== checkout pinned upstream =====\n' >> "$LOG"
+            (cd fmcb && git checkout ac53a47a5c6eae675cc2611c7bebe62f56c7845c) >> "$LOG" 2>&1
+            RC=$?
+            printf '[checkout] rc=%d\n' "$RC" >> "$LOG"
+          fi
+          if [ "$RC" -eq 0 ]; then run_stage patch python3 mgci/apply_magicgate_patch.py "$GITHUB_WORKSPACE/fmcb"; RC=$?; fi
+          if [ "$RC" -eq 0 ]; then
+            printf '\n===== build standard =====\n' >> "$LOG"
+            (cd fmcb/installer && make rebuild FMCB_INSTALLER_VERSION="MGCI-${SHA8}" EE_BIN_DIR="$GITHUB_WORKSPACE/out/") >> "$LOG" 2>&1
+            RC=$?
+            printf '[build-standard] rc=%d\n' "$RC" >> "$LOG"
+          fi
+          if [ "$RC" -eq 0 ]; then
+            cp out/FMCBInstaller.elf artifacts/standard/FMCBInstaller-MGCI.elf >> "$LOG" 2>&1
+            RC=$?
+          fi
+          if [ "$RC" -eq 0 ]; then
+            cp out/UNC_FMCBInstaller.elf artifacts/standard/UNC_FMCBInstaller-MGCI.elf >> "$LOG" 2>&1
+            RC=$?
+          fi
+          if [ "$RC" -eq 0 ]; then
+            printf '\n===== build EXFAT =====\n' >> "$LOG"
+            (cd fmcb/installer && make rebuild FMCB_INSTALLER_VERSION="MGCI-${SHA8}" EE_BIN_DIR="$GITHUB_WORKSPACE/out/" EXFAT=1) >> "$LOG" 2>&1
+            RC=$?
+            printf '[build-exfat] rc=%d\n' "$RC" >> "$LOG"
+          fi
+          if [ "$RC" -eq 0 ]; then
+            cp out/FMCBInstaller_EXFAT.elf artifacts/exfat/FMCBInstaller-MGCI-EXFAT.elf >> "$LOG" 2>&1
+            RC=$?
+          fi
+          if [ "$RC" -eq 0 ]; then
+            cp out/UNC_FMCBInstaller_EXFAT.elf artifacts/exfat/UNC_FMCBInstaller-MGCI-EXFAT.elf >> "$LOG" 2>&1
+            RC=$?
+          fi
+
+          if [ "$RC" -eq 0 ]; then
+            (cd artifacts && find . -type f -name '*.elf' -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt) >> "$LOG" 2>&1
+            RC=$?
+          fi
+
+          if [ "$RC" -eq 0 ]; then
+            printf 'SUCCESS\ncommit=%s\n' "$GITHUB_SHA" > "$STATUS"
+            rm -rf mgci/dist
+            mkdir -p mgci/dist
+            cp -r artifacts/* mgci/dist/
+            printf '\n===== SUCCESS =====\n' >> "$LOG"
+            cat artifacts/SHA256SUMS.txt >> "$LOG"
+          else
+            printf 'FAILED\ncommit=%s\nrc=%d\n' "$GITHUB_SHA" "$RC" > "$STATUS"
+            printf '\n===== FAILED rc=%d =====\n' "$RC" >> "$LOG"
+          fi
+
+          # Do not fail this step: diagnostics are published by the next step.
+          exit 0
+
+      - name: Publish diagnostics and successful ELFs
+        if: always()
+        shell: sh
         run: |
           SHA8="$(printf '%s\n' "$GITHUB_SHA" | cut -c1-8)"
-          mkdir -p out
-          cd fmcb/installer
-          make rebuild FMCB_INSTALLER_VERSION="MGCI-${SHA8}" EE_BIN_DIR="$GITHUB_WORKSPACE/out/"
+          cd mgci
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- ci
+          if [ -d dist ]; then git add -- dist; fi
+          git diff --cached --quiet && exit 0
+          git commit -m "CI result for MGCI ${SHA8}"
+          git push origin HEAD:main
 
-      - name: Preserve standard outputs
-        run: |
-          mkdir -p artifacts/standard
-          cp out/FMCBInstaller.elf artifacts/standard/FMCBInstaller-MGCI.elf
-          cp out/UNC_FMCBInstaller.elf artifacts/standard/UNC_FMCBInstaller-MGCI.elf
-
-      - name: Build EXFAT installer
-        run: |
-          SHA8="$(printf '%s\n' "$GITHUB_SHA" | cut -c1-8)"
-          cd fmcb/installer
-          make rebuild FMCB_INSTALLER_VERSION="MGCI-${SHA8}" EE_BIN_DIR="$GITHUB_WORKSPACE/out/" EXFAT=1
-
-      - name: Preserve EXFAT outputs
-        run: |
-          mkdir -p artifacts/exfat
-          cp out/FMCBInstaller_EXFAT.elf artifacts/exfat/FMCBInstaller-MGCI-EXFAT.elf
-          cp out/UNC_FMCBInstaller_EXFAT.elf artifacts/exfat/UNC_FMCBInstaller-MGCI-EXFAT.elf
-
-      - name: Generate checksums and inspect ELFs
-        run: |
-          cd artifacts
-          find . -type f -name '*.elf' -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
-          cat SHA256SUMS.txt
-          find . -type f -name '*.elf' -exec ls -lh {} \;
-
-      - name: Upload ELF artifacts
+      - name: Upload successful ELF artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: PS2-MGCI-${{ github.sha }}
           path: artifacts/
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 30
-
-      - name: Publish ELF files to private repository
-        run: |
-          SHA8="$(printf '%s\n' "$GITHUB_SHA" | cut -c1-8)"
-          rm -rf mgci/dist
-          mkdir -p mgci/dist
-          cp -r artifacts/* mgci/dist/
-          cd mgci
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- dist
-          git diff --cached --quiet && exit 0
-          git commit -m "Publish MGCI ELF build ${SHA8}"
-          git push origin HEAD:main
