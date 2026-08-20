@@ -1,0 +1,251 @@
+MGCI CI build 596e61a2
+commit=596e61a268e32e7049fba7f8d0f6d13fa41b8ef9
+ref=ci-diagnostics
+upstream=ac53a47a5c6eae675cc2611c7bebe62f56c7845c
+
+fetch https://dl-cdn.alpinelinux.org/alpine/v3.13/main/x86_64/APKINDEX.tar.gz
+fetch https://dl-cdn.alpinelinux.org/alpine/v3.13/community/x86_64/APKINDEX.tar.gz
+(1/40) Upgrading musl (1.2.2_pre7-r0 -> 1.2.2-r2)
+(2/40) Installing libgcc (10.2.1_pre1-r3)
+(3/40) Installing libstdc++ (10.2.1_pre1-r3)
+(4/40) Installing binutils (2.35.2-r1)
+(5/40) Installing libmagic (5.39-r0)
+(6/40) Installing file (5.39-r0)
+(7/40) Installing libgomp (10.2.1_pre1-r3)
+(8/40) Installing libatomic (10.2.1_pre1-r3)
+(9/40) Installing libgphobos (10.2.1_pre1-r3)
+(10/40) Installing gmp (6.2.1-r1)
+(11/40) Installing isl22 (0.22-r0)
+(12/40) Installing mpfr4 (4.1.0-r0)
+(13/40) Installing mpc1 (1.2.0-r0)
+(14/40) Installing gcc (10.2.1_pre1-r3)
+(15/40) Installing musl-dev (1.2.2-r2)
+(16/40) Installing libc-dev (0.7.2-r3)
+(17/40) Installing g++ (10.2.1_pre1-r3)
+(18/40) Installing make (4.3-r0)
+(19/40) Installing fortify-headers (1.1-r0)
+(20/40) Installing patch (2.7.6-r7)
+(21/40) Installing build-base (0.5-r3)
+(22/40) Installing ca-certificates (20220614-r0)
+(23/40) Installing brotli-libs (1.0.9-r3)
+(24/40) Installing nghttp2-libs (1.42.0-r1)
+(25/40) Installing libcurl (7.79.1-r3)
+(26/40) Installing expat (2.2.10-r8)
+(27/40) Installing pcre2 (10.36-r1)
+(28/40) Installing git (2.30.6-r0)
+(29/40) Installing p7zip (16.02-r4)
+(30/40) Installing libbz2 (1.0.8-r1)
+(31/40) Installing libffi (3.3-r2)
+(32/40) Installing gdbm (1.19-r0)
+(33/40) Installing xz-libs (5.2.5-r1)
+(34/40) Installing ncurses-terminfo-base (6.2_p20210109-r1)
+(35/40) Installing ncurses-libs (6.2_p20210109-r1)
+(36/40) Installing readline (8.1.0-r0)
+(37/40) Installing sqlite-libs (3.34.1-r0)
+(38/40) Installing python3 (3.8.15-r0)
+(39/40) Installing unzip (6.0-r9)
+(40/40) Installing zip (3.0-r9)
+Executing busybox-1.32.1-r0.trigger
+Executing ca-certificates-20220614-r0.trigger
+OK: 261 MiB in 53 packages
+Cloning into 'mgci'...
+
+===== clone-upstream =====
+Cloning into 'fmcb'...
+[clone-upstream] rc=0
+
+===== checkout pinned upstream =====
+Note: switching to 'ac53a47a5c6eae675cc2611c7bebe62f56c7845c'.
+
+You are in 'detached HEAD' state. You can look around, make experimental
+changes and commit them, and you can discard any commits you make in this
+state without impacting any branches by switching back to a branch.
+
+If you want to create a new branch to retain commits you create, you may
+do so (now or later) by using -c with the switch command. Example:
+
+  git switch -c <new-branch-name>
+
+Or undo this operation with:
+
+  git switch -
+
+Turn off this advice by setting config variable advice.detachedHead to false
+
+HEAD is now at ac53a47 debug colors
+[checkout] rc=0
+
+===== patch =====
+PS2 MagicGate Card Inspector & Forced System Update Installer: applied successfully
+Backups were written as *.mgci.bak next to modified files.
+Build using the upstream FreeMcBoot-Installer build workflow / PS2SDK toolchain.
+[patch] rc=0
+
+===== toolchain =====
+PS2DEV=/usr/local/ps2dev
+PS2SDK=/usr/local/ps2dev/ps2sdk
+ee-gcc (GCC) 3.2.3
+Copyright (C) 2002 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+
+===== build standard =====
+rm -f /__w/ps2-magicgate-inspector/ps2-magicgate-inspector/out/UNC_FMCBInstaller.elf  main.o iop.o UI.o menu.o libsecr.o pad.o system.o mg_inspector.o graphics.o ReqSpaceCalc.o font.o background.o buttons.o IOPRP_img.o IOMANX_irx.o FILEXIO_irx.o SIO2MAN_irx.o PADMAN_irx.o MCMAN_irx.o MCSERV_irx.o SECRSIF_irx.o MCTOOLS_irx.o USBD_irx.o POWEROFF_irx.o DEV9_irx.o ATAD_irx.o HDD_irx.o PFS_irx.o mctools_rpc.o USBHDFSD_irx.o *_irx.c background.c buttons.c IOPRP_img.c
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c main.c -o main.o
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c iop.c -o iop.o
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c UI.c -o UI.o
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c menu.c -o menu.o
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c libsecr.c -o libsecr.o
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c pad.c -o pad.o
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c system.c -o system.o
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c mg_inspector.c -o mg_inspector.o
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c graphics.c -o graphics.o
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c ReqSpaceCalc.c -o ReqSpaceCalc.o
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c font.c -o font.o
+bin2c resources/background.png background.c background
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c background.c -o background.o
+bin2c resources/buttons.png buttons.c buttons
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c buttons.c -o buttons.o
+bin2c irx/compiled/IOPRP.img IOPRP_img.c IOPRP_img
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c IOPRP_img.c -o IOPRP_img.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/iomanX.irx IOMANX_irx.c IOMANX_irx
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c IOMANX_irx.c -o IOMANX_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/fileXio.irx FILEXIO_irx.c FILEXIO_irx
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c FILEXIO_irx.c -o FILEXIO_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/freesio2.irx SIO2MAN_irx.c SIO2MAN_irx
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c SIO2MAN_irx.c -o SIO2MAN_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/freepad.irx PADMAN_irx.c PADMAN_irx
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c PADMAN_irx.c -o PADMAN_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/mcman.irx MCMAN_irx.c MCMAN_irx
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c MCMAN_irx.c -o MCMAN_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/mcserv.irx MCSERV_irx.c MCSERV_irx
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c MCSERV_irx.c -o MCSERV_irx.o
+bin2c irx/compiled/secrsif.irx SECRSIF_irx.c SECRSIF_irx
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c SECRSIF_irx.c -o SECRSIF_irx.o
+bin2c irx/compiled/mctools.irx MCTOOLS_irx.c MCTOOLS_irx
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c MCTOOLS_irx.c -o MCTOOLS_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/usbd.irx USBD_irx.c USBD_irx
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c USBD_irx.c -o USBD_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/poweroff.irx POWEROFF_irx.c POWEROFF_irx
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c POWEROFF_irx.c -o POWEROFF_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/ps2dev9.irx DEV9_irx.c DEV9_irx
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c DEV9_irx.c -o DEV9_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/ps2atad.irx ATAD_irx.c ATAD_irx
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c ATAD_irx.c -o ATAD_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/ps2hdd-osd.irx HDD_irx.c HDD_irx
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c HDD_irx.c -o HDD_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/ps2fs.irx PFS_irx.c PFS_irx
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c PFS_irx.c -o PFS_irx.o
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c mctools_rpc.c -o mctools_rpc.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/usbhdfsd.irx USBHDFSD_irx.c USBHDFSD_irx
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c USBHDFSD_irx.c -o USBHDFSD_irx.o
+ee-gcc -Os -mgpopt -G8192 -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -nostartfiles -L/usr/local/ps2dev/ps2sdk/ports/lib -L/usr/local/ps2dev/ps2sdk/ee/lib -L/usr/local/ps2dev/ee/ee/lib -Tlinkfile -s -o /__w/ps2-magicgate-inspector/ps2-magicgate-inspector/out/UNC_FMCBInstaller.elf main.o iop.o UI.o menu.o libsecr.o pad.o system.o mg_inspector.o graphics.o ReqSpaceCalc.o font.o background.o buttons.o IOPRP_img.o IOMANX_irx.o FILEXIO_irx.o SIO2MAN_irx.o PADMAN_irx.o MCMAN_irx.o MCSERV_irx.o SECRSIF_irx.o MCTOOLS_irx.o USBD_irx.o POWEROFF_irx.o DEV9_irx.o ATAD_irx.o HDD_irx.o PFS_irx.o mctools_rpc.o USBHDFSD_irx.o /usr/local/ps2dev/ps2sdk/ee/startup/crt0.o -lgs -lpng -lz -lm -lfreetype -lpoweroff -lcdvd -lmc -lpadx -lhdd -lfileXio -lpatches -liopreboot -lc -lkernel
+ -- Compressing
+ps2-packer -v /__w/ps2-magicgate-inspector/ps2-magicgate-inspector/out/UNC_FMCBInstaller.elf /__w/ps2-magicgate-inspector/ps2-magicgate-inspector/out/FMCBInstaller.elf
+PS2-Packer v1.1.0 (C) 2004-2005 Nicolas "Pixel" Noble
+This is free software with ABSOLUTELY NO WARRANTY.
+
+Compressing /__w/ps2-magicgate-inspector/ps2-magicgate-inspector/out/UNC_FMCBInstaller.elf...
+Loading stub file /usr/local/ps2dev/share/ps2-packer/stub/lzma-1d00-stub.
+Stub PC = 01D0001C
+Removing 0 zeroes to section...
+Loaded stub: 00002B14 bytes (with 000001EC zeroes) based at 01D00000
+Opening packer /usr/local/ps2dev/share/ps2-packer/module/lzma-packer.so.
+Preparing output elf file.
+Packing.
+ELF PC = 002109E0
+Removing 6 zeroes to section...
+Loaded section: 0014464C bytes (with 000983DA zeroes) based at 00200000
+Section packed, from 1328710 to 510309 bytes, ratio = 61.59%
+Final base address: 01C83680
+Writing stub.
+All data written, writing program header.
+Done!
+File compressed, from 1338384 to 521460 bytes, ratio = 61.04%
+[build-standard] rc=0
+
+===== build EXFAT =====
+rm -f /__w/ps2-magicgate-inspector/ps2-magicgate-inspector/out/UNC_FMCBInstaller_EXFAT.elf  main.o iop.o UI.o menu.o libsecr.o pad.o system.o mg_inspector.o graphics.o ReqSpaceCalc.o font.o background.o buttons.o IOPRP_img.o IOMANX_irx.o FILEXIO_irx.o SIO2MAN_irx.o PADMAN_irx.o MCMAN_irx.o MCSERV_irx.o SECRSIF_irx.o MCTOOLS_irx.o USBD_irx.o POWEROFF_irx.o DEV9_irx.o ATAD_irx.o HDD_irx.o PFS_irx.o mctools_rpc.o usbmass_bd_irx.o bdm_irx.o bdmfs_fatfs_irx.o *_irx.c background.c buttons.c IOPRP_img.c
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c main.c -o main.o
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c iop.c -o iop.o
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c UI.c -o UI.o
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c menu.c -o menu.o
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c libsecr.c -o libsecr.o
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c pad.c -o pad.o
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c system.c -o system.o
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c mg_inspector.c -o mg_inspector.o
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c graphics.c -o graphics.o
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c ReqSpaceCalc.c -o ReqSpaceCalc.o
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c font.c -o font.o
+bin2c resources/background.png background.c background
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c background.c -o background.o
+bin2c resources/buttons.png buttons.c buttons
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c buttons.c -o buttons.o
+bin2c irx/compiled/IOPRP.img IOPRP_img.c IOPRP_img
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c IOPRP_img.c -o IOPRP_img.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/iomanX.irx IOMANX_irx.c IOMANX_irx
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c IOMANX_irx.c -o IOMANX_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/fileXio.irx FILEXIO_irx.c FILEXIO_irx
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c FILEXIO_irx.c -o FILEXIO_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/freesio2.irx SIO2MAN_irx.c SIO2MAN_irx
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c SIO2MAN_irx.c -o SIO2MAN_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/freepad.irx PADMAN_irx.c PADMAN_irx
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c PADMAN_irx.c -o PADMAN_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/mcman.irx MCMAN_irx.c MCMAN_irx
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c MCMAN_irx.c -o MCMAN_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/mcserv.irx MCSERV_irx.c MCSERV_irx
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c MCSERV_irx.c -o MCSERV_irx.o
+bin2c irx/compiled/secrsif.irx SECRSIF_irx.c SECRSIF_irx
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c SECRSIF_irx.c -o SECRSIF_irx.o
+bin2c irx/compiled/mctools.irx MCTOOLS_irx.c MCTOOLS_irx
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c MCTOOLS_irx.c -o MCTOOLS_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/usbd.irx USBD_irx.c USBD_irx
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c USBD_irx.c -o USBD_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/poweroff.irx POWEROFF_irx.c POWEROFF_irx
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c POWEROFF_irx.c -o POWEROFF_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/ps2dev9.irx DEV9_irx.c DEV9_irx
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c DEV9_irx.c -o DEV9_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/ps2atad.irx ATAD_irx.c ATAD_irx
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c ATAD_irx.c -o ATAD_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/ps2hdd-osd.irx HDD_irx.c HDD_irx
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c HDD_irx.c -o HDD_irx.o
+bin2c /usr/local/ps2dev/ps2sdk/iop/irx/ps2fs.irx PFS_irx.c PFS_irx
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c PFS_irx.c -o PFS_irx.o
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c mctools_rpc.c -o mctools_rpc.o
+bin2c irx/compiled/usbmass_bd.irx usbmass_bd_irx.c usbmass_bd_irx
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c usbmass_bd_irx.c -o usbmass_bd_irx.o
+bin2c irx/compiled/bdm.irx bdm_irx.c bdm_irx
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c bdm_irx.c -o bdm_irx.o
+bin2c irx/compiled/bdmfs_fatfs.irx bdmfs_fatfs_irx.c bdmfs_fatfs_irx
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -I/usr/local/ps2dev/ps2sdk/ports/include -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -I./irx/source/secrsif/src -I./irx/source/mctools/src/ -c bdmfs_fatfs_irx.c -o bdmfs_fatfs_irx.o
+ee-gcc -Os -mgpopt -G8192 -DEXFAT -DFMCB_INSTALLER_VERSION=\"MGCI-596e61a2\" -nostartfiles -L/usr/local/ps2dev/ps2sdk/ports/lib -L/usr/local/ps2dev/ps2sdk/ee/lib -L/usr/local/ps2dev/ee/ee/lib -Tlinkfile -s -o /__w/ps2-magicgate-inspector/ps2-magicgate-inspector/out/UNC_FMCBInstaller_EXFAT.elf main.o iop.o UI.o menu.o libsecr.o pad.o system.o mg_inspector.o graphics.o ReqSpaceCalc.o font.o background.o buttons.o IOPRP_img.o IOMANX_irx.o FILEXIO_irx.o SIO2MAN_irx.o PADMAN_irx.o MCMAN_irx.o MCSERV_irx.o SECRSIF_irx.o MCTOOLS_irx.o USBD_irx.o POWEROFF_irx.o DEV9_irx.o ATAD_irx.o HDD_irx.o PFS_irx.o mctools_rpc.o usbmass_bd_irx.o bdm_irx.o bdmfs_fatfs_irx.o /usr/local/ps2dev/ps2sdk/ee/startup/crt0.o -lgs -lpng -lz -lm -lfreetype -lpoweroff -lcdvd -lmc -lpadx -lhdd -lfileXio -lpatches -liopreboot -lc -lkernel
+ -- Compressing
+ps2-packer -v /__w/ps2-magicgate-inspector/ps2-magicgate-inspector/out/UNC_FMCBInstaller_EXFAT.elf /__w/ps2-magicgate-inspector/ps2-magicgate-inspector/out/FMCBInstaller_EXFAT.elf
+PS2-Packer v1.1.0 (C) 2004-2005 Nicolas "Pixel" Noble
+This is free software with ABSOLUTELY NO WARRANTY.
+
+Compressing /__w/ps2-magicgate-inspector/ps2-magicgate-inspector/out/UNC_FMCBInstaller_EXFAT.elf...
+Loading stub file /usr/local/ps2dev/share/ps2-packer/stub/lzma-1d00-stub.
+Stub PC = 01D0001C
+Removing 0 zeroes to section...
+Loaded stub: 00002B14 bytes (with 000001EC zeroes) based at 01D00000
+Opening packer /usr/local/ps2dev/share/ps2-packer/module/lzma-packer.so.
+Preparing output elf file.
+Packing.
+ELF PC = 00210A18
+Removing 6 zeroes to section...
+Loaded section: 00145E68 bytes (with 000983BE zeroes) based at 00200000
+Section packed, from 1334882 to 514654 bytes, ratio = 61.45%
+Final base address: 01C82580
+Writing stub.
+All data written, writing program header.
+Done!
+File compressed, from 1344564 to 525812 bytes, ratio = 60.89%
+[build-exfat] rc=0
+
+===== SUCCESS =====
+0c72ba9d72ac11f2ade289057baa699e4e3a0d8c79414ae0eb908ede886774fd  ./exfat/FMCBInstaller-MGCI-EXFAT.elf
+9d386d125e712935401979bba480eae56ecefaa6dcab852392aae89349b1ffd0  ./exfat/UNC_FMCBInstaller-MGCI-EXFAT.elf
+8bae989a03535802454dd304d0f375b418c60f51508b8ee36e6f1db7d537ea12  ./standard/FMCBInstaller-MGCI.elf
+b32ca6f88feec8190d2830712a405770d44b8513403ed7dfac5aa22d32776eac  ./standard/UNC_FMCBInstaller-MGCI.elf
