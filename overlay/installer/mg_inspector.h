@@ -1,6 +1,7 @@
 #ifndef MG_INSPECTOR_H
 #define MG_INSPECTOR_H
 
+/* CI source marker: changes under overlay/ intentionally trigger PS2DEV builds. */
 #define MG_INSPECTOR_VERSION "0.1.0"
 
 #define MG_TEST_NOT_RUN (-1)
