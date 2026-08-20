@@ -6,13 +6,17 @@ on:
     branches: [ main ]
     paths:
       - 'overlay/**'
+      - 'tests/**'
       - 'apply_magicgate_patch.py'
+      - 'apply_pcsx2_harness_patch.py'
       - '.github/workflows/build.yml'
   push:
     branches: [ main ]
     paths:
       - 'overlay/**'
+      - 'tests/**'
       - 'apply_magicgate_patch.py'
+      - 'apply_pcsx2_harness_patch.py'
       - '.github/workflows/build.yml'
 
 permissions:
@@ -28,6 +32,10 @@ jobs:
         with:
           path: mgci
 
+      - name: Verify emulator/hardware safety contract
+        shell: bash
+        run: python3 mgci/tests/test_contract.py
+
       - name: Fetch pinned FreeMcBoot Installer upstream
         shell: bash
         run: |
@@ -35,12 +43,14 @@ jobs:
           git clone https://github.com/israpps/FreeMcBoot-Installer.git fmcb
           git -C fmcb checkout ac53a47a5c6eae675cc2611c7bebe62f56c7845c
 
-      - name: Apply MGCI patch
+      - name: Apply MGCI and PCSX2 harness patches
         shell: bash
         run: |
           set -euo pipefail
           python3 mgci/apply_magicgate_patch.py "$GITHUB_WORKSPACE/fmcb"
-          grep -n "mg_inspector" fmcb/installer/Makefile fmcb/installer/menu.c fmcb/installer/system.c
+          python3 mgci/apply_pcsx2_harness_patch.py "$GITHUB_WORKSPACE/fmcb"
+          grep -n "mg_inspector\|mg_pcsx2_test" \
+            fmcb/installer/Makefile fmcb/installer/main.c fmcb/installer/menu.c fmcb/installer/system.c
 
       - name: Build standard installer in PS2DEV v1.0
         shell: bash
