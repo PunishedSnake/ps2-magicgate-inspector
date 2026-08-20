@@ -1,12 +1,12 @@
 #ifndef MG_INSPECTOR_H
 #define MG_INSPECTOR_H
 
-/* CI source marker: changes under overlay/ intentionally trigger PS2DEV builds. */
-#define MG_INSPECTOR_VERSION "0.1.0"
+#define MG_INSPECTOR_VERSION "0.2.0"
 
-#define MG_TEST_NOT_RUN (-1)
-#define MG_TEST_FAIL      0
-#define MG_TEST_PASS      1
+#define MG_TEST_NOT_RUN      (-1)
+#define MG_TEST_FAIL           0
+#define MG_TEST_PASS           1
+#define MG_TEST_HARDWARE_ONLY  2
 
 typedef struct MGInspectorResult {
     int port;
@@ -21,6 +21,9 @@ typedef struct MGInspectorResult {
     int rw_test;
     int rw_error;
 
+    int cleanup_test;
+    int cleanup_error;
+
     int kelf_load_test;
     int kelf_error;
     int kelf_size;
@@ -32,21 +35,20 @@ typedef struct MGInspectorResult {
     int kbit_nonzero;
     int kc_nonzero;
 
+    int emulator_qualification_pass;
     int full_pass;
 } MGInspectorResult;
 
-/*
- * Runs a non-destructive compatibility test against a memory card.
- * The only card-side write is a temporary 4 KiB file in the card root,
- * which is deleted before the function returns.
- *
- * The MagicGate test loads INSTALL/SYSTEM/FMCB.XLF into RAM and runs the
- * same SecrDownloadFile() path used by the normal FMCB installer. The
- * signed test buffer is never written to the card by this function.
- */
+/* Production qualification. MagicGate binding is mandatory. */
 int MGInspectorRun(int port, int slot, MGInspectorResult *result);
 
-/* Render a compact, human-readable report suitable for ShowMessageBox(). */
+/*
+ * Emulator qualification. This exercises all emulatable card/filesystem/KELF
+ * behavior but can never set full_pass or unlock the production force-install
+ * path. MagicGate-only fields are marked MG_TEST_HARDWARE_ONLY.
+ */
+int MGInspectorRunEmulator(int port, int slot, MGInspectorResult *result);
+
 void MGInspectorFormatReport(const MGInspectorResult *result, char *buffer, unsigned int buffer_size);
 
 #endif
