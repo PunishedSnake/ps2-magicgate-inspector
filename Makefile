@@ -1,3 +1,5 @@
+.DEFAULT_GOAL := all
+
 EE_BIN = MC_INSPECTOR.ELF
 EE_OBJS = src/main.o freesio2_irx.o freepad_irx.o mcman_irx.o mcserv_irx.o
 EE_LIBS = -ldebug -lpad -lmc -lpatches -lkernel
