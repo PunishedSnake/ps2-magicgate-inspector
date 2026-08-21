@@ -1,22 +1,10 @@
 /*
  * PS2 Memory Card Inspector
  * -------------------------
- * Standalone diagnostic utility for PlayStation 2 memory cards.
- *
- * Design rules:
- *   - inspection is non-destructive unless the user explicitly formats;
- *   - raw XMCMAN results remain visible for diagnosis;
- *   - generic I/O failures never imply that formatting is safe;
- *   - destructive actions require a second, deliberate confirmation.
+ * v0.2.0 Briscoe separates ordinary filesystem health from MagicGate/KELF
+ * capability.  A card can pass one layer and fail the other; the UI never
+ * collapses those two facts into a single vague "unsupported card" result.
  */
-
-/*
- * libmc talks directly to the IOP memory-card server.  Its mcOpen() mode is
- * therefore an IOP/FIO mode, not a POSIX/newlib mode.  NEWLIB_PORT_AWARE lets
- * us include io_common.h explicitly and use the FIO_O_* constants without
- * accidentally feeding newlib's O_RDONLY/O_WRONLY values to XMCMAN.
- */
-#define NEWLIB_PORT_AWARE
 
 #include <tamtypes.h>
 #include <kernel.h>
@@ -27,72 +15,20 @@
 #include <libmc.h>
 #include <libpad.h>
 #include <debug.h>
-#include <io_common.h>
 #include <stdio.h>
 #include <string.h>
 
-#define APP_VERSION "0.1.1-dev"
-#define APP_CODENAME "Columbo"
-#define TEST_SIZE 4096
+#include "card.h"
+#include "magicgate.h"
+
+#define APP_VERSION "0.2.0-dev1"
+#define APP_CODENAME "Briscoe"
 #define SLOT_COUNT 2
 
-typedef enum CardHealth {
-    CARD_UNKNOWN = 0,
-    CARD_OK,
-    CARD_FULL,
-    CARD_UNFORMATTED,
-    CARD_FILESYSTEM_BROKEN,
-    CARD_IO_FAILURE,
-    CARD_AUTH_FAILURE,
-    CARD_DETECT_FAILURE,
-    CARD_NO_CARD
-} CardHealth;
-
-typedef enum RwStage {
-    RW_NOT_RUN = 0,
-    RW_FIND_NAME,
-    RW_VERIFY_CARD,
-    RW_OPEN_WRITE,
-    RW_WRITE,
-    RW_FLUSH,
-    RW_CLOSE_WRITE,
-    RW_OPEN_READ,
-    RW_READ,
-    RW_CLOSE_READ,
-    RW_COMPARE,
-    RW_DELETE,
-    RW_VERIFY_DELETE,
-    RW_DONE
-} RwStage;
-
-typedef struct CardReport {
-    int port;
-    int info_rc;
-    int type;
-    int free_clusters;
-    int formatted;
-    int root_rc;
-    int rw_rc;
-    int cleanup_rc;
-    int format_allowed;
-    CardHealth health;
-    RwStage rw_stage;
-} CardReport;
-
-/* libpad/libmc DMA-facing buffers need cache-friendly alignment on the EE. */
 static unsigned char PadBuffer[256] __attribute__((aligned(64)));
-static unsigned char WriteBuffer[TEST_SIZE] __attribute__((aligned(64)));
-static unsigned char ReadBuffer[TEST_SIZE] __attribute__((aligned(64)));
-static sceMcTblGetDir DirEntry __attribute__((aligned(64)));
 static CardReport Reports[SLOT_COUNT];
-
-/* libmc operations are asynchronous RPC requests. */
-static int McSyncResult(void)
-{
-    int result = -999;
-    mcSync(MC_WAIT, NULL, &result);
-    return result;
-}
+static MagicGateReport MgReports[SLOT_COUNT];
+static MagicGateIopStatus MgIopStatus;
 
 static int LoadRomModule(const char *path, const char *name)
 {
@@ -109,25 +45,25 @@ static int LoadRomModule(const char *path, const char *name)
 }
 
 /*
- * Initialize a coherent Sony X-module stack.
- *
- * v0.1.0 originally mixed ordinary mcman/mcserv with MC_TYPE_XMC.  The ROM
- * X stack below is coherent with the XMCSERV RPC protocol used by libmc.
+ * Initialize the ordinary X memory-card stack first, then add PS2SDK's open
+ * SECRMAN/SECRSIF pair.  MagicGate is deliberately optional: a SECR bring-up
+ * failure must not make the basic memory-card inspector unusable.
  */
 static int InitIopAndDevices(void)
 {
     int rc;
+    int mg_rc;
 
-    scr_printf("[IOP 1/7] Initializing SIF RPC...\n");
+    scr_printf("[IOP 1/8] Initializing SIF RPC...\n");
     SifInitRpc(0);
 
-    scr_printf("[IOP 2/7] Requesting IOP reset (NULL args)...\n");
+    scr_printf("[IOP 2/8] Requesting IOP reset (NULL args)...\n");
     while (!SifIopReset(NULL, 0)) {;}
-    scr_printf("[IOP 2/7] Reset request accepted.\n");
+    scr_printf("[IOP 2/8] Reset request accepted.\n");
 
-    scr_printf("[IOP 3/7] Waiting for IOP sync...\n");
+    scr_printf("[IOP 3/8] Waiting for IOP sync...\n");
     while (!SifIopSync()) {;}
-    scr_printf("[IOP 3/7] IOP synchronized.\n");
+    scr_printf("[IOP 3/8] IOP synchronized.\n");
 
     SifInitRpc(0);
     rc = SifLoadFileInit();
@@ -136,9 +72,7 @@ static int InitIopAndDevices(void)
         return rc;
     }
 
-    scr_printf("[IOP 4/7] Loading ROM X modules...\n");
-
-    /* One XSIO2MAN instance services both XPADMAN and XMCMAN. */
+    scr_printf("[IOP 4/8] Loading ROM X modules...\n");
     rc = LoadRomModule("rom0:XSIO2MAN", "XSIO2MAN");
     if (rc < 0) return rc;
     rc = LoadRomModule("rom0:XPADMAN", "XPADMAN");
@@ -148,372 +82,83 @@ static int InitIopAndDevices(void)
     rc = LoadRomModule("rom0:XMCSERV", "XMCSERV");
     if (rc < 0) return rc;
 
+    scr_printf("[IOP 5/8] Loading MagicGate SECR modules...\n");
+    mg_rc = MagicGateLoadIopModules(&MgIopStatus);
+    scr_printf("[SECR] secrman: load=%d start=%d\n",
+               MgIopStatus.secrman_load_rc, MgIopStatus.secrman_start_rc);
+    scr_printf("[SECR] secrsif: load=%d start=%d\n",
+               MgIopStatus.secrsif_load_rc, MgIopStatus.secrsif_start_rc);
+    if (mg_rc < 0)
+        scr_printf("[SECR] WARNING: MagicGate disabled (rc=%d).\n", mg_rc);
+    else
+        scr_printf("[SECR] MagicGate RPC servers staged.\n");
+
     SifLoadFileExit();
 
-    scr_printf("[IOP 5/7] Binding libmc to XMCSERV...\n");
+    scr_printf("[IOP 6/8] Binding libmc to XMCSERV...\n");
     rc = mcInit(MC_TYPE_XMC);
     if (rc < 0) {
-        scr_printf("[IOP 5/7] mcInit FAILED: %d\n", rc);
+        scr_printf("[IOP 6/8] mcInit FAILED: %d\n", rc);
         return rc;
     }
-    scr_printf("[IOP 5/7] mcInit OK: %d\n", rc);
+    scr_printf("[IOP 6/8] mcInit OK: %d\n", rc);
 
-    scr_printf("[IOP 6/7] Initializing libpad...\n");
+    scr_printf("[IOP 7/8] Initializing libpad...\n");
     rc = padInit(0);
     if (rc == 0) {
-        scr_printf("[IOP 6/7] padInit FAILED.\n");
+        scr_printf("[IOP 7/8] padInit FAILED.\n");
         return -1;
     }
-    scr_printf("[IOP 6/7] padInit OK.\n");
+    scr_printf("[IOP 7/8] padInit OK.\n");
 
-    scr_printf("[IOP 7/7] Opening controller port 0...\n");
+    scr_printf("[IOP 8/8] Opening controller port 0...\n");
     if (padPortOpen(0, 0, PadBuffer) == 0) {
-        scr_printf("[IOP 7/7] padPortOpen FAILED.\n");
+        scr_printf("[IOP 8/8] padPortOpen FAILED.\n");
         return -2;
     }
-    scr_printf("[IOP 7/7] Controller port open.\n");
+    scr_printf("[IOP 8/8] Controller port open.\n");
 
     return 0;
 }
 
-/* Deterministic non-trivial data catches more than an all-zero write. */
-static void FillPattern(void)
+static void InspectAndInvalidateMagicGate(int port)
 {
-    unsigned int i;
-    unsigned int state = 0x4D43494Eu; /* "MCIN" */
-
-    for (i = 0; i < sizeof(WriteBuffer); i++) {
-        state = state * 1664525u + 1013904223u;
-        WriteBuffer[i] = (unsigned char)((state >> 24) ^ i ^ (i >> 4));
-    }
+    CardInspect(port, &Reports[port]);
+    MagicGateResetReport(&MgReports[port], port);
 }
 
-static int CloseFile(int fd)
+static void RenderHeader(int selected, int view)
 {
-    mcClose(fd);
-    return McSyncResult();
+    scr_printf("PS2 Memory Card Inspector v%s - %s\n", APP_VERSION, APP_CODENAME);
+    scr_printf("PS2DEV 2.0 / XMCMAN + staged SECR diagnostics\n\n");
+    scr_printf("< LEFT/RIGHT > slot   X filesystem   SQUARE MagicGate\n");
+    scr_printf("START both filesystems   R1 %s   SELECT exit\n\n",
+               view ? "card view" : "MG details");
+    scr_printf("Selected: SLOT %d (mc%d:)\n", selected + 1, selected);
 }
 
-static int DeleteFile(int port, const char *name)
-{
-    mcDelete(port, 0, name);
-    return McSyncResult();
-}
-
-static const char *RwStageText(RwStage stage)
-{
-    switch (stage) {
-        case RW_FIND_NAME: return "FIND TEMP NAME";
-        case RW_VERIFY_CARD: return "VERIFY SAME CARD";
-        case RW_OPEN_WRITE: return "OPEN-WRITE";
-        case RW_WRITE: return "WRITE";
-        case RW_FLUSH: return "FLUSH";
-        case RW_CLOSE_WRITE: return "CLOSE-WRITE";
-        case RW_OPEN_READ: return "OPEN-READ";
-        case RW_READ: return "READ";
-        case RW_CLOSE_READ: return "CLOSE-READ";
-        case RW_COMPARE: return "COMPARE";
-        case RW_DELETE: return "DELETE";
-        case RW_VERIFY_DELETE: return "VERIFY DELETE";
-        case RW_DONE: return "DONE";
-        default: return "NOT RUN";
-    }
-}
-
-static const char *McResultText(int rc)
-{
-    switch (rc) {
-        case sceMcResSucceed: return "OK";
-        case sceMcResChangedCard: return "CARD CHANGED";
-        case sceMcResNoFormat: return "NO FORMAT";
-        case sceMcResFullDevice: return "FULL DEVICE";
-        case sceMcResNoEntry: return "NO ENTRY";
-        case sceMcResDeniedPermit: return "DENIED PERMIT";
-        case sceMcResNotEmpty: return "NOT EMPTY";
-        case sceMcResUpLimitHandle: return "HANDLE LIMIT";
-        case sceMcResFailReplace: return "REPLACE FAILED";
-        case sceMcResFailResetAuth: return "AUTH RESET FAILED";
-        case sceMcResFailDetect: return "DETECT FAILED";
-        case sceMcResFailDetect2: return "DETECT FAILED 2";
-        case sceMcResDeniedPS1Permit: return "PS1 PERMISSION DENIED";
-        case sceMcResFailAuth: return "AUTH FAILED";
-        default: return "OTHER";
-    }
-}
-
-/* Never overwrite a user's file while choosing a temporary test filename. */
-static int FindUnusedTempName(int port, char *name)
-{
-    int i;
-    int rc;
-
-    for (i = 0; i < 100; i++) {
-        sprintf(name, "/__MCI%02d.TMP", i);
-        memset(&DirEntry, 0, sizeof(DirEntry));
-        mcGetDir(port, 0, name, 0, 1, &DirEntry);
-        rc = McSyncResult();
-
-        if (rc == 0 || rc == sceMcResNoEntry)
-            return 0;
-        if (rc < 0)
-            return rc;
-        /* Positive result: exact filename exists; try the next candidate. */
-    }
-
-    return -1000;
-}
-
-/*
- * Verify that the card did not change between the read-only probe and the
- * destructive part of the integrity test.  A second mcGetInfo() on the same
- * card should return 0; a changed card returns sceMcResChangedCard.
- */
-static int VerifySameCard(int port)
-{
-    int type = 0;
-    int free_clusters = 0;
-    int formatted = 0;
-
-    mcGetInfo(port, 0, &type, &free_clusters, &formatted);
-    return McSyncResult();
-}
-
-/*
- * End-to-end filesystem integrity test:
- * create -> write -> flush -> close -> reopen -> read -> compare -> delete.
- *
- * IMPORTANT: mcOpen() is a libmc/IOP call.  FIO_O_* must be used here.  The
- * POSIX O_RDONLY/O_WRONLY values supplied by newlib are not the IOP values and
- * caused the v0.1.0 hardware build to return sceMcResDeniedPermit (-5) on
- * perfectly healthy cards.
- */
-static int RunReadWriteTest(int port, int *cleanup_rc, RwStage *stage)
-{
-    char path[24];
-    int fd;
-    int rc;
-
-    *cleanup_rc = 0;
-    *stage = RW_FIND_NAME;
-    FillPattern();
-    memset(ReadBuffer, 0, sizeof(ReadBuffer));
-
-    rc = FindUnusedTempName(port, path);
-    if (rc < 0)
-        return rc;
-
-    *stage = RW_VERIFY_CARD;
-    rc = VerifySameCard(port);
-    if (rc != sceMcResSucceed)
-        return rc;
-
-    /*
-     * The candidate was just proven absent and this is a single-process test,
-     * so truncation is unnecessary.  Avoiding FIO_O_TRUNC also reduces the
-     * destructive surface if a card is swapped at exactly the wrong moment.
-     */
-    *stage = RW_OPEN_WRITE;
-    mcOpen(port, 0, path, FIO_O_WRONLY | FIO_O_CREAT);
-    fd = McSyncResult();
-    if (fd < 0)
-        return fd;
-
-    *stage = RW_WRITE;
-    mcWrite(fd, WriteBuffer, sizeof(WriteBuffer));
-    rc = McSyncResult();
-    if (rc != (int)sizeof(WriteBuffer)) {
-        CloseFile(fd);
-        *cleanup_rc = DeleteFile(port, path);
-        return (rc < 0) ? rc : -1001;
-    }
-
-    *stage = RW_FLUSH;
-    mcFlush(fd);
-    rc = McSyncResult();
-    if (rc < 0) {
-        CloseFile(fd);
-        *cleanup_rc = DeleteFile(port, path);
-        return rc;
-    }
-
-    *stage = RW_CLOSE_WRITE;
-    rc = CloseFile(fd);
-    if (rc < 0) {
-        *cleanup_rc = DeleteFile(port, path);
-        return rc;
-    }
-
-    *stage = RW_OPEN_READ;
-    mcOpen(port, 0, path, FIO_O_RDONLY);
-    fd = McSyncResult();
-    if (fd < 0) {
-        *cleanup_rc = DeleteFile(port, path);
-        return fd;
-    }
-
-    *stage = RW_READ;
-    mcRead(fd, ReadBuffer, sizeof(ReadBuffer));
-    rc = McSyncResult();
-    if (rc != (int)sizeof(ReadBuffer)) {
-        CloseFile(fd);
-        *cleanup_rc = DeleteFile(port, path);
-        return (rc < 0) ? rc : -1002;
-    }
-
-    *stage = RW_CLOSE_READ;
-    rc = CloseFile(fd);
-    if (rc < 0) {
-        *cleanup_rc = DeleteFile(port, path);
-        return rc;
-    }
-
-    *stage = RW_COMPARE;
-    if (memcmp(WriteBuffer, ReadBuffer, sizeof(WriteBuffer)) != 0) {
-        *cleanup_rc = DeleteFile(port, path);
-        return -1003;
-    }
-
-    *stage = RW_DELETE;
-    *cleanup_rc = DeleteFile(port, path);
-    if (*cleanup_rc < 0)
-        return -1004;
-
-    *stage = RW_VERIFY_DELETE;
-    memset(&DirEntry, 0, sizeof(DirEntry));
-    mcGetDir(port, 0, path, 0, 1, &DirEntry);
-    rc = McSyncResult();
-    if (rc != 0 && rc != sceMcResNoEntry)
-        return -1005;
-
-    *stage = RW_DONE;
-    return 0;
-}
-
-/*
- * Classify one memory-card port.  Authentication/detection errors are checked
- * before MC_TYPE_NONE because a failed probe can leave type at NONE.
- */
-static void InspectCard(int port)
-{
-    CardReport *r = &Reports[port];
-
-    memset(r, 0, sizeof(*r));
-    r->port = port;
-    r->root_rc = -999;
-    r->rw_rc = -999;
-    r->cleanup_rc = 0;
-    r->rw_stage = RW_NOT_RUN;
-    r->health = CARD_UNKNOWN;
-
-    mcGetInfo(port, 0, &r->type, &r->free_clusters, &r->formatted);
-    r->info_rc = McSyncResult();
-
-    if (r->info_rc == sceMcResFailAuth) {
-        r->health = CARD_AUTH_FAILURE;
-        return;
-    }
-    if (r->info_rc <= sceMcResFailDetect) {
-        r->health = CARD_DETECT_FAILURE;
-        return;
-    }
-    if (r->type == MC_TYPE_NONE) {
-        r->health = CARD_NO_CARD;
-        return;
-    }
-    if (r->info_rc == sceMcResNoFormat || !r->formatted) {
-        r->health = CARD_UNFORMATTED;
-        r->format_allowed = (r->type == MC_TYPE_PS2);
-        return;
-    }
-
-    memset(&DirEntry, 0, sizeof(DirEntry));
-    mcGetDir(port, 0, "/*", 0, 1, &DirEntry);
-    r->root_rc = McSyncResult();
-
-    if (r->root_rc == sceMcResNoFormat) {
-        r->health = CARD_FILESYSTEM_BROKEN;
-        r->format_allowed = (r->type == MC_TYPE_PS2);
-        return;
-    }
-    if (r->root_rc == sceMcResFailAuth) {
-        r->health = CARD_AUTH_FAILURE;
-        return;
-    }
-    if (r->root_rc <= sceMcResFailDetect) {
-        r->health = CARD_DETECT_FAILURE;
-        return;
-    }
-    if (r->root_rc < 0 && r->root_rc != sceMcResNoEntry) {
-        r->health = CARD_IO_FAILURE;
-        return;
-    }
-
-    r->rw_rc = RunReadWriteTest(port, &r->cleanup_rc, &r->rw_stage);
-
-    if (r->rw_rc == 0) {
-        r->health = CARD_OK;
-    } else if (r->rw_rc == sceMcResFullDevice) {
-        r->health = CARD_FULL;
-    } else if (r->rw_rc == sceMcResNoFormat) {
-        r->health = CARD_FILESYSTEM_BROKEN;
-        r->format_allowed = (r->type == MC_TYPE_PS2);
-    } else if (r->rw_rc == sceMcResFailAuth) {
-        r->health = CARD_AUTH_FAILURE;
-    } else if (r->rw_rc <= sceMcResFailDetect) {
-        r->health = CARD_DETECT_FAILURE;
-    } else {
-        r->health = CARD_IO_FAILURE;
-    }
-}
-
-static const char *HealthText(CardHealth health)
-{
-    switch (health) {
-        case CARD_OK: return "PASS";
-        case CARD_FULL: return "FULL - R/W TEST COULD NOT RUN";
-        case CARD_UNFORMATTED: return "UNFORMATTED / FRESH";
-        case CARD_FILESYSTEM_BROKEN: return "FILESYSTEM BROKEN / NO FORMAT";
-        case CARD_IO_FAILURE: return "I/O FAILURE";
-        case CARD_AUTH_FAILURE: return "CARD AUTHENTICATION FAILURE";
-        case CARD_DETECT_FAILURE: return "CARD DETECTION FAILURE";
-        case CARD_NO_CARD: return "NO CARD";
-        default: return "UNKNOWN";
-    }
-}
-
-static const char *TypeText(int type)
-{
-    switch (type) {
-        case MC_TYPE_NONE: return "none";
-        case MC_TYPE_PSX: return "PS1";
-        case MC_TYPE_PS2: return "PS2";
-        case MC_TYPE_POCKET: return "PocketStation/PDA";
-        default: return "non-standard/unknown";
-    }
-}
-
-static void Render(int selected, int confirm_format, int last_format_rc)
+static void RenderCardView(int selected, int confirm_format, int last_format_rc)
 {
     CardReport *r = &Reports[selected];
+    MagicGateReport *mg = &MgReports[selected];
 
-    scr_clear();
-    scr_printf("PS2 Memory Card Inspector v%s - %s\n", APP_VERSION, APP_CODENAME);
-    scr_printf("PS2DEV 2.0 / X-module diagnostic build\n\n");
-    scr_printf("< LEFT / RIGHT > select slot    X test    START test both\n");
-    scr_printf("SELECT exit\n\n");
+    RenderHeader(selected, 0);
+    scr_printf("Filesystem health: %s\n", CardHealthText(r->health));
+    scr_printf("MagicGate/KELF:    %s\n\n", MagicGateResultText(mg->result));
 
-    scr_printf("Selected: SLOT %d (mc%d:)\n", selected + 1, selected);
-    scr_printf("Health: %s\n", HealthText(r->health));
-    scr_printf("mcGetInfo rc: %d (%s)\n", r->info_rc, McResultText(r->info_rc));
-    scr_printf("Reported type: %d (%s)\n", r->type, TypeText(r->type));
+    scr_printf("mcGetInfo rc: %d (%s)\n", r->info_rc, CardResultText(r->info_rc));
+    scr_printf("Reported type: %d (%s)\n", r->type, CardTypeText(r->type));
     scr_printf("Formatted flag: %d\n", r->formatted);
     scr_printf("Free clusters: %d\n", r->free_clusters);
-    scr_printf("Root directory rc: %d (%s)\n", r->root_rc, McResultText(r->root_rc));
-    scr_printf("R/W stage: %s\n", RwStageText(r->rw_stage));
-    scr_printf("4 KiB R/W rc: %d (%s)\n", r->rw_rc, McResultText(r->rw_rc));
-    scr_printf("Cleanup rc: %d (%s)\n\n", r->cleanup_rc, McResultText(r->cleanup_rc));
+    scr_printf("Root directory rc: %d (%s)\n", r->root_rc, CardResultText(r->root_rc));
+    scr_printf("R/W stage: %s\n", CardRwStageText(r->rw_stage));
+    scr_printf("4 KiB R/W rc: %d (%s)\n", r->rw_rc, CardResultText(r->rw_rc));
+    scr_printf("Cleanup rc: %d (%s)\n\n", r->cleanup_rc, CardResultText(r->cleanup_rc));
 
-    scr_printf("Other slot: mc%d: %s\n\n", selected ^ 1, HealthText(Reports[selected ^ 1].health));
+    scr_printf("Other slot: mc%d: FS=%s  MG=%s\n\n",
+               selected ^ 1,
+               CardHealthText(Reports[selected ^ 1].health),
+               MagicGateResultText(MgReports[selected ^ 1].result));
 
     if (r->format_allowed) {
         if (!confirm_format) {
@@ -529,21 +174,63 @@ static void Render(int selected, int confirm_format, int last_format_rc)
     }
 
     if (last_format_rc != -999)
-        scr_printf("\nLast format rc: %d (%s)\n", last_format_rc, McResultText(last_format_rc));
+        scr_printf("Last format rc: %d (%s)\n",
+                   last_format_rc, CardResultText(last_format_rc));
 
-    scr_printf("\nRaw XMCMAN errors are shown intentionally for diagnosis.\n");
+    if (r->type == MC_TYPE_PS2)
+        scr_printf("SQUARE runs a RAM-only MagicGate/KELF bind probe.\n");
+    else
+        scr_printf("MagicGate probe requires a detected PS2 card.\n");
 }
 
-/* Destructive primitive; the caller must already have passed both UI gates. */
-static int FormatCard(int port)
+static void RenderMagicGateView(int selected)
 {
-    int rc;
+    MagicGateReport *mg = &MgReports[selected];
 
-    mcFormat(port, 0);
-    rc = McSyncResult();
-    if (rc == 0)
-        InspectCard(port);
-    return rc;
+    RenderHeader(selected, 1);
+    scr_printf("Filesystem: %s\n", CardHealthText(Reports[selected].health));
+    scr_printf("MagicGate:  %s\n", MagicGateResultText(mg->result));
+    scr_printf("MG stage:   %s\n\n", MagicGateStageText(mg->stage));
+
+    scr_printf("SECR modules: %s\n", MgIopStatus.available ? "AVAILABLE" : "UNAVAILABLE");
+    scr_printf("  secrman load/start: %d / %d\n",
+               MgIopStatus.secrman_load_rc, MgIopStatus.secrman_start_rc);
+    scr_printf("  secrsif load/start: %d / %d\n",
+               MgIopStatus.secrsif_load_rc, MgIopStatus.secrsif_start_rc);
+    scr_printf("SECR RPC bind/transport rc: %d\n\n", mg->rpc_rc);
+
+    if (mg->source_port >= 0) {
+        scr_printf("KELF source: mc%d:%s\n", mg->source_port, mg->source_path);
+        scr_printf("KELF size: %d bytes   source I/O rc: %d\n",
+                   mg->source_size, mg->source_io_rc);
+    } else {
+        scr_printf("KELF source: none found\n");
+        scr_printf("Looks for FMCB osdmain.elf on the other slot first.\n");
+    }
+
+    scr_printf("\nDownload header: %d   reply size: %d\n",
+               mg->header_rc, mg->header_reply_size);
+    scr_printf("BIT blocks: %d   encrypted: %d   completed: %d\n",
+               mg->block_count, mg->encrypted_blocks, mg->blocks_completed);
+    scr_printf("Failed block: %d\n", mg->failed_block);
+    scr_printf("Get Kbit: %d\n", mg->kbit_rc);
+    scr_printf("Get Kc:   %d\n", mg->kc_rc);
+    if (mg->icvps2_required)
+        scr_printf("Get ICVPS2: %d (required)\n", mg->icvps2_rc);
+    else
+        scr_printf("Get ICVPS2: N/A\n");
+
+    scr_printf("\nNo KELF or card data is written by this probe.\n");
+    scr_printf("SQUARE: run again   R1: return to card view\n");
+}
+
+static void Render(int selected, int view, int confirm_format, int last_format_rc)
+{
+    scr_clear();
+    if (view)
+        RenderMagicGateView(selected);
+    else
+        RenderCardView(selected, confirm_format, last_format_rc);
 }
 
 static u32 ReadPadPressed(u32 *held)
@@ -573,6 +260,7 @@ static u32 ReadPadPressed(u32 *held)
 int main(int argc, char *argv[])
 {
     int selected = 0;
+    int view = 0;
     int confirm_format = 0;
     int last_format_rc = -999;
     int init_rc;
@@ -585,8 +273,8 @@ int main(int argc, char *argv[])
 
     init_scr();
     scr_clear();
-    scr_printf("PS2 Memory Card Inspector\n");
-    scr_printf("Initializing IOP and memory-card services...\n");
+    scr_printf("PS2 Memory Card Inspector - Briscoe bring-up\n");
+    scr_printf("Initializing IOP, memory-card and SECR services...\n");
 
     init_rc = InitIopAndDevices();
     if (init_rc < 0) {
@@ -596,12 +284,12 @@ int main(int argc, char *argv[])
     }
 
     scr_printf("\nInitialization complete. Inspecting slots...\n");
-    InspectCard(0);
-    InspectCard(1);
+    InspectAndInvalidateMagicGate(0);
+    InspectAndInvalidateMagicGate(1);
 
     while (1) {
         if (dirty) {
-            Render(selected, confirm_format, last_format_rc);
+            Render(selected, view, confirm_format, last_format_rc);
             dirty = 0;
         }
 
@@ -614,8 +302,10 @@ int main(int argc, char *argv[])
             if (pressed & PAD_CIRCLE) {
                 confirm_format = 0;
                 dirty = 1;
-            } else if ((pressed & PAD_TRIANGLE) && (held & PAD_L1) && (held & PAD_R1)) {
-                last_format_rc = FormatCard(selected);
+            } else if ((pressed & PAD_TRIANGLE) &&
+                       (held & PAD_L1) && (held & PAD_R1)) {
+                last_format_rc = CardFormat(selected, &Reports[selected]);
+                MagicGateResetReport(&MgReports[selected], selected);
                 confirm_format = 0;
                 dirty = 1;
             }
@@ -626,19 +316,33 @@ int main(int argc, char *argv[])
                 dirty = 1;
             }
 
+            if (pressed & PAD_R1) {
+                view ^= 1;
+                dirty = 1;
+            }
+
             if (pressed & PAD_CROSS) {
-                InspectCard(selected);
+                InspectAndInvalidateMagicGate(selected);
+                view = 0;
                 dirty = 1;
             }
 
             if (pressed & PAD_START) {
-                InspectCard(0);
-                InspectCard(1);
+                InspectAndInvalidateMagicGate(0);
+                InspectAndInvalidateMagicGate(1);
+                view = 0;
+                dirty = 1;
+            }
+
+            if ((pressed & PAD_SQUARE) && Reports[selected].type == MC_TYPE_PS2) {
+                MagicGateProbeCard(selected, &MgReports[selected]);
+                view = 1;
                 dirty = 1;
             }
 
             if ((pressed & PAD_TRIANGLE) && Reports[selected].format_allowed) {
                 confirm_format = 1;
+                view = 0;
                 dirty = 1;
             }
         }
