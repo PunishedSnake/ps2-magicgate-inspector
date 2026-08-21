@@ -15,42 +15,35 @@ This roadmap describes intended feature boundaries, not promises of exact releas
 - manually confirmed format path for fresh or explicitly unformatted PS2 cards;
 - PS2DEV CI build and artifact generation.
 
-Status: **hardware-validated baseline**.
+Status: **hardware-validated for the baseline filesystem pipeline on real PS2 hardware**.
 
 ## v0.2.0 — Briscoe
 
-**Theme:** better evidence before drawing conclusions.
+**Theme:** separate filesystem health, MagicGate capability and installation readiness.
 
-In progress / planned:
+In active development:
 
-- decode and document more MCMAN return codes;
-- preserve per-stage timing and result data;
-- improve handling of full or nearly full cards so read-only diagnostics can still run;
-- add a structured on-screen detail view;
-- export a compact diagnostic report to mass storage when available;
-- add hardware regression cases discovered during Columbo testing;
-- keep filesystem health and MagicGate/KELF capability as independent results;
-- use one coherent PS2SDK 2.0 stack: special SECRMAN at IOP reboot, followed by freesio2/freepad/XMCMAN/XMCSERV/SECRSIF;
-- stage the KELF binding protocol and report header, encrypted blocks, Kbit, Kc and ICVPS2 separately;
-- keep the MagicGate probe RAM-only and non-destructive.
+- decode and document more XMCMAN return codes;
+- preserve per-stage result data;
+- structured card / MagicGate / FMCB preflight views;
+- coherent PS2SDK 2.0 XMCMAN + special SECRMAN stack;
+- non-destructive staged MagicGate/KELF bind probe;
+- report `DownloadHeader`, encrypted blocks, Kbit, Kc and ICVPS2 separately;
+- optional `mass:` backend using PS2SDK iomanX/fileXio/USBD/USBHDFSD;
+- read-only discovery and validation of a user-supplied `mass:/FMCB` package;
+- console-region detection and installation-plan generation;
+- keep FreeMcBoot payloads out of Inspector builds and releases.
 
-### Optional local FMCB installation
+Planned before enabling FMCB writes:
 
-Briscoe may also gain an optional installer mode without becoming another FreeMcBoot Installer fork.
+- required-space calculation;
+- model/ROM handling, especially early Japanese consoles;
+- destination collision inventory and backup plan;
+- transactional copy/bind/write/read-back verification;
+- explicit rollback/recovery reporting;
+- hardware validation of the SECR stack and package source backend.
 
-The intended rules are deliberately strict:
-
-1. The Inspector remains fully useful when no FMCB package is present.
-2. The program never bundles FreeMcBoot payloads. A user-supplied package must be present on a supported local source, initially `mass:`.
-3. The package is validated before the target card is modified: required files, readable source data, sane sizes/layout and sufficient free space.
-4. The selected target must pass the relevant detection/filesystem preflight and the MagicGate/KELF preflight required for the chosen installation mode. Generic I/O errors never unlock installation.
-5. Installation has a separate destructive-action confirmation showing source and target.
-6. Existing destination content is backed up when practical or installation aborts; there is no blind-overwrite policy.
-7. KELF binding uses the same audited SECR backend as the Inspector rather than a second hidden implementation.
-8. Every written file is reopened and verified. Partial installation is reported explicitly and recovery information is retained where possible.
-9. The target is re-inspected after installation and filesystem and MagicGate results remain separate.
-
-The current FreeMcBoot Installer repository does not expose a clear root-level software licence. Therefore the Inspector will not copy its installer implementation wholesale. The preferred approach is a small independent install engine built over documented PS2SDK APIs and the observed on-card FMCB layout, with user-provided payload files. If upstream licensing is clarified later, individual components can be reconsidered with proper attribution.
+The FMCB commit path remains disabled until those prerequisites are proven on hardware.
 
 ## v0.3.0 — Poirot
 
@@ -59,10 +52,10 @@ The current FreeMcBoot Installer repository does not expose a clear root-level s
 Planned research and implementation:
 
 - richer card capability fingerprinting instead of relying only on the reported type;
-- distinguish filesystem compatibility from authentication/MagicGate capability;
-- compare behavior of official, licensed and third-party cards;
-- expand non-destructive standalone MagicGate investigation from Briscoe hardware data;
-- keep any KELF test data legally and technically separate from copyrighted FMCB payloads.
+- compare official, licensed and third-party cards;
+- persist fingerprints from known hardware test cases;
+- distinguish unusual-but-working cards from cards that fail a specific MagicGate stage;
+- expand compatibility heuristics only when backed by captured hardware evidence.
 
 ## v0.4.0 — Kojak
 
@@ -92,7 +85,7 @@ Potential scope:
 
 ## v0.6.0+ — open investigation
 
-Candidates include deeper MagicGate/KELF diagnostics, card fingerprint databases, counterfeit/compatibility heuristics and expanded repair tooling. These should only be promoted into numbered milestones once the preceding hardware evidence justifies them.
+Candidates include deeper card fingerprint databases, counterfeit/compatibility heuristics, expanded repair tooling and additional package-source backends. These should only be promoted into numbered milestones once preceding hardware evidence justifies them.
 
 ## v1.0.0 — Inspector Gadget
 
