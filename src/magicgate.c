@@ -1,14 +1,10 @@
 /*
  * PS2 Memory Card Inspector - MagicGate / KELF diagnostics
  *
- * This module deliberately avoids the all-or-nothing SecrDownloadFile()
- * helper.  The Inspector needs to know which individual SECR operation failed,
- * and it must never hang forever waiting for an RPC server.  Therefore the
- * five download RPC endpoints are bound with finite retries and exercised one
- * stage at a time.
- *
- * The KELF is only modified inside EE RAM.  No bound Kbit/Kc/ICVPS2 data is
- * written back to a memory card by this module.
+ * Briscoe dev4 keeps ordinary card I/O and experimental SECR work in separate
+ * IOP personalities.  A test KELF is acquired while the known-good normal ROM
+ * XMCMAN stack is active, retained in EE RAM, then exercised by the isolated
+ * SECR session.  The resulting bound data is never written back to a card.
  */
 
 #define NEWLIB_PORT_AWARE
@@ -74,6 +70,10 @@ void MagicGateResetReport(MagicGateReport *report, int target_port)
     report->target_port = target_port;
     report->source_port = -1;
     report->source_io_rc = -999;
+    report->session_setup_rc = -999;
+    report->session_mcinit_rc = -999;
+    report->session_mcinfo_rc = -999;
+    report->restore_rc = -999;
     report->rpc_rc = -999;
     report->header_rc = -999;
     report->header_reply_size = -1;
@@ -85,27 +85,38 @@ void MagicGateResetReport(MagicGateReport *report, int target_port)
     report->result = MG_RESULT_NOT_RUN;
 }
 
-/*
- * SECRMAN is already resident because main.c rebooted the IOP with a tiny
- * ioprpgen-generated image containing PS2SDK's special SECRMAN.  XMCMAN is
- * loaded afterwards and registers its card-command/device-ID callbacks with
- * that resident SECRMAN.  Loading another SECRMAN here would break exactly the
- * relationship Briscoe is trying to test, so this function only starts the
- * EE-facing SECRSIF RPC bridge.
- */
+void MagicGateResetKelfBuffer(MagicGateKelfBuffer *buffer)
+{
+    memset(buffer, 0, sizeof(*buffer));
+    buffer->source_port = -1;
+}
+
+void MagicGateReleaseKelf(MagicGateKelfBuffer *buffer)
+{
+    if (buffer->data != NULL)
+        free(buffer->data);
+    MagicGateResetKelfBuffer(buffer);
+}
+
+/* SECRMAN is resident from the special IOPRP. This starts only SECRSIF. */
 int MagicGateLoadIopModules(MagicGateIopStatus *status)
 {
     int rc;
     int start_rc = -999;
 
     memset(status, 0, sizeof(*status));
-    status->secrman_load_rc = 0;  /* resident from the IOPRP reboot */
+    status->secrman_load_rc = 0;
     status->secrman_start_rc = 0;
     status->secrsif_load_rc = -999;
     status->secrsif_start_rc = -999;
 
     SecrIopAvailable = 0;
     RpcBound = 0;
+    memset(&RpcDownloadHeader, 0, sizeof(RpcDownloadHeader));
+    memset(&RpcDownloadBlock, 0, sizeof(RpcDownloadBlock));
+    memset(&RpcGetKbit, 0, sizeof(RpcGetKbit));
+    memset(&RpcGetKc, 0, sizeof(RpcGetKc));
+    memset(&RpcGetIcvps2, 0, sizeof(RpcGetIcvps2));
 
     rc = SifExecModuleBuffer(secrsif_irx, size_secrsif_irx, 0, NULL, &start_rc);
     status->secrsif_load_rc = rc;
@@ -124,7 +135,6 @@ static int BindRpc(SifRpcClientData_t *client, int server_id)
     int rc = 0;
 
     memset(client, 0, sizeof(*client));
-
     for (i = 0; i < MG_RPC_RETRIES; i++) {
         rc = sceSifBindRpc(client, server_id, 0);
         if (rc >= 0 && client->server != NULL)
@@ -287,7 +297,6 @@ static int FindKelfSource(int target_port, MagicGateReport *report)
     int i;
     int rc;
 
-    /* Prefer the other slot: this is ideal for testing a blank/rejected card. */
     ports[0] = target_port ^ 1;
     ports[1] = target_port;
 
@@ -317,7 +326,6 @@ static int ReadKelfSource(const MagicGateReport *report, unsigned char **out_buf
     if (report->source_size <= 0 || report->source_size > MG_MAX_KELF_SIZE)
         return MG_INVALID_LAYOUT;
 
-    /* Extra zero padding makes the fixed 0x400-byte SECR RPC copy safe. */
     alloc_size = report->source_size + 0x400;
     buffer = memalign(64, alloc_size);
     if (buffer == NULL)
@@ -382,25 +390,15 @@ static int ValidateKelf(const unsigned char *buffer, int size)
     return 0;
 }
 
-int MagicGateProbeCard(int target_port, MagicGateReport *report)
+int MagicGatePrepareKelf(int target_port, MagicGateKelfBuffer *buffer,
+                         MagicGateReport *report)
 {
-    unsigned char *kelf = NULL;
-    unsigned char kbit[16];
-    unsigned char kc[16];
-    unsigned char icvps2[8];
-    const SecrKELFHeader_t *kelf_header;
-    SecrBitTable_t bit_table;
-    unsigned int offset;
-    unsigned int block_size;
+    const SecrKELFHeader_t *header;
+    unsigned char *data = NULL;
     int rc;
-    int i;
 
     MagicGateResetReport(report, target_port);
-
-    if (!SecrIopAvailable) {
-        report->result = MG_RESULT_SECR_UNAVAILABLE;
-        return -1;
-    }
+    MagicGateResetKelfBuffer(buffer);
 
     report->stage = MG_STAGE_FIND_KELF;
     rc = FindKelfSource(target_port, report);
@@ -411,7 +409,7 @@ int MagicGateProbeCard(int target_port, MagicGateReport *report)
     }
 
     report->stage = MG_STAGE_READ_KELF;
-    rc = ReadKelfSource(report, &kelf);
+    rc = ReadKelfSource(report, &data);
     if (rc < 0) {
         report->source_io_rc = rc;
         report->result = MG_RESULT_IO_ERROR;
@@ -419,47 +417,97 @@ int MagicGateProbeCard(int target_port, MagicGateReport *report)
     }
 
     report->stage = MG_STAGE_VALIDATE_KELF;
-    rc = ValidateKelf(kelf, report->source_size);
+    rc = ValidateKelf(data, report->source_size);
     if (rc < 0) {
         report->source_io_rc = rc;
         report->result = MG_RESULT_INVALID_KELF;
-        free(kelf);
+        free(data);
         return -1;
     }
-    kelf_header = (const SecrKELFHeader_t *)kelf;
-    report->icvps2_required = (kelf_header->flags >> 1) & 1;
+
+    buffer->data = data;
+    buffer->size = report->source_size;
+    buffer->source_port = report->source_port;
+    snprintf(buffer->source_path, sizeof(buffer->source_path), "%s",
+             report->source_path);
+
+    header = (const SecrKELFHeader_t *)data;
+    report->icvps2_required = (header->flags >> 1) & 1;
+    report->source_io_rc = 0;
+    report->stage = MG_STAGE_SESSION_SETUP;
+    report->result = MG_RESULT_NOT_RUN;
+    return 0;
+}
+
+int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
+                           MagicGateReport *report)
+{
+    unsigned char kbit[16];
+    unsigned char kc[16];
+    unsigned char icvps2[8];
+    SecrBitTable_t bit_table;
+    unsigned int offset;
+    unsigned int block_size;
+    int type = 0;
+    int free_clusters = 0;
+    int formatted = 0;
+    int rc;
+    int i;
+
+    if (buffer == NULL || buffer->data == NULL || buffer->size <= 0) {
+        report->result = MG_RESULT_INVALID_KELF;
+        return -1;
+    }
+
+    if (!SecrIopAvailable) {
+        report->result = MG_RESULT_SECR_UNAVAILABLE;
+        return -1;
+    }
+
+    report->stage = MG_STAGE_SESSION_CARD_CHECK;
+    mcGetInfo(target_port, 0, &type, &free_clusters, &formatted);
+    rc = McSyncResult();
+    report->session_mcinfo_rc = rc;
+    report->session_type = type;
+    report->session_free_clusters = free_clusters;
+    report->session_formatted = formatted;
+
+    if (rc < 0 && rc != sceMcResNoFormat) {
+        report->result = MG_RESULT_SESSION_CARD_ERROR;
+        return -1;
+    }
+    if (type != MC_TYPE_PS2) {
+        report->result = MG_RESULT_TARGET_NOT_PS2;
+        return -1;
+    }
 
     report->stage = MG_STAGE_BIND_RPC;
     rc = BindDownloadRpc();
     report->rpc_rc = rc;
     if (rc < 0) {
         report->result = MG_RESULT_RPC_UNAVAILABLE;
-        free(kelf);
         return -1;
     }
 
     memset(&bit_table, 0, sizeof(bit_table));
     report->stage = MG_STAGE_DOWNLOAD_HEADER;
-    rc = DownloadHeader(target_port, 0, kelf, &bit_table,
+    rc = DownloadHeader(target_port, 0, buffer->data, &bit_table,
                         &report->header_reply_size);
     if (rc < 0) {
         report->rpc_rc = rc;
         report->result = MG_RESULT_RPC_UNAVAILABLE;
-        free(kelf);
         return -1;
     }
     report->header_rc = rc;
     if (rc == 0) {
         report->result = MG_RESULT_HEADER_FAILED;
-        free(kelf);
         return -1;
     }
 
     report->block_count = bit_table.header.block_count;
     if (report->block_count < 0 || report->block_count > 63 ||
-        bit_table.header.headersize > (unsigned int)report->source_size) {
+        bit_table.header.headersize > (unsigned int)buffer->size) {
         report->result = MG_RESULT_INVALID_KELF;
-        free(kelf);
         return -1;
     }
 
@@ -467,29 +515,26 @@ int MagicGateProbeCard(int target_port, MagicGateReport *report)
     offset = bit_table.header.headersize;
     for (i = 0; i < report->block_count; i++) {
         block_size = bit_table.blocks[i].size;
-        if (offset > (unsigned int)report->source_size ||
-            block_size > (unsigned int)report->source_size - offset ||
+        if (offset > (unsigned int)buffer->size ||
+            block_size > (unsigned int)buffer->size - offset ||
             block_size > 0x400) {
             report->failed_block = i;
             report->result = MG_RESULT_INVALID_KELF;
-            free(kelf);
             return -1;
         }
 
         if (bit_table.blocks[i].flags & 2) {
             report->encrypted_blocks++;
-            rc = DownloadBlock(kelf + offset, (int)block_size);
+            rc = DownloadBlock(buffer->data + offset, (int)block_size);
             if (rc < 0) {
                 report->rpc_rc = rc;
                 report->failed_block = i;
                 report->result = MG_RESULT_RPC_UNAVAILABLE;
-                free(kelf);
                 return -1;
             }
             if (rc == 0) {
                 report->failed_block = i;
                 report->result = MG_RESULT_BLOCK_FAILED;
-                free(kelf);
                 return -1;
             }
             report->blocks_completed++;
@@ -503,13 +548,11 @@ int MagicGateProbeCard(int target_port, MagicGateReport *report)
     if (rc < 0) {
         report->rpc_rc = rc;
         report->result = MG_RESULT_RPC_UNAVAILABLE;
-        free(kelf);
         return -1;
     }
     report->kbit_rc = rc;
     if (rc == 0) {
         report->result = MG_RESULT_KBIT_FAILED;
-        free(kelf);
         return -1;
     }
 
@@ -518,13 +561,11 @@ int MagicGateProbeCard(int target_port, MagicGateReport *report)
     if (rc < 0) {
         report->rpc_rc = rc;
         report->result = MG_RESULT_RPC_UNAVAILABLE;
-        free(kelf);
         return -1;
     }
     report->kc_rc = rc;
     if (rc == 0) {
         report->result = MG_RESULT_KC_FAILED;
-        free(kelf);
         return -1;
     }
 
@@ -534,20 +575,17 @@ int MagicGateProbeCard(int target_port, MagicGateReport *report)
         if (rc < 0) {
             report->rpc_rc = rc;
             report->result = MG_RESULT_RPC_UNAVAILABLE;
-            free(kelf);
             return -1;
         }
         report->icvps2_rc = rc;
         if (rc == 0) {
             report->result = MG_RESULT_ICVPS2_FAILED;
-            free(kelf);
             return -1;
         }
     }
 
     report->stage = MG_STAGE_DONE;
     report->result = MG_RESULT_PASS;
-    free(kelf);
     return 0;
 }
 
@@ -557,6 +595,8 @@ const char *MagicGateStageText(MagicGateStage stage)
         case MG_STAGE_FIND_KELF: return "FIND TEST KELF";
         case MG_STAGE_READ_KELF: return "READ TEST KELF";
         case MG_STAGE_VALIDATE_KELF: return "VALIDATE KELF";
+        case MG_STAGE_SESSION_SETUP: return "SETUP MG SESSION";
+        case MG_STAGE_SESSION_CARD_CHECK: return "MG SESSION CARD CHECK";
         case MG_STAGE_BIND_RPC: return "BIND SECR RPC";
         case MG_STAGE_DOWNLOAD_HEADER: return "DOWNLOAD HEADER";
         case MG_STAGE_DOWNLOAD_BLOCKS: return "DOWNLOAD BLOCKS";
@@ -575,6 +615,8 @@ const char *MagicGateResultText(MagicGateResult result)
         case MG_RESULT_NO_TEST_KELF: return "NO TEST KELF";
         case MG_RESULT_IO_ERROR: return "KELF READ ERROR";
         case MG_RESULT_INVALID_KELF: return "INVALID/UNSUPPORTED KELF";
+        case MG_RESULT_SESSION_SETUP_FAILED: return "MG SESSION SETUP FAILED";
+        case MG_RESULT_SESSION_CARD_ERROR: return "MG SESSION CARD ERROR";
         case MG_RESULT_RPC_UNAVAILABLE: return "SECR RPC FAILURE";
         case MG_RESULT_HEADER_FAILED: return "HEADER BIND FAILED";
         case MG_RESULT_BLOCK_FAILED: return "BLOCK BIND FAILED";
@@ -582,6 +624,7 @@ const char *MagicGateResultText(MagicGateResult result)
         case MG_RESULT_KC_FAILED: return "KC FAILED";
         case MG_RESULT_ICVPS2_FAILED: return "ICVPS2 FAILED";
         case MG_RESULT_SECR_UNAVAILABLE: return "SECR MODULES UNAVAILABLE";
+        case MG_RESULT_TARGET_NOT_PS2: return "TARGET IS NOT A PS2 CARD";
         default: return "NOT RUN";
     }
 }
