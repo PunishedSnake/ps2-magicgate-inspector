@@ -21,16 +21,22 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Verify host Docker
+        shell: bash
+        run: docker --version
 
       - name: Build standalone ELF in PS2DEV v2.0.0
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p artifacts
+          docker pull ps2dev/ps2dev:v2.0.0
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/work" \
             -w /work \
