@@ -2,8 +2,7 @@
  * PS2 Memory Card Inspector
  * -------------------------
  * v0.2.0 Briscoe separates ordinary filesystem health from MagicGate/KELF
- * capability.  A card can pass one layer and fail the other; the UI never
- * collapses those two facts into a single vague "unsupported card" result.
+ * capability and adds a read-only preflight for user-supplied FMCB packages.
  */
 
 #include <tamtypes.h>
@@ -26,10 +25,15 @@
 
 #include "card.h"
 #include "magicgate.h"
+#include "fmcb_install.h"
 
-#define APP_VERSION "0.2.0-dev2"
+#define APP_VERSION "0.2.0-dev3"
 #define APP_CODENAME "Briscoe"
 #define SLOT_COUNT 2
+#define VIEW_CARD 0
+#define VIEW_MAGICGATE 1
+#define VIEW_FMCB 2
+#define VIEW_COUNT 3
 
 extern unsigned char freesio2_irx[];
 extern unsigned int size_freesio2_irx;
@@ -46,6 +50,8 @@ static unsigned char PadBuffer[256] __attribute__((aligned(64)));
 static CardReport Reports[SLOT_COUNT];
 static MagicGateReport MgReports[SLOT_COUNT];
 static MagicGateIopStatus MgIopStatus;
+static FmcbMassBackendStatus FmcbMassStatus;
+static FmcbPackageReport FmcbReports[SLOT_COUNT];
 
 static int LoadEmbeddedModule(const unsigned char *module, unsigned int size,
                               const char *name)
@@ -63,12 +69,7 @@ static int LoadEmbeddedModule(const unsigned char *module, unsigned int size,
     return rc;
 }
 
-/*
- * Build the smallest possible IOPRP containing the PS2SDK special SECRMAN.
- * ioprpgen adds RESET/ROMDIR/EXTINFO itself.  Rebooting with this image is
- * important: merely loading a second SECRMAN after the ROM memory-card stack
- * is already initialized leaves the new SECRMAN without XMCMAN callbacks.
- */
+/* Build the smallest possible IOPRP containing PS2SDK's special SECRMAN. */
 static int RebootIopWithSecrman(void)
 {
     struct ioprpgen_ctx ctx;
@@ -113,13 +114,8 @@ static int RebootIopWithSecrman(void)
 
 /*
  * Initialize one coherent PS2SDK stack:
- *
- *   runtime IOPRP: special SECRMAN
- *   -> freesio2 -> freepad -> XMCMAN -> XMCSERV -> SECRSIF
- *
- * PS2SDK's mcman.irx/mcserv.irx are built as XMCMAN/XMCSERV by default.  By
- * loading XMCMAN after the SECRMAN reboot, its init code registers the card
- * command and device-ID callbacks that SECRMAN needs for real MagicGate I/O.
+ * runtime IOPRP: special SECRMAN
+ * -> freesio2 -> freepad -> XMCMAN -> XMCSERV -> SECRSIF
  */
 static int InitIopAndDevices(void)
 {
@@ -204,11 +200,17 @@ static void InspectAndInvalidateMagicGate(int port)
 
 static void RenderHeader(int selected, int view)
 {
+    const char *page = "CARD";
+
+    if (view == VIEW_MAGICGATE)
+        page = "MAGICGATE";
+    else if (view == VIEW_FMCB)
+        page = "FMCB PREFLIGHT";
+
     scr_printf("PS2 Memory Card Inspector v%s - %s\n", APP_VERSION, APP_CODENAME);
-    scr_printf("PS2DEV 2.0 / coherent XMCMAN + SECR stack\n\n");
+    scr_printf("PS2DEV 2.0 / coherent XMCMAN + SECR stack / %s\n\n", page);
     scr_printf("< LEFT/RIGHT > slot   X filesystem   SQUARE MagicGate\n");
-    scr_printf("START both filesystems   R1 %s   SELECT exit\n\n",
-               view ? "card view" : "MG details");
+    scr_printf("CIRCLE FMCB scan   R1 next page   START test both   SELECT exit\n\n");
     scr_printf("Selected: SLOT %d (mc%d:)\n", selected + 1, selected);
 }
 
@@ -217,9 +219,11 @@ static void RenderCardView(int selected, int confirm_format, int last_format_rc)
     CardReport *r = &Reports[selected];
     MagicGateReport *mg = &MgReports[selected];
 
-    RenderHeader(selected, 0);
+    RenderHeader(selected, VIEW_CARD);
     scr_printf("Filesystem health: %s\n", CardHealthText(r->health));
-    scr_printf("MagicGate/KELF:    %s\n\n", MagicGateResultText(mg->result));
+    scr_printf("MagicGate/KELF:    %s\n", MagicGateResultText(mg->result));
+    scr_printf("FMCB package:      %s\n\n",
+               FmcbPackageStatusText(FmcbReports[selected].status));
 
     scr_printf("mcGetInfo rc: %d (%s)\n", r->info_rc, CardResultText(r->info_rc));
     scr_printf("Reported type: %d (%s)\n", r->type, CardTypeText(r->type));
@@ -251,18 +255,13 @@ static void RenderCardView(int selected, int confirm_format, int last_format_rc)
     if (last_format_rc != -999)
         scr_printf("Last format rc: %d (%s)\n",
                    last_format_rc, CardResultText(last_format_rc));
-
-    if (r->type == MC_TYPE_PS2)
-        scr_printf("SQUARE runs a RAM-only MagicGate/KELF bind probe.\n");
-    else
-        scr_printf("MagicGate probe requires a detected PS2 card.\n");
 }
 
 static void RenderMagicGateView(int selected)
 {
     MagicGateReport *mg = &MgReports[selected];
 
-    RenderHeader(selected, 1);
+    RenderHeader(selected, VIEW_MAGICGATE);
     scr_printf("Filesystem: %s\n", CardHealthText(Reports[selected].health));
     scr_printf("MagicGate:  %s\n", MagicGateResultText(mg->result));
     scr_printf("MG stage:   %s\n\n", MagicGateStageText(mg->stage));
@@ -296,14 +295,63 @@ static void RenderMagicGateView(int selected)
         scr_printf("Get ICVPS2: N/A\n");
 
     scr_printf("\nNo KELF or card data is written by this probe.\n");
-    scr_printf("SQUARE: run again   R1: return to card view\n");
+}
+
+static void RenderFmcbView(int selected)
+{
+    FmcbPackageReport *report = &FmcbReports[selected];
+    int i;
+    int shown_missing = 0;
+
+    RenderHeader(selected, VIEW_FMCB);
+    scr_printf("Filesystem:   %s\n", CardHealthText(Reports[selected].health));
+    scr_printf("MagicGate:    %s\n", MagicGateResultText(MgReports[selected].result));
+    scr_printf("mass backend: %s\n\n", FmcbMassStatus.available ? "AVAILABLE" : "UNAVAILABLE");
+
+    scr_printf("Package: %s\n", FmcbPackageStatusText(report->status));
+    scr_printf("Source:  %s\n",
+               report->source_root[0] ? report->source_root : "mass:/FMCB (not resolved)");
+    scr_printf("Source probe rc: %d\n", report->source_probe_rc);
+
+    if (report->status != FMCB_PACKAGE_NOT_SCANNED &&
+        report->status != FMCB_PACKAGE_SOURCE_UNAVAILABLE &&
+        report->status != FMCB_PACKAGE_NOT_FOUND) {
+        scr_printf("ROMVER region: %c   FMCB region: %c\n",
+                   report->plan.romver_region ? report->plan.romver_region : '?',
+                   report->plan.region_letter ? report->plan.region_letter : '?');
+        scr_printf("Target system: %s\n", report->plan.destination_system);
+        scr_printf("Required: %d/%d   missing: %d   optional: %d/%d\n",
+                   report->found_required, report->plan.required_files,
+                   report->missing_required, report->found_optional,
+                   report->plan.optional_files);
+        scr_printf("Found payload bytes: %u\n", report->total_found_bytes);
+        scr_printf("KELFs requiring bind: %d\n\n", report->plan.kelf_files);
+
+        if (report->missing_required > 0) {
+            scr_printf("Missing required files:\n");
+            for (i = 0; i < report->entry_count && shown_missing < 4; i++) {
+                FmcbPackageFileStatus *file = &report->files[i];
+                if (!file->found && (file->flags & FMCB_FILE_REQUIRED)) {
+                    scr_printf("  - %s (rc=%d)\n", file->relative_path, file->stat_rc);
+                    shown_missing++;
+                }
+            }
+            if (report->missing_required > shown_missing)
+                scr_printf("  ...and %d more\n", report->missing_required - shown_missing);
+        }
+    }
+
+    scr_printf("\nCIRCLE: rescan user package\n");
+    scr_printf("INSTALL: DISABLED IN DEV3 (preflight is read-only)\n");
 }
 
 static void Render(int selected, int view, int confirm_format, int last_format_rc)
 {
     scr_clear();
-    if (view)
+    if (view == VIEW_MAGICGATE)
         RenderMagicGateView(selected);
+    else if (view == VIEW_FMCB)
+        RenderFmcbView(selected);
     else
         RenderCardView(selected, confirm_format, last_format_rc);
 }
@@ -335,10 +383,11 @@ static u32 ReadPadPressed(u32 *held)
 int main(int argc, char *argv[])
 {
     int selected = 0;
-    int view = 0;
+    int view = VIEW_CARD;
     int confirm_format = 0;
     int last_format_rc = -999;
     int init_rc;
+    int fmcb_rc;
     int dirty = 1;
     u32 held;
     u32 pressed;
@@ -358,9 +407,18 @@ int main(int argc, char *argv[])
         SleepThread();
     }
 
+    scr_printf("\n[FMCB] Initializing optional mass: package source...\n");
+    fmcb_rc = FmcbInitMassBackend(&FmcbMassStatus);
+    if (fmcb_rc < 0)
+        scr_printf("[FMCB] mass: backend unavailable: %d (Inspector continues)\n", fmcb_rc);
+    else
+        scr_printf("[FMCB] mass: backend ready.\n");
+
     scr_printf("\nInitialization complete. Inspecting slots...\n");
     InspectAndInvalidateMagicGate(0);
     InspectAndInvalidateMagicGate(1);
+    FmcbResetPackageReport(&FmcbReports[0], 0);
+    FmcbResetPackageReport(&FmcbReports[1], 1);
 
     while (1) {
         if (dirty) {
@@ -381,6 +439,7 @@ int main(int argc, char *argv[])
                        (held & PAD_L1) && (held & PAD_R1)) {
                 last_format_rc = CardFormat(selected, &Reports[selected]);
                 MagicGateResetReport(&MgReports[selected], selected);
+                FmcbResetPackageReport(&FmcbReports[selected], selected);
                 confirm_format = 0;
                 dirty = 1;
             }
@@ -392,32 +451,39 @@ int main(int argc, char *argv[])
             }
 
             if (pressed & PAD_R1) {
-                view ^= 1;
+                view = (view + 1) % VIEW_COUNT;
                 dirty = 1;
             }
 
             if (pressed & PAD_CROSS) {
                 InspectAndInvalidateMagicGate(selected);
-                view = 0;
+                view = VIEW_CARD;
                 dirty = 1;
             }
 
             if (pressed & PAD_START) {
                 InspectAndInvalidateMagicGate(0);
                 InspectAndInvalidateMagicGate(1);
-                view = 0;
+                view = VIEW_CARD;
                 dirty = 1;
             }
 
             if ((pressed & PAD_SQUARE) && Reports[selected].type == MC_TYPE_PS2) {
                 MagicGateProbeCard(selected, &MgReports[selected]);
-                view = 1;
+                view = VIEW_MAGICGATE;
+                dirty = 1;
+            }
+
+            if (pressed & PAD_CIRCLE) {
+                FmcbProbeMassPackage(selected, &FmcbMassStatus,
+                                     &FmcbReports[selected]);
+                view = VIEW_FMCB;
                 dirty = 1;
             }
 
             if ((pressed & PAD_TRIANGLE) && Reports[selected].format_allowed) {
                 confirm_format = 1;
-                view = 0;
+                view = VIEW_CARD;
                 dirty = 1;
             }
         }
