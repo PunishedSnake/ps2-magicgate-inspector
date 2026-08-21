@@ -11,7 +11,10 @@ The project uses semantic version numbers and detective/police release codenames
 - corrected the IOP/libmc initialization stack discovered during the first real-hardware test;
 - replaced the invalid combination of ordinary `mcman/mcserv` with `mcInit(MC_TYPE_XMC)` by the coherent ROM `XMCMAN/XMCSERV` + `MC_TYPE_XMC` stack;
 - changed the IOP reset argument from an empty string to the canonical `NULL` form;
-- added visible startup diagnostics for IOP reset/sync, every ROM module, `mcInit`, `padInit` and `padPortOpen`.
+- corrected memory-card open modes from POSIX/newlib `O_*` values to the IOP-native `FIO_O_*` values expected by XMCMAN;
+- eliminated the resulting false `sceMcResDeniedPermit (-5)` failures on healthy writable cards;
+- added visible startup diagnostics for IOP reset/sync, every ROM module, `mcInit`, `padInit` and `padPortOpen`;
+- added exact R/W stage reporting and symbolic XMCMAN/MCMAN error names.
 
 ### Changed
 
@@ -25,12 +28,16 @@ The project uses semantic version numbers and detective/police release codenames
 
 - PS2DEV 2.0.0 build: **passed**;
 - static ELF verification: **passed**;
-- corrected XMC stack on real PS2 hardware: **pending re-test**.
+- corrected XMC startup stack on real PS2 hardware: **passed**;
+- full 4 KiB create/write/flush/reopen/read/compare/delete test on both populated slots: **passed**;
+- a PS2 card that is refused by the FreeMcBoot installer nevertheless reports normal PS2 type/format metadata, readable root filesystem and a complete Inspector R/W `PASS`;
+- MagicGate/KELF binding remains **not yet tested by Inspector** and is the next diagnostic boundary.
 
 ### Planned
 
-- real-hardware re-validation of the corrected initialization path;
-- refinements based on captured XMCMAN results from official and third-party cards;
+- add a standalone, non-destructive MagicGate/KELF diagnostic that reports individual binding stages instead of collapsing them into a generic installer failure;
+- compare the FMCB-rejected regression card against a known-working FMCB card;
+- refinements based on captured XMCMAN/MagicGate results from official and third-party cards;
 - v0.2.0 **Briscoe** diagnostic/reporting work.
 
 ## [0.1.0] — Columbo
