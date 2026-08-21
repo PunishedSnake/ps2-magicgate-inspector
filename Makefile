@@ -8,6 +8,7 @@ EE_LDFLAGS = -Wl,--gc-sections
 # tiny runtime-generated IOPRP and becomes resident during the IOP reboot;
 # afterwards freesio2/freepad/XMCMAN/XMCSERV/SECRSIF are loaded from the same
 # PS2SDK build so XMCMAN can register its MagicGate callbacks with SECRMAN.
+# The generated IOPRP itself is never shipped as a borrowed binary blob.
 IRX_FILES = freesio2.irx freepad.irx mcman.irx mcserv.irx secrman.irx secrsif.irx
 EE_OBJS += $(IRX_FILES:.irx=_irx.o)
 
