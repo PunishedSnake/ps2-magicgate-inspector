@@ -15,7 +15,7 @@ EE_LDFLAGS = -Wl,--gc-sections
 # was incorrectly applied to every BIT entry, including large plaintext blocks
 # that are never sent through SecrDownloadBlock(). dev8 applies that limit only
 # to blocks marked for SECR download (flags & 2), matching SecrDownloadFile().
-# CI marker: dev8 hardware candidate.
+# CI marker: dev8 hardware candidate build 1.
 FMCB_SECR_COMMIT = ac53a47a5c6eae675cc2611c7bebe62f56c7845c
 FMCB_SECR_BASE = https://raw.githubusercontent.com/israpps/FreeMcBoot-Installer/$(FMCB_SECR_COMMIT)/installer/irx/compiled
 FMCB_SECR_DIR = .build/fmcb-secr-1.3
