@@ -14,30 +14,39 @@ The project uses semantic version numbers and detective/police release codenames
 - corrected memory-card open modes from POSIX/newlib `O_*` values to the IOP-native `FIO_O_*` values expected by XMCMAN;
 - eliminated the resulting false `sceMcResDeniedPermit (-5)` failures on healthy writable cards;
 - added visible startup diagnostics for IOP reset/sync, every ROM module, `mcInit`, `padInit` and `padPortOpen`;
-- added exact R/W stage reporting and symbolic XMCMAN/MCMAN error names.
+- added exact R/W stage reporting and symbolic XMCMAN/MCMAN error names;
+- corrected the Briscoe MagicGate probe so it no longer attempts to re-bind an already-bound `B?EXEC-SYSTEM/osdmain.elf` from a memory card;
+- MagicGate bind testing now requires a raw user-supplied `mass:/FMCB/SYSTEM/FMCB.XLF` (or mass0/mass1 equivalent), matching the input used by the FMCB installer before it creates `osdmain.elf`.
 
 ### Changed
 
 - migrated the active build from PS2DEV v1.0 to **PS2DEV 2.0.0**;
 - the CI toolchain now reports GCC 15.2.0 instead of the legacy GCC 3.2.3 environment;
-- removed embedded `freesio2`, `freepad`, `mcman` and `mcserv` IRXs from the ELF;
+- removed embedded `freesio2`, `freepad`, `mcman` and `mcserv` IRXs from the normal application personality;
 - removed the local `DelayThread()` compatibility shim and forced compatibility header;
-- the project now uses `rom0:XSIO2MAN`, `XPADMAN`, `XMCMAN` and `XMCSERV`.
+- the normal application uses `rom0:XSIO2MAN`, `XPADMAN`, `XMCMAN` and `XMCSERV`;
+- Briscoe runs MagicGate/KELF work in an isolated security session and restores the normal card stack afterwards;
+- the isolated security session uses the classic FreeMcBoot Installer `SECRMAN 1.3 + SECRSIF 1.3` compatibility pair;
+- `sceMcResChangedCard (-1)` after the security-session reboot is treated as a transient state notification rather than an authentication failure.
 
 ### Validation
 
 - PS2DEV 2.0.0 build: **passed**;
 - static ELF verification: **passed**;
 - corrected XMC startup stack on real PS2 hardware: **passed**;
-- full 4 KiB create/write/flush/reopen/read/compare/delete test on both populated slots: **passed**;
+- full 4 KiB create/write/flush/reopen/read/compare/delete test on both populated official Sony slots: **passed**;
 - a PS2 card that is refused by the FreeMcBoot installer nevertheless reports normal PS2 type/format metadata, readable root filesystem and a complete Inspector R/W `PASS`;
-- MagicGate/KELF binding remains **not yet tested by Inspector** and is the next diagnostic boundary.
+- a second official Sony card with a working FMCB installation also passes the normal card path;
+- Briscoe dev6 advanced both cards through security-session card detection and SECR RPC binding, but both returned `HEADER BIND FAILED` because the probe used the same already-bound `mc1:/BIEXEC-SYSTEM/osdmain.elf` as its input;
+- that dev6 header result is explicitly **not** considered a valid MagicGate verdict;
+- dev7 changes the comparison to use one identical raw `FMCB.XLF` from USB against both target cards.
 
 ### Planned
 
-- add a standalone, non-destructive MagicGate/KELF diagnostic that reports individual binding stages instead of collapsing them into a generic installer failure;
-- compare the FMCB-rejected regression card against a known-working FMCB card;
-- refinements based on captured XMCMAN/MagicGate results from official and third-party cards;
+- hardware-test the raw-XLF dev7 probe against the FMCB-rejected card and the known-working FMCB card;
+- continue through DownloadHeader/BIT block/Kbit/Kc/ICVPS2 classification once the raw input is validated;
+- detect or at least report CEX/DEX/MechaPWN-relevant console security state where practical;
+- finish read-only FMCB package preflight and only then design transactional installation writes;
 - v0.2.0 **Briscoe** diagnostic/reporting work.
 
 ## [0.1.0] — Columbo
