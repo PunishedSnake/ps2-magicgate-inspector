@@ -4,16 +4,14 @@ EE_LIBS = -ldebug -lpad -lmc -lfileXio -lioprpgen -liopreboot -lpatches -lkernel
 EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections
 EE_LDFLAGS = -Wl,--gc-sections
 
-# Briscoe embeds one coherent PS2SDK 2.0 IOP stack.  SECRMAN is placed into a
-# tiny runtime-generated IOPRP and becomes resident during the IOP reboot;
-# afterwards freesio2/freepad/XMCMAN/XMCSERV/SECRSIF are loaded from the same
-# PS2SDK build so XMCMAN can register its MagicGate callbacks with SECRMAN.
+# Briscoe dev4 keeps the real-hardware-validated Sony ROM X stack for ordinary
+# memory-card I/O and also uses ROM XSIO2MAN/XMCMAN/XMCSERV inside the isolated
+# MagicGate session. Only the special open-source SECRMAN/SECRSIF pair needs to
+# be embedded for security diagnostics.
 #
-# The optional FMCB package preflight also embeds iomanX/fileXio/USBD/USBHDFSD
-# from the same PS2SDK image.  These only provide read-only access to a
-# user-supplied mass:/FMCB package; no FreeMcBoot payload is shipped here.
-IRX_FILES = freesio2.irx freepad.irx mcman.irx mcserv.irx secrman.irx secrsif.irx \
-            iomanX.irx fileXio.irx usbd.irx usbhdfsd.irx
+# The optional FMCB package preflight embeds iomanX/fileXio/USBD/USBHDFSD from
+# PS2SDK 2.0 for read-only access to user-supplied mass:/FMCB files.
+IRX_FILES = secrman.irx secrsif.irx iomanX.irx fileXio.irx usbd.irx usbhdfsd.irx
 EE_OBJS += $(IRX_FILES:.irx=_irx.o)
 
 %_irx.c:
