@@ -1,10 +1,13 @@
 /*
  * PS2 Memory Card Inspector - MagicGate / KELF diagnostics
  *
- * Briscoe dev6 keeps ordinary card I/O and experimental SECR work in separate
- * IOP personalities. A test KELF is acquired while the known-good normal ROM
- * XMCMAN stack is active, retained in EE RAM, then exercised by the isolated
- * SECR session. The resulting bound data is never written back to a card.
+ * Briscoe dev7 fixes a fundamental diagnostic mistake from dev4-dev6: an
+ * installed mc?:/B?EXEC-SYSTEM/osdmain.elf is already a card-bound KELF and
+ * must not be used as the input to another SecrDownloadHeader bind attempt.
+ *
+ * The probe now accepts only a raw user-supplied FMCB.XLF from the optional
+ * mass: package backend. It is read into EE RAM while the normal card stack is
+ * active, survives the isolated SECR IOP reboot, and is never written back.
  */
 
 #define NEWLIB_PORT_AWARE
@@ -16,6 +19,7 @@
 #include <libmc.h>
 #include <libsecr-common.h>
 #include <secrsif.h>
+#include <fileXio_rpc.h>
 #include <io_common.h>
 #include <malloc.h>
 #include <stdlib.h>
@@ -33,6 +37,7 @@
 #define MG_RPC_TIMEOUT (-2100)
 #define MG_SHORT_READ (-2101)
 #define MG_INVALID_LAYOUT (-2102)
+#define MG_RAW_SOURCE_PORT 9 /* legacy display marker; not an mc port */
 
 extern unsigned char secrsif_irx[];
 extern unsigned int size_secrsif_irx;
@@ -46,17 +51,11 @@ static SifRpcClientData_t RpcGetKbit;
 static SifRpcClientData_t RpcGetKc;
 static SifRpcClientData_t RpcGetIcvps2;
 static unsigned char RpcBuffer[0x1000] __attribute__((aligned(64)));
-static sceMcTblGetDir MgDirEntry __attribute__((aligned(64)));
 
-static const char *KelfCandidates[] = {
-    "/BIEXEC-SYSTEM/osdmain.elf",
-    "/BAEXEC-SYSTEM/osdmain.elf",
-    "/BEEXEC-SYSTEM/osdmain.elf",
-    "/BCEXEC-SYSTEM/osdmain.elf",
-    "/BIEXEC-SYSTEM/osd130.elf",
-    "/BEEXEC-SYSTEM/osd130.elf",
-    "/BAEXEC-SYSTEM/osd130.elf",
-    "/BAEXEC-SYSTEM/osd120.elf"
+static const char *RawKelfCandidates[] = {
+    "mass:/FMCB/SYSTEM/FMCB.XLF",
+    "mass0:/FMCB/SYSTEM/FMCB.XLF",
+    "mass1:/FMCB/SYSTEM/FMCB.XLF"
 };
 
 static int McSyncResult(void)
@@ -207,7 +206,7 @@ static int DownloadBlock(const void *src, int size)
 
     memset(RpcBuffer, 0, sizeof(RpcBuffer));
     param = (struct SecrSifDownloadBlockParams *)RpcBuffer;
-    memcpy(param->buffer, src, sizeof(param->buffer));
+    memcpy(param->buffer, src, size);
     param->size = size;
 
     rc = sceSifCallRpc(&RpcDownloadBlock, 1, 0,
@@ -273,51 +272,40 @@ static int DownloadGetIcvps2(unsigned char icvps2[8])
     return param->result;
 }
 
-static int FindKelfOnPort(int port, char *path, int path_size, int *file_size)
+static int FindRawKelfSource(MagicGateReport *report)
 {
+    iox_stat_t stat;
     unsigned int i;
-    int rc;
+    int rc = -1;
 
-    for (i = 0; i < sizeof(KelfCandidates) / sizeof(KelfCandidates[0]); i++) {
-        memset(&MgDirEntry, 0, sizeof(MgDirEntry));
-        mcGetDir(port, 0, KelfCandidates[i], 0, 1, &MgDirEntry);
-        rc = McSyncResult();
-
-        if (rc > 0 && MgDirEntry.FileSizeByte >= sizeof(SecrKELFHeader_t)) {
-            snprintf(path, path_size, "%s", KelfCandidates[i]);
-            *file_size = (int)MgDirEntry.FileSizeByte;
-            return 0;
-        }
-    }
-
-    return sceMcResNoEntry;
-}
-
-static int FindKelfSource(int target_port, MagicGateReport *report)
-{
-    int ports[2];
-    int i;
-    int rc;
-
-    ports[0] = target_port ^ 1;
-    ports[1] = target_port;
-
-    for (i = 0; i < 2; i++) {
-        rc = FindKelfOnPort(ports[i], report->source_path,
-                            sizeof(report->source_path), &report->source_size);
-        if (rc == 0) {
-            report->source_port = ports[i];
-            report->source_io_rc = 0;
-            return 0;
-        }
+    for (i = 0; i < sizeof(RawKelfCandidates) / sizeof(RawKelfCandidates[0]); i++) {
+        memset(&stat, 0, sizeof(stat));
+        rc = fileXioGetStat(RawKelfCandidates[i], &stat);
         report->source_io_rc = rc;
+        if (rc >= 0 && stat.size >= sizeof(SecrKELFHeader_t) &&
+            stat.size <= MG_MAX_KELF_SIZE) {
+            report->source_port = MG_RAW_SOURCE_PORT;
+            report->source_size = (int)stat.size;
+            snprintf(report->source_path, sizeof(report->source_path),
+                     "RAW %s", RawKelfCandidates[i]);
+            return 0;
+        }
     }
 
-    return sceMcResNoEntry;
+    return rc < 0 ? rc : sceMcResNoEntry;
 }
 
-static int ReadKelfSource(const MagicGateReport *report, unsigned char **out_buffer)
+static const char *RawPathFromReport(const MagicGateReport *report)
 {
+    if (strncmp(report->source_path, "RAW ", 4) == 0)
+        return report->source_path + 4;
+    return report->source_path;
+}
+
+static int ReadRawKelfSource(const MagicGateReport *report,
+                             unsigned char **out_buffer)
+{
+    const char *path = RawPathFromReport(report);
     unsigned char *buffer;
     int alloc_size;
     int total;
@@ -334,8 +322,7 @@ static int ReadKelfSource(const MagicGateReport *report, unsigned char **out_buf
         return -ENOMEM;
     memset(buffer, 0, alloc_size);
 
-    mcOpen(report->source_port, 0, report->source_path, FIO_O_RDONLY);
-    fd = McSyncResult();
+    fd = fileXioOpen(path, FIO_O_RDONLY);
     if (fd < 0) {
         free(buffer);
         return fd;
@@ -347,25 +334,21 @@ static int ReadKelfSource(const MagicGateReport *report, unsigned char **out_buf
         if (chunk > MG_READ_CHUNK)
             chunk = MG_READ_CHUNK;
 
-        mcRead(fd, buffer + total, chunk);
-        rc = McSyncResult();
+        rc = fileXioRead(fd, buffer + total, chunk);
         if (rc < 0) {
-            mcClose(fd);
-            McSyncResult();
+            fileXioClose(fd);
             free(buffer);
             return rc;
         }
         if (rc == 0 || rc > chunk) {
-            mcClose(fd);
-            McSyncResult();
+            fileXioClose(fd);
             free(buffer);
             return MG_SHORT_READ;
         }
         total += rc;
     }
 
-    mcClose(fd);
-    rc = McSyncResult();
+    rc = fileXioClose(fd);
     if (rc < 0) {
         free(buffer);
         return rc;
@@ -403,7 +386,7 @@ int MagicGatePrepareKelf(int target_port, MagicGateKelfBuffer *buffer,
     MagicGateResetKelfBuffer(buffer);
 
     report->stage = MG_STAGE_FIND_KELF;
-    rc = FindKelfSource(target_port, report);
+    rc = FindRawKelfSource(report);
     if (rc < 0) {
         report->source_io_rc = rc;
         report->result = MG_RESULT_NO_TEST_KELF;
@@ -411,7 +394,7 @@ int MagicGatePrepareKelf(int target_port, MagicGateKelfBuffer *buffer,
     }
 
     report->stage = MG_STAGE_READ_KELF;
-    rc = ReadKelfSource(report, &data);
+    rc = ReadRawKelfSource(report, &data);
     if (rc < 0) {
         report->source_io_rc = rc;
         report->result = MG_RESULT_IO_ERROR;
@@ -453,7 +436,7 @@ int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
     int type = 0;
     int free_clusters = 0;
     int formatted = 0;
-    int rc = sceMcResChangedCard;
+    int rc;
     int i;
 
     if (buffer == NULL || buffer->data == NULL || buffer->size <= 0) {
@@ -466,15 +449,6 @@ int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
         return -1;
     }
 
-    /*
-     * XMCMAN uses sceMcResChangedCard (-1) as a state notification. After an
-     * IOP reboot it is normal for the first GetInfo to report CHANGED while
-     * still returning valid type/free/formatted metadata. Do not confuse that
-     * with an authentication failure. Retry a few times to establish a stable
-     * card state; if CHANGED persists but the target is clearly a PS2 card,
-     * continue the RAM-only security probe rather than producing a false card
-     * failure.
-     */
     report->stage = MG_STAGE_SESSION_CARD_CHECK;
     for (i = 0; i < MG_CARD_RETRIES; i++) {
         type = 0;
@@ -490,11 +464,13 @@ int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
 
         if (rc != sceMcResChangedCard)
             break;
-        if (i + 1 < MG_CARD_RETRIES)
-            DelayThread(MG_CARD_RETRY_USEC);
+        if (type == MC_TYPE_PS2 && i == MG_CARD_RETRIES - 1)
+            break;
+        DelayThread(MG_CARD_RETRY_USEC);
     }
 
-    if (rc < 0 && rc != sceMcResNoFormat && rc != sceMcResChangedCard) {
+    if (rc < 0 && rc != sceMcResNoFormat &&
+        !(rc == sceMcResChangedCard && type == MC_TYPE_PS2)) {
         report->result = MG_RESULT_SESSION_CARD_ERROR;
         return -1;
     }
@@ -614,9 +590,9 @@ int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
 const char *MagicGateStageText(MagicGateStage stage)
 {
     switch (stage) {
-        case MG_STAGE_FIND_KELF: return "FIND TEST KELF";
-        case MG_STAGE_READ_KELF: return "READ TEST KELF";
-        case MG_STAGE_VALIDATE_KELF: return "VALIDATE KELF";
+        case MG_STAGE_FIND_KELF: return "FIND RAW FMCB.XLF";
+        case MG_STAGE_READ_KELF: return "READ RAW FMCB.XLF";
+        case MG_STAGE_VALIDATE_KELF: return "VALIDATE RAW KELF";
         case MG_STAGE_SESSION_SETUP: return "SETUP MG SESSION";
         case MG_STAGE_SESSION_CARD_CHECK: return "MG SESSION CARD CHECK";
         case MG_STAGE_BIND_RPC: return "BIND SECR RPC";
@@ -634,9 +610,9 @@ const char *MagicGateResultText(MagicGateResult result)
 {
     switch (result) {
         case MG_RESULT_PASS: return "PASS";
-        case MG_RESULT_NO_TEST_KELF: return "NO TEST KELF";
-        case MG_RESULT_IO_ERROR: return "KELF READ ERROR";
-        case MG_RESULT_INVALID_KELF: return "INVALID/UNSUPPORTED KELF";
+        case MG_RESULT_NO_TEST_KELF: return "RAW FMCB.XLF REQUIRED";
+        case MG_RESULT_IO_ERROR: return "RAW KELF READ ERROR";
+        case MG_RESULT_INVALID_KELF: return "INVALID/UNSUPPORTED RAW KELF";
         case MG_RESULT_SESSION_SETUP_FAILED: return "MG SESSION SETUP FAILED";
         case MG_RESULT_SESSION_CARD_ERROR: return "MG SESSION CARD ERROR";
         case MG_RESULT_RPC_UNAVAILABLE: return "SECR RPC FAILURE";
