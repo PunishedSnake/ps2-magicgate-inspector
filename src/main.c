@@ -5,10 +5,18 @@
  *
  * Design rules:
  *   - inspection is non-destructive unless the user explicitly formats;
- *   - raw MCMAN/XMCMAN results remain visible for diagnosis;
+ *   - raw XMCMAN results remain visible for diagnosis;
  *   - generic I/O failures never imply that formatting is safe;
  *   - destructive actions require a second, deliberate confirmation.
  */
+
+/*
+ * libmc talks directly to the IOP memory-card server.  Its mcOpen() mode is
+ * therefore an IOP/FIO mode, not a POSIX/newlib mode.  NEWLIB_PORT_AWARE lets
+ * us include io_common.h explicitly and use the FIO_O_* constants without
+ * accidentally feeding newlib's O_RDONLY/O_WRONLY values to XMCMAN.
+ */
+#define NEWLIB_PORT_AWARE
 
 #include <tamtypes.h>
 #include <kernel.h>
@@ -19,11 +27,11 @@
 #include <libmc.h>
 #include <libpad.h>
 #include <debug.h>
+#include <io_common.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/fcntl.h>
 
-#define APP_VERSION "0.1.0"
+#define APP_VERSION "0.1.1-dev"
 #define APP_CODENAME "Columbo"
 #define TEST_SIZE 4096
 #define SLOT_COUNT 2
@@ -40,6 +48,23 @@ typedef enum CardHealth {
     CARD_NO_CARD
 } CardHealth;
 
+typedef enum RwStage {
+    RW_NOT_RUN = 0,
+    RW_FIND_NAME,
+    RW_VERIFY_CARD,
+    RW_OPEN_WRITE,
+    RW_WRITE,
+    RW_FLUSH,
+    RW_CLOSE_WRITE,
+    RW_OPEN_READ,
+    RW_READ,
+    RW_CLOSE_READ,
+    RW_COMPARE,
+    RW_DELETE,
+    RW_VERIFY_DELETE,
+    RW_DONE
+} RwStage;
+
 typedef struct CardReport {
     int port;
     int info_rc;
@@ -51,6 +76,7 @@ typedef struct CardReport {
     int cleanup_rc;
     int format_allowed;
     CardHealth health;
+    RwStage rw_stage;
 } CardReport;
 
 /* libpad/libmc DMA-facing buffers need cache-friendly alignment on the EE. */
@@ -85,14 +111,8 @@ static int LoadRomModule(const char *path, const char *name)
 /*
  * Initialize a coherent Sony X-module stack.
  *
- * The original standalone build mixed PS2SDK's ordinary mcman/mcserv IRXs
- * with mcInit(MC_TYPE_XMC).  Those are different RPC protocols: MC_TYPE_XMC
- * expects XMCMAN/XMCSERV.  On real hardware that mismatch left libmc waiting
- * forever immediately after mcserv had started.
- *
- * PS2SDK's current memory-card and pad samples pair MC_TYPE_XMC/libpad with the
- * ROM modules below.  Using the ROM X stack also removes four embedded IRXs
- * and the old load-module-buffer compatibility layer from the application.
+ * v0.1.0 originally mixed ordinary mcman/mcserv with MC_TYPE_XMC.  The ROM
+ * X stack below is coherent with the XMCSERV RPC protocol used by libmc.
  */
 static int InitIopAndDevices(void)
 {
@@ -180,6 +200,47 @@ static int DeleteFile(int port, const char *name)
     return McSyncResult();
 }
 
+static const char *RwStageText(RwStage stage)
+{
+    switch (stage) {
+        case RW_FIND_NAME: return "FIND TEMP NAME";
+        case RW_VERIFY_CARD: return "VERIFY SAME CARD";
+        case RW_OPEN_WRITE: return "OPEN-WRITE";
+        case RW_WRITE: return "WRITE";
+        case RW_FLUSH: return "FLUSH";
+        case RW_CLOSE_WRITE: return "CLOSE-WRITE";
+        case RW_OPEN_READ: return "OPEN-READ";
+        case RW_READ: return "READ";
+        case RW_CLOSE_READ: return "CLOSE-READ";
+        case RW_COMPARE: return "COMPARE";
+        case RW_DELETE: return "DELETE";
+        case RW_VERIFY_DELETE: return "VERIFY DELETE";
+        case RW_DONE: return "DONE";
+        default: return "NOT RUN";
+    }
+}
+
+static const char *McResultText(int rc)
+{
+    switch (rc) {
+        case sceMcResSucceed: return "OK";
+        case sceMcResChangedCard: return "CARD CHANGED";
+        case sceMcResNoFormat: return "NO FORMAT";
+        case sceMcResFullDevice: return "FULL DEVICE";
+        case sceMcResNoEntry: return "NO ENTRY";
+        case sceMcResDeniedPermit: return "DENIED PERMIT";
+        case sceMcResNotEmpty: return "NOT EMPTY";
+        case sceMcResUpLimitHandle: return "HANDLE LIMIT";
+        case sceMcResFailReplace: return "REPLACE FAILED";
+        case sceMcResFailResetAuth: return "AUTH RESET FAILED";
+        case sceMcResFailDetect: return "DETECT FAILED";
+        case sceMcResFailDetect2: return "DETECT FAILED 2";
+        case sceMcResDeniedPS1Permit: return "PS1 PERMISSION DENIED";
+        case sceMcResFailAuth: return "AUTH FAILED";
+        default: return "OTHER";
+    }
+}
+
 /* Never overwrite a user's file while choosing a temporary test filename. */
 static int FindUnusedTempName(int port, char *name)
 {
@@ -203,17 +264,37 @@ static int FindUnusedTempName(int port, char *name)
 }
 
 /*
+ * Verify that the card did not change between the read-only probe and the
+ * destructive part of the integrity test.  A second mcGetInfo() on the same
+ * card should return 0; a changed card returns sceMcResChangedCard.
+ */
+static int VerifySameCard(int port)
+{
+    int type = 0;
+    int free_clusters = 0;
+    int formatted = 0;
+
+    mcGetInfo(port, 0, &type, &free_clusters, &formatted);
+    return McSyncResult();
+}
+
+/*
  * End-to-end filesystem integrity test:
  * create -> write -> flush -> close -> reopen -> read -> compare -> delete.
- * Cleanup is part of the result, not a best-effort afterthought.
+ *
+ * IMPORTANT: mcOpen() is a libmc/IOP call.  FIO_O_* must be used here.  The
+ * POSIX O_RDONLY/O_WRONLY values supplied by newlib are not the IOP values and
+ * caused the v0.1.0 hardware build to return sceMcResDeniedPermit (-5) on
+ * perfectly healthy cards.
  */
-static int RunReadWriteTest(int port, int *cleanup_rc)
+static int RunReadWriteTest(int port, int *cleanup_rc, RwStage *stage)
 {
     char path[24];
     int fd;
     int rc;
 
     *cleanup_rc = 0;
+    *stage = RW_FIND_NAME;
     FillPattern();
     memset(ReadBuffer, 0, sizeof(ReadBuffer));
 
@@ -221,11 +302,23 @@ static int RunReadWriteTest(int port, int *cleanup_rc)
     if (rc < 0)
         return rc;
 
-    mcOpen(port, 0, path, O_WRONLY | O_CREAT | O_TRUNC);
+    *stage = RW_VERIFY_CARD;
+    rc = VerifySameCard(port);
+    if (rc != sceMcResSucceed)
+        return rc;
+
+    /*
+     * The candidate was just proven absent and this is a single-process test,
+     * so truncation is unnecessary.  Avoiding FIO_O_TRUNC also reduces the
+     * destructive surface if a card is swapped at exactly the wrong moment.
+     */
+    *stage = RW_OPEN_WRITE;
+    mcOpen(port, 0, path, FIO_O_WRONLY | FIO_O_CREAT);
     fd = McSyncResult();
     if (fd < 0)
         return fd;
 
+    *stage = RW_WRITE;
     mcWrite(fd, WriteBuffer, sizeof(WriteBuffer));
     rc = McSyncResult();
     if (rc != (int)sizeof(WriteBuffer)) {
@@ -234,6 +327,7 @@ static int RunReadWriteTest(int port, int *cleanup_rc)
         return (rc < 0) ? rc : -1001;
     }
 
+    *stage = RW_FLUSH;
     mcFlush(fd);
     rc = McSyncResult();
     if (rc < 0) {
@@ -242,19 +336,22 @@ static int RunReadWriteTest(int port, int *cleanup_rc)
         return rc;
     }
 
+    *stage = RW_CLOSE_WRITE;
     rc = CloseFile(fd);
     if (rc < 0) {
         *cleanup_rc = DeleteFile(port, path);
         return rc;
     }
 
-    mcOpen(port, 0, path, O_RDONLY);
+    *stage = RW_OPEN_READ;
+    mcOpen(port, 0, path, FIO_O_RDONLY);
     fd = McSyncResult();
     if (fd < 0) {
         *cleanup_rc = DeleteFile(port, path);
         return fd;
     }
 
+    *stage = RW_READ;
     mcRead(fd, ReadBuffer, sizeof(ReadBuffer));
     rc = McSyncResult();
     if (rc != (int)sizeof(ReadBuffer)) {
@@ -263,27 +360,32 @@ static int RunReadWriteTest(int port, int *cleanup_rc)
         return (rc < 0) ? rc : -1002;
     }
 
+    *stage = RW_CLOSE_READ;
     rc = CloseFile(fd);
     if (rc < 0) {
         *cleanup_rc = DeleteFile(port, path);
         return rc;
     }
 
+    *stage = RW_COMPARE;
     if (memcmp(WriteBuffer, ReadBuffer, sizeof(WriteBuffer)) != 0) {
         *cleanup_rc = DeleteFile(port, path);
         return -1003;
     }
 
+    *stage = RW_DELETE;
     *cleanup_rc = DeleteFile(port, path);
     if (*cleanup_rc < 0)
         return -1004;
 
+    *stage = RW_VERIFY_DELETE;
     memset(&DirEntry, 0, sizeof(DirEntry));
     mcGetDir(port, 0, path, 0, 1, &DirEntry);
     rc = McSyncResult();
     if (rc != 0 && rc != sceMcResNoEntry)
         return -1005;
 
+    *stage = RW_DONE;
     return 0;
 }
 
@@ -300,6 +402,7 @@ static void InspectCard(int port)
     r->root_rc = -999;
     r->rw_rc = -999;
     r->cleanup_rc = 0;
+    r->rw_stage = RW_NOT_RUN;
     r->health = CARD_UNKNOWN;
 
     mcGetInfo(port, 0, &r->type, &r->free_clusters, &r->formatted);
@@ -345,7 +448,7 @@ static void InspectCard(int port)
         return;
     }
 
-    r->rw_rc = RunReadWriteTest(port, &r->cleanup_rc);
+    r->rw_rc = RunReadWriteTest(port, &r->cleanup_rc, &r->rw_stage);
 
     if (r->rw_rc == 0) {
         r->health = CARD_OK;
@@ -401,13 +504,14 @@ static void Render(int selected, int confirm_format, int last_format_rc)
 
     scr_printf("Selected: SLOT %d (mc%d:)\n", selected + 1, selected);
     scr_printf("Health: %s\n", HealthText(r->health));
-    scr_printf("mcGetInfo rc: %d\n", r->info_rc);
+    scr_printf("mcGetInfo rc: %d (%s)\n", r->info_rc, McResultText(r->info_rc));
     scr_printf("Reported type: %d (%s)\n", r->type, TypeText(r->type));
     scr_printf("Formatted flag: %d\n", r->formatted);
     scr_printf("Free clusters: %d\n", r->free_clusters);
-    scr_printf("Root directory rc: %d\n", r->root_rc);
-    scr_printf("4 KiB write/read/compare/delete rc: %d\n", r->rw_rc);
-    scr_printf("Cleanup rc: %d\n\n", r->cleanup_rc);
+    scr_printf("Root directory rc: %d (%s)\n", r->root_rc, McResultText(r->root_rc));
+    scr_printf("R/W stage: %s\n", RwStageText(r->rw_stage));
+    scr_printf("4 KiB R/W rc: %d (%s)\n", r->rw_rc, McResultText(r->rw_rc));
+    scr_printf("Cleanup rc: %d (%s)\n\n", r->cleanup_rc, McResultText(r->cleanup_rc));
 
     scr_printf("Other slot: mc%d: %s\n\n", selected ^ 1, HealthText(Reports[selected ^ 1].health));
 
@@ -425,7 +529,7 @@ static void Render(int selected, int confirm_format, int last_format_rc)
     }
 
     if (last_format_rc != -999)
-        scr_printf("\nLast format rc: %d\n", last_format_rc);
+        scr_printf("\nLast format rc: %d (%s)\n", last_format_rc, McResultText(last_format_rc));
 
     scr_printf("\nRaw XMCMAN errors are shown intentionally for diagnosis.\n");
 }
