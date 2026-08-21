@@ -43,7 +43,7 @@ Test the following cases when practical:
 
 ## Safe test procedure
 
-1. Boot `MC_INSPECTOR.ELF` with a known-good card first.
+1. Boot the current development `MC_INSPECTOR.ELF` with a known-good card first.
 2. Confirm that initialization reaches `Initialization complete. Inspecting slots...`.
 3. Confirm that the correct port is selected before running any operation.
 4. Press **Cross** to inspect the selected card.
