@@ -11,6 +11,7 @@ EE_LDFLAGS = -Wl,--gc-sections
 # security session. Unlike dev4-dev6 it never tries to re-bind an already-bound
 # mc?:/B?EXEC-SYSTEM/osdmain.elf. MagicGate/KELF probing requires the raw,
 # user-supplied mass:/FMCB/SYSTEM/FMCB.XLF (or mass0:/mass1:) as its input.
+# CI marker: dev7 raw-XLF hardware candidate.
 FMCB_SECR_COMMIT = ac53a47a5c6eae675cc2611c7bebe62f56c7845c
 FMCB_SECR_BASE = https://raw.githubusercontent.com/israpps/FreeMcBoot-Installer/$(FMCB_SECR_COMMIT)/installer/irx/compiled
 FMCB_SECR_DIR = .build/fmcb-secr-1.3
