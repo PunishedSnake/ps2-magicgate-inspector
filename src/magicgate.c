@@ -17,8 +17,6 @@
 #include <kernel.h>
 #include <sifrpc.h>
 #include <loadfile.h>
-#include <iopheap.h>
-#include <sbv_patches.h>
 #include <libmc.h>
 #include <libsecr-common.h>
 #include <secrsif.h>
@@ -38,8 +36,6 @@
 #define MG_SHORT_READ (-2101)
 #define MG_INVALID_LAYOUT (-2102)
 
-extern unsigned char secrman_irx[];
-extern unsigned int size_secrman_irx;
 extern unsigned char secrsif_irx[];
 extern unsigned int size_secrsif_irx;
 
@@ -89,39 +85,31 @@ void MagicGateResetReport(MagicGateReport *report, int target_port)
     report->result = MG_RESULT_NOT_RUN;
 }
 
+/*
+ * SECRMAN is already resident because main.c rebooted the IOP with a tiny
+ * ioprpgen-generated image containing PS2SDK's special SECRMAN.  XMCMAN is
+ * loaded afterwards and registers its card-command/device-ID callbacks with
+ * that resident SECRMAN.  Loading another SECRMAN here would break exactly the
+ * relationship Briscoe is trying to test, so this function only starts the
+ * EE-facing SECRSIF RPC bridge.
+ */
 int MagicGateLoadIopModules(MagicGateIopStatus *status)
 {
     int rc;
-    int start_rc;
+    int start_rc = -999;
 
     memset(status, 0, sizeof(*status));
-    status->secrman_load_rc = -999;
-    status->secrman_start_rc = -999;
+    status->secrman_load_rc = 0;  /* resident from the IOPRP reboot */
+    status->secrman_start_rc = 0;
     status->secrsif_load_rc = -999;
     status->secrsif_start_rc = -999;
 
     SecrIopAvailable = 0;
     RpcBound = 0;
 
-    SifInitIopHeap();
-    sbv_patch_enable_lmb();
-
-    start_rc = -999;
-    rc = SifExecModuleBuffer(secrman_irx, size_secrman_irx, 0, NULL, &start_rc);
-    status->secrman_load_rc = rc;
-    status->secrman_start_rc = start_rc;
-    if (rc < 0) {
-        SifExitIopHeap();
-        return rc;
-    }
-
-    start_rc = -999;
     rc = SifExecModuleBuffer(secrsif_irx, size_secrsif_irx, 0, NULL, &start_rc);
     status->secrsif_load_rc = rc;
     status->secrsif_start_rc = start_rc;
-
-    SifExitIopHeap();
-
     if (rc < 0)
         return rc;
 
