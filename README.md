@@ -1,53 +1,76 @@
 # PS2 Memory Card Inspector
 
-A standalone PlayStation 2 homebrew utility for inspecting memory-card health without depending on FreeMcBoot or another installer.
+A standalone PlayStation 2 homebrew utility for inspecting memory-card health, MagicGate/KELF behavior and (in Briscoe) the readiness of user-supplied FreeMcBoot files.
 
-> **Current status:** v0.1.0 **Columbo** is build-verified on PS2DEV 2.0.0. The original hardware build exposed an IOP/libmc initialization bug; the current development build replaces the mixed MCMAN/XMC stack with a coherent ROM X-module stack and is awaiting real-hardware re-validation.
+> **Current development line:** v0.2.0 **Briscoe**, built with PS2DEV 2.0.0. The Columbo filesystem pipeline has already passed on real PS2 hardware; Briscoe is adding a coherent PS2SDK SECR stack and read-only FMCB package preflight before any installer write path is enabled.
 
 ## What it does today
 
-`MC_INSPECTOR.ELF` currently supports both PS2 memory-card ports and can:
+`MC_INSPECTOR.ELF` supports both PS2 memory-card ports and can:
 
 - query the card with `mcGetInfo()` and preserve the raw XMCMAN result;
 - report the card type, format state and free-cluster count;
 - verify access to the root directory;
-- run a non-destructive 4 KiB write/read/compare test;
+- run a non-destructive 4 KiB write/read/compare/delete test;
 - verify that its temporary test file was deleted afterwards;
-- distinguish common states such as healthy, full, unformatted, filesystem failure, authentication failure, detection failure and no card;
-- offer manual formatting **only** when a PS2 card is reported as unformatted or the filesystem reports `sceMcResNoFormat`.
+- distinguish filesystem health from MagicGate/KELF capability;
+- run a staged, RAM-only MagicGate/KELF bind probe and report the exact SECR stage;
+- scan a user-supplied FreeMcBoot package from USB and report whether its baseline normal-install files are complete;
+- detect the console region from `rom0:ROMVER` and resolve the normal FMCB target system folder;
+- offer manual formatting **only** when a PS2 card is reported as explicitly unformatted/no-format.
 
-The program does **not** install FreeMcBoot and does not currently perform MagicGate/KELF qualification. Those features belong to later standalone Inspector milestones.
+Briscoe dev3 still does **not** install FreeMcBoot. The FMCB path is intentionally read-only until MagicGate, source, space, backup and rollback behavior have all been validated on hardware.
 
 ## Safety model
 
 Inspection should be non-destructive. The R/W test creates a uniquely named temporary file (`/__MCIxx.TMP`), writes a deterministic 4096-byte pattern, reads it back, compares every byte, deletes the file and verifies that it is gone.
 
+The MagicGate probe modifies only an in-memory copy of a KELF. Bound Kbit/Kc/ICVPS2 data is not written back to either card.
+
+The FMCB preflight performs source-side metadata checks only. It does not create target directories or copy/bind/write any FMCB payload. FreeMcBoot payloads are not embedded in this repository or release artifacts.
+
 Formatting is deliberately harder to trigger than an ordinary test. It is never automatic. The user must first request formatting with **Triangle**, then confirm by holding **L1 + R1** and pressing **Triangle** again. Authentication, detection and generic I/O failures never unlock the formatter.
 
 ## Runtime stack
 
-The current build uses the Sony X-module stack from the console ROM:
+Briscoe uses one coherent PS2SDK 2.0 stack rather than mixing ROM and homebrew memory-card/security modules.
 
-- `rom0:XSIO2MAN`
-- `rom0:XPADMAN`
-- `rom0:XMCMAN`
-- `rom0:XMCSERV`
+A tiny IOPRP is generated in EE RAM with PS2SDK `ioprpgen` and contains the special open-source `SECRMAN`. After the IOP reboot, the ELF loads PS2SDK:
 
-`libmc` is initialized with `MC_TYPE_XMC`, matching `XMCMAN/XMCSERV`. This replaces the original development build, which incorrectly combined ordinary `mcman/mcserv` IRXs with the XMC client protocol and could hang during `mcInit()` on real hardware.
+- `freesio2.irx` / SIO2MAN;
+- `freepad.irx` / PADMAN;
+- `mcman.irx` built as XMCMAN;
+- `mcserv.irx` built as XMCSERV;
+- `secrsif.irx`.
 
-Startup prints each IOP/module stage to the screen so an initialization failure can be identified without a serial log.
+This ordering lets XMCMAN register its MagicGate callbacks with the resident SECRMAN before the EE-side staged SECR RPC probe is used.
+
+For optional FMCB package discovery, dev3 also embeds PS2SDK `iomanX`, `fileXio`, `USBD` and `USBHDFSD`. Failure of this optional USB stack does not disable ordinary card inspection or MagicGate diagnostics.
 
 ## Controls
 
 | Control | Action |
 | --- | --- |
 | Left / Right | Select `mc0:` or `mc1:` |
-| Cross | Inspect selected card |
-| Start | Inspect both cards |
+| Cross | Inspect selected card/filesystem |
+| Start | Inspect both cards/filesystems |
+| Square | Run RAM-only staged MagicGate/KELF probe |
+| Circle | Scan `mass:/FMCB`, `mass0:/FMCB`, `mass1:/FMCB` |
+| R1 | Cycle Card / MagicGate / FMCB Preflight views |
 | Triangle | Enter format confirmation when formatting is allowed |
 | L1 + R1 + Triangle | Confirm destructive format |
-| Circle | Cancel format confirmation |
+| Circle during format confirmation | Cancel format confirmation |
 | Select | Exit |
+
+## User-supplied FMCB package
+
+See [FMCB package layout](docs/FMCB_PACKAGE.md). Briscoe expects a baseline normal-install tree below an `FMCB` folder on USB. Missing optional USB drivers do not make the package incomplete; missing required system/config/resource files do.
+
+The dev3 UI explicitly reports:
+
+```text
+INSTALL: DISABLED IN DEV3 (preflight is read-only)
+```
 
 ## Build
 
@@ -63,13 +86,14 @@ The GitHub Actions workflow verifies the output with `file(1)`, calculates SHA-2
 
 - [Architecture](docs/ARCHITECTURE.md) — runtime structure, card classification and safety decisions.
 - [Testing](docs/TESTING.md) — hardware test matrix and what counts as a valid result.
+- [FMCB package](docs/FMCB_PACKAGE.md) — user-supplied package contract and dev3 safety boundary.
 - [Roadmap](docs/ROADMAP.md) — planned milestones and feature boundaries.
 - [Release codenames](docs/CODENAMES.md) — the detective/police naming scheme.
 - [Changelog](CHANGELOG.md) — user-visible changes by version.
 
 ## Repository policy
 
-`main` is the current standalone application. The earlier FreeMcBoot patch/forced-install prototype remains available through Git history but is intentionally no longer part of the active source tree. We prefer keeping the current tree small and understandable over retaining dead experimental glue indefinitely.
+`main` remains the stable standalone line while Briscoe is developed and hardware-tested in a draft PR. The earlier FreeMcBoot patch/forced-install prototype remains available through Git history but is intentionally not part of the active implementation.
 
 ## v0.1.0 — Columbo
 
