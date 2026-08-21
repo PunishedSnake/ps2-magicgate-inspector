@@ -15,6 +15,7 @@ EE_LDFLAGS = -Wl,--gc-sections
 # mcGetInfo result from sceMcResFailResetAuth (-11) to sceMcResChangedCard (-1)
 # while returning valid PS2-card metadata. dev6 therefore treats CHANGED CARD
 # as a transient state notification and retries instead of aborting the probe.
+# This comment also marks the first CI build containing that retry semantics.
 FMCB_SECR_COMMIT = ac53a47a5c6eae675cc2611c7bebe62f56c7845c
 FMCB_SECR_BASE = https://raw.githubusercontent.com/israpps/FreeMcBoot-Installer/$(FMCB_SECR_COMMIT)/installer/irx/compiled
 FMCB_SECR_DIR = .build/fmcb-secr-1.3
