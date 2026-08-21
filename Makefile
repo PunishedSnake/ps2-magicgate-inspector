@@ -1,3 +1,5 @@
+.DEFAULT_GOAL := all
+
 EE_BIN = MC_INSPECTOR.ELF
 EE_OBJS = src/main.o src/card.o src/magicgate.o src/fmcb_install.o
 EE_LIBS = -ldebug -lpad -lmc -lfileXio -lioprpgen -liopreboot -lpatches -lkernel
