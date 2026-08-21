@@ -2,20 +2,36 @@
 
 ## Purpose
 
-PS2 Memory Card Inspector is a standalone EE application. It does not patch or embed itself into FreeMcBoot. The executable owns its IOP initialization, memory-card RPC setup, controller input and text UI.
+PS2 Memory Card Inspector is a standalone EE application. It does not patch or embed itself into FreeMcBoot. The executable owns its IOP reset, memory-card RPC setup, controller input and text UI.
 
-The architecture is intentionally conservative: inspection and repair are separate decisions, raw MCMAN results are preserved for debugging, and destructive operations are gated behind both state checks and an explicit confirmation gesture.
+The architecture is intentionally conservative: inspection and repair are separate decisions, raw XMCMAN results are preserved for debugging, and destructive operations are gated behind both state checks and an explicit confirmation gesture.
 
 ## Runtime layout
 
-The build embeds four PS2SDK IOP modules into the ELF:
+The current build targets PS2DEV 2.0.0 and uses the Sony X-module stack from ROM rather than embedding replacement IRXs:
 
-- `freesio2.irx` — SIO2 transport used by pads and memory cards;
-- `freepad.irx` — controller support;
-- `mcman.irx` — memory-card manager;
-- `mcserv.irx` — EE/IOP memory-card RPC service.
+- `rom0:XSIO2MAN` — SIO2 transport used by pads and memory cards;
+- `rom0:XPADMAN` — controller service;
+- `rom0:XMCMAN` — memory-card manager;
+- `rom0:XMCSERV` — EE/IOP memory-card RPC service.
 
-At startup `InitIopAndDevices()` resets and synchronizes the IOP, enables module-buffer loading, starts the embedded IRXs, initializes `libmc`, and opens pad port 0.
+At startup `InitIopAndDevices()`:
+
+1. initializes SIF RPC;
+2. resets the IOP with `SifIopReset(NULL, 0)`;
+3. waits for IOP synchronization;
+4. initializes LOADFILE;
+5. loads the four ROM X modules in dependency order;
+6. binds `libmc` with `mcInit(MC_TYPE_XMC)`;
+7. initializes `libpad` and opens controller port 0.
+
+Every startup stage is printed to the screen. If initialization stalls or fails on hardware, the last visible stage identifies the affected subsystem.
+
+### Why the X stack matters
+
+The first standalone development build loaded ordinary PS2SDK `mcman.irx`/`mcserv.irx` modules but called `mcInit(MC_TYPE_XMC)`. That combined different memory-card RPC protocols. On real hardware the IRXs themselves loaded successfully, but `libmc` then waited for an XMC server that was not present.
+
+The current design keeps the client and server protocols coherent: `XMCMAN/XMCSERV` are always paired with `MC_TYPE_XMC`.
 
 ## Card inspection pipeline
 
@@ -53,7 +69,7 @@ The current health states are intentionally coarse and human-readable:
 - `CARD_DETECT_FAILURE`
 - `CARD_NO_CARD`
 
-The raw MCMAN return codes remain visible on screen so future versions can refine classification without losing low-level diagnostic evidence.
+The raw XMCMAN return codes remain visible on screen so future versions can refine classification without losing low-level diagnostic evidence.
 
 ## Why formatting is separate
 
@@ -74,9 +90,9 @@ The Inspector must never overwrite a user's existing file. `FindUnusedTempName()
 
 If all candidates exist, the test aborts instead of reusing one.
 
-## Compatibility shim
+## Toolchain
 
-`src/compat.c` contains a local `DelayThread()` implementation because the PS2DEV v1.0 environment used for the initial build does not export the newer helper expected by later code. The shim is only used to throttle the UI loop; it is not part of any memory-card protocol timing.
+The active build target is **PS2DEV 2.0.0**. The migration removed the local `DelayThread()` compatibility shim, forced include header, embedded IRX conversion rules and old module-buffer interception layer. The application now builds directly against the current PS2SDK interfaces supplied by that environment.
 
 ## Future boundaries
 
