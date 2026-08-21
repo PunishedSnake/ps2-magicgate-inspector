@@ -7,10 +7,10 @@
 /*
  * MagicGate / KELF diagnostics for PS2 Memory Card Inspector.
  *
- * The probe is intentionally non-destructive: it reads an existing KELF into
- * EE RAM, exercises the SECR download/binding protocol against the selected
- * card and discards the mutated working copy.  It never writes the bound KELF
- * back to either memory card.
+ * Briscoe dev4 deliberately separates KELF acquisition from the special SECR
+ * IOP session. The KELF is read while the hardware-validated normal ROM
+ * XMCMAN stack is active, kept in EE RAM across the IOP reboot, then discarded
+ * after the diagnostic session. No bound KELF is written to either card.
  */
 
 typedef enum MagicGateStage {
@@ -18,6 +18,8 @@ typedef enum MagicGateStage {
     MG_STAGE_FIND_KELF,
     MG_STAGE_READ_KELF,
     MG_STAGE_VALIDATE_KELF,
+    MG_STAGE_SESSION_SETUP,
+    MG_STAGE_SESSION_CARD_CHECK,
     MG_STAGE_BIND_RPC,
     MG_STAGE_DOWNLOAD_HEADER,
     MG_STAGE_DOWNLOAD_BLOCKS,
@@ -33,13 +35,16 @@ typedef enum MagicGateResult {
     MG_RESULT_NO_TEST_KELF,
     MG_RESULT_IO_ERROR,
     MG_RESULT_INVALID_KELF,
+    MG_RESULT_SESSION_SETUP_FAILED,
+    MG_RESULT_SESSION_CARD_ERROR,
     MG_RESULT_RPC_UNAVAILABLE,
     MG_RESULT_HEADER_FAILED,
     MG_RESULT_BLOCK_FAILED,
     MG_RESULT_KBIT_FAILED,
     MG_RESULT_KC_FAILED,
     MG_RESULT_ICVPS2_FAILED,
-    MG_RESULT_SECR_UNAVAILABLE
+    MG_RESULT_SECR_UNAVAILABLE,
+    MG_RESULT_TARGET_NOT_PS2
 } MagicGateResult;
 
 typedef struct MagicGateIopStatus {
@@ -50,6 +55,13 @@ typedef struct MagicGateIopStatus {
     int available;
 } MagicGateIopStatus;
 
+typedef struct MagicGateKelfBuffer {
+    unsigned char *data;
+    int size;
+    int source_port;
+    char source_path[64];
+} MagicGateKelfBuffer;
+
 typedef struct MagicGateReport {
     int target_port;
     int source_port;
@@ -59,6 +71,14 @@ typedef struct MagicGateReport {
 
     MagicGateStage stage;
     MagicGateResult result;
+
+    int session_setup_rc;
+    int session_mcinit_rc;
+    int session_mcinfo_rc;
+    int session_type;
+    int session_free_clusters;
+    int session_formatted;
+    int restore_rc;
 
     int rpc_rc;
     int header_rc;
@@ -73,11 +93,20 @@ typedef struct MagicGateReport {
     int icvps2_rc;
 } MagicGateReport;
 
-/* Called while loadfile RPC is active, after XSIO2MAN has been loaded. */
+/* Called inside the isolated SECR session while loadfile RPC is active. */
 int MagicGateLoadIopModules(MagicGateIopStatus *status);
 
 void MagicGateResetReport(MagicGateReport *report, int target_port);
-int MagicGateProbeCard(int target_port, MagicGateReport *report);
+void MagicGateResetKelfBuffer(MagicGateKelfBuffer *buffer);
+
+/* Run under the normal, known-good memory-card stack before any IOP reboot. */
+int MagicGatePrepareKelf(int target_port, MagicGateKelfBuffer *buffer,
+                         MagicGateReport *report);
+void MagicGateReleaseKelf(MagicGateKelfBuffer *buffer);
+
+/* Run only after the special SECR IOP personality and libmc are ready. */
+int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
+                           MagicGateReport *report);
 
 const char *MagicGateStageText(MagicGateStage stage);
 const char *MagicGateResultText(MagicGateResult result);
