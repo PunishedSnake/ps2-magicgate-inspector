@@ -1,4 +1,4 @@
-.DEFAULT_GOAL := all
+.DEFAULT_GOAL := MC_INSPECTOR.ELF
 
 EE_BIN = MC_INSPECTOR.ELF
 EE_OBJS = src/main.o src/card.o src/magicgate.o src/fmcb_install.o
