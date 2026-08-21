@@ -6,12 +6,15 @@ EE_LIBS = -ldebug -lpad -lmc -lfileXio -lioprpgen -liopreboot -lpatches -lkernel
 EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections
 EE_LDFLAGS = -Wl,--gc-sections
 
-# Briscoe dev7 keeps the real-hardware-validated Sony ROM X stack for ordinary
+# Briscoe dev8 keeps the real-hardware-validated Sony ROM X stack for ordinary
 # memory-card I/O and the pinned FMCB SECRMAN/SECRSIF 1.3 pair for the isolated
-# security session. Unlike dev4-dev6 it never tries to re-bind an already-bound
-# mc?:/B?EXEC-SYSTEM/osdmain.elf. MagicGate/KELF probing requires the raw,
-# user-supplied mass:/FMCB/SYSTEM/FMCB.XLF (or mass0:/mass1:) as its input.
-# CI marker: dev7 raw-XLF hardware candidate.
+# security session. MagicGate/KELF probing uses only the raw user-supplied
+# mass:/FMCB/SYSTEM/FMCB.XLF (or mass0:/mass1:) as its bind input.
+#
+# Real hardware exposed a dev7 BIT parser bug: the 0x400-byte SECRSIF RPC limit
+# was incorrectly applied to every BIT entry, including large plaintext blocks
+# that are never sent through SecrDownloadBlock(). dev8 applies that limit only
+# to blocks marked for SECR download (flags & 2), matching SecrDownloadFile().
 FMCB_SECR_COMMIT = ac53a47a5c6eae675cc2611c7bebe62f56c7845c
 FMCB_SECR_BASE = https://raw.githubusercontent.com/israpps/FreeMcBoot-Installer/$(FMCB_SECR_COMMIT)/installer/irx/compiled
 FMCB_SECR_DIR = .build/fmcb-secr-1.3
