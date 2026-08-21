@@ -6,16 +6,11 @@ EE_LIBS = -ldebug -lpad -lmc -lfileXio -lioprpgen -liopreboot -lpatches -lkernel
 EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections
 EE_LDFLAGS = -Wl,--gc-sections
 
-# Briscoe dev6 keeps the real-hardware-validated Sony ROM X stack for ordinary
-# memory-card I/O. The isolated MagicGate session deliberately uses the exact
-# open-source SECRMAN/SECRSIF compatibility pair from FreeMcBoot Installer
-# rather than PS2SDK 2.0's newer secrman ABI.
-#
-# Real hardware showed that this SECR 1.3 pair changes the first isolated
-# mcGetInfo result from sceMcResFailResetAuth (-11) to sceMcResChangedCard (-1)
-# while returning valid PS2-card metadata. dev6 therefore treats CHANGED CARD
-# as a transient state notification and retries instead of aborting the probe.
-# This comment also marks the first CI build containing that retry semantics.
+# Briscoe dev7 keeps the real-hardware-validated Sony ROM X stack for ordinary
+# memory-card I/O and the pinned FMCB SECRMAN/SECRSIF 1.3 pair for the isolated
+# security session. Unlike dev4-dev6 it never tries to re-bind an already-bound
+# mc?:/B?EXEC-SYSTEM/osdmain.elf. MagicGate/KELF probing requires the raw,
+# user-supplied mass:/FMCB/SYSTEM/FMCB.XLF (or mass0:/mass1:) as its input.
 FMCB_SECR_COMMIT = ac53a47a5c6eae675cc2611c7bebe62f56c7845c
 FMCB_SECR_BASE = https://raw.githubusercontent.com/israpps/FreeMcBoot-Installer/$(FMCB_SECR_COMMIT)/installer/irx/compiled
 FMCB_SECR_DIR = .build/fmcb-secr-1.3
