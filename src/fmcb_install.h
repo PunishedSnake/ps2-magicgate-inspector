@@ -4,9 +4,9 @@
 /*
  * Optional FreeMcBoot installation support.
  *
- * The Inspector never embeds FreeMcBoot payloads.  Briscoe only discovers and
- * validates files supplied by the user.  The API below is deliberately split
- * into source bring-up, read-only package preflight and (future) commit stages.
+ * The Inspector never embeds FreeMcBoot payloads. Briscoe only discovers and
+ * validates files supplied by the user. The API is deliberately split into
+ * source bring-up, read-only package preflight and future commit stages.
  */
 
 #define FMCB_MAX_PACKAGE_ENTRIES 16
@@ -80,7 +80,6 @@ typedef struct FmcbPackageReport {
     FmcbPackageFileStatus files[FMCB_MAX_PACKAGE_ENTRIES];
 } FmcbPackageReport;
 
-/* Baseline normal-install manifest; early-Japanese update files stay separate. */
 int FmcbPackageEntryCount(void);
 const FmcbPackageEntry *FmcbPackageEntryAt(int index);
 
@@ -89,6 +88,7 @@ void FmcbBuildInstallPlan(int target_port, char region_letter,
 
 /* Optional PS2SDK USB/fileXio source stack. Failure never disables Inspector. */
 int FmcbInitMassBackend(FmcbMassBackendStatus *status);
+void FmcbShutdownMassBackend(FmcbMassBackendStatus *status);
 
 /*
  * Scan user-supplied packages under mass:/FMCB, mass0:/FMCB and mass1:/FMCB.
