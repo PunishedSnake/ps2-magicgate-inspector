@@ -3,24 +3,19 @@
  * -------------------------
  * Standalone diagnostic utility for PlayStation 2 memory cards.
  *
- * Design goals for this file are intentionally conservative:
- *   - inspection must be non-destructive;
- *   - raw MCMAN results stay visible for diagnosis;
- *   - formatting is never inferred from a generic I/O failure;
- *   - every destructive action requires an explicit second confirmation.
- *
- * v0.1.x only investigates card/filesystem behavior. MagicGate/KELF probing
- * belongs to later standalone milestones and must not be confused with the
- * old experimental FreeMcBoot patcher that previously lived in this repo.
+ * Design rules:
+ *   - inspection is non-destructive unless the user explicitly formats;
+ *   - raw MCMAN/XMCMAN results remain visible for diagnosis;
+ *   - generic I/O failures never imply that formatting is safe;
+ *   - destructive actions require a second, deliberate confirmation.
  */
 
 #include <tamtypes.h>
 #include <kernel.h>
 #include <sifrpc.h>
 #include <iopcontrol.h>
-#include <iopheap.h>
 #include <loadfile.h>
-#include <sbv_patches.h>
+#include <delaythread.h>
 #include <libmc.h>
 #include <libpad.h>
 #include <debug.h>
@@ -33,25 +28,6 @@
 #define TEST_SIZE 4096
 #define SLOT_COUNT 2
 
-/*
- * The IOP modules are converted to C objects by the Makefile and linked into
- * the ELF. This keeps the Inspector self-contained: users do not need a
- * companion IRX directory next to MC_INSPECTOR.ELF.
- */
-extern unsigned char freesio2_irx[];
-extern unsigned int size_freesio2_irx;
-extern unsigned char freepad_irx[];
-extern unsigned int size_freepad_irx;
-extern unsigned char mcman_irx[];
-extern unsigned int size_mcman_irx;
-extern unsigned char mcserv_irx[];
-extern unsigned int size_mcserv_irx;
-
-/*
- * User-facing health classification. These states are deliberately broader
- * than individual MCMAN return codes. CardReport keeps the raw values so the
- * classification can be refined later without throwing evidence away.
- */
 typedef enum CardHealth {
     CARD_UNKNOWN = 0,
     CARD_OK,
@@ -84,11 +60,7 @@ static unsigned char ReadBuffer[TEST_SIZE] __attribute__((aligned(64)));
 static sceMcTblGetDir DirEntry __attribute__((aligned(64)));
 static CardReport Reports[SLOT_COUNT];
 
-/*
- * libmc operations are asynchronous RPC requests. Every call in the Inspector
- * is followed by this blocking sync so a return code always belongs to the
- * immediately preceding memory-card operation.
- */
+/* libmc operations are asynchronous RPC requests. */
 static int McSyncResult(void)
 {
     int result = -999;
@@ -96,59 +68,95 @@ static int McSyncResult(void)
     return result;
 }
 
-static int ExecIrx(void *buffer, unsigned int size)
+static int LoadRomModule(const char *path, const char *name)
 {
-    int status = 0;
-    return SifExecModuleBuffer(buffer, size, 0, NULL, &status);
+    int rc;
+
+    scr_printf("[IOP] Loading %s...\n", name);
+    rc = SifLoadModule(path, 0, NULL);
+    if (rc < 0)
+        scr_printf("[IOP] %s FAILED: rc=%d\n", name, rc);
+    else
+        scr_printf("[IOP] %s OK: id=%d\n", name, rc);
+
+    return rc;
 }
 
 /*
- * Reset the IOP into a known state and boot only the services this standalone
- * program needs. The load order matters: SIO2 first, then pad, then MCMAN and
- * MCSERV before libmc starts issuing RPC requests.
+ * Initialize a coherent Sony X-module stack.
+ *
+ * The original standalone build mixed PS2SDK's ordinary mcman/mcserv IRXs
+ * with mcInit(MC_TYPE_XMC).  Those are different RPC protocols: MC_TYPE_XMC
+ * expects XMCMAN/XMCSERV.  On real hardware that mismatch left libmc waiting
+ * forever immediately after mcserv had started.
+ *
+ * PS2SDK's current memory-card and pad samples pair MC_TYPE_XMC/libpad with the
+ * ROM modules below.  Using the ROM X stack also removes four embedded IRXs
+ * and the old load-module-buffer compatibility layer from the application.
  */
 static int InitIopAndDevices(void)
 {
     int rc;
 
+    scr_printf("[IOP 1/7] Initializing SIF RPC...\n");
     SifInitRpc(0);
-    while (!SifIopReset("", 0)) {;}
+
+    scr_printf("[IOP 2/7] Requesting IOP reset (NULL args)...\n");
+    while (!SifIopReset(NULL, 0)) {;}
+    scr_printf("[IOP 2/7] Reset request accepted.\n");
+
+    scr_printf("[IOP 3/7] Waiting for IOP sync...\n");
     while (!SifIopSync()) {;}
+    scr_printf("[IOP 3/7] IOP synchronized.\n");
 
     SifInitRpc(0);
-    SifInitIopHeap();
-    SifLoadFileInit();
-    sbv_patch_enable_lmb();
+    rc = SifLoadFileInit();
+    if (rc < 0) {
+        scr_printf("[IOP] SifLoadFileInit FAILED: %d\n", rc);
+        return rc;
+    }
 
-    rc = ExecIrx(freesio2_irx, size_freesio2_irx);
+    scr_printf("[IOP 4/7] Loading ROM X modules...\n");
+
+    /* One XSIO2MAN instance services both XPADMAN and XMCMAN. */
+    rc = LoadRomModule("rom0:XSIO2MAN", "XSIO2MAN");
     if (rc < 0) return rc;
-    rc = ExecIrx(freepad_irx, size_freepad_irx);
+    rc = LoadRomModule("rom0:XPADMAN", "XPADMAN");
     if (rc < 0) return rc;
-    rc = ExecIrx(mcman_irx, size_mcman_irx);
+    rc = LoadRomModule("rom0:XMCMAN", "XMCMAN");
     if (rc < 0) return rc;
-    rc = ExecIrx(mcserv_irx, size_mcserv_irx);
+    rc = LoadRomModule("rom0:XMCSERV", "XMCSERV");
     if (rc < 0) return rc;
 
-    SifExitIopHeap();
     SifLoadFileExit();
 
+    scr_printf("[IOP 5/7] Binding libmc to XMCSERV...\n");
     rc = mcInit(MC_TYPE_XMC);
-    if (rc < 0) return rc;
+    if (rc < 0) {
+        scr_printf("[IOP 5/7] mcInit FAILED: %d\n", rc);
+        return rc;
+    }
+    scr_printf("[IOP 5/7] mcInit OK: %d\n", rc);
 
+    scr_printf("[IOP 6/7] Initializing libpad...\n");
     rc = padInit(0);
-    if (rc == 0) return -1;
+    if (rc == 0) {
+        scr_printf("[IOP 6/7] padInit FAILED.\n");
+        return -1;
+    }
+    scr_printf("[IOP 6/7] padInit OK.\n");
 
-    if (padPortOpen(0, 0, PadBuffer) == 0)
+    scr_printf("[IOP 7/7] Opening controller port 0...\n");
+    if (padPortOpen(0, 0, PadBuffer) == 0) {
+        scr_printf("[IOP 7/7] padPortOpen FAILED.\n");
         return -2;
+    }
+    scr_printf("[IOP 7/7] Controller port open.\n");
 
     return 0;
 }
 
-/*
- * Generate a deterministic but non-trivial test payload. Determinism makes
- * failures reproducible, while the changing byte pattern catches more than a
- * simple all-zero/all-FF write would.
- */
+/* Deterministic non-trivial data catches more than an all-zero write. */
 static void FillPattern(void)
 {
     unsigned int i;
@@ -172,14 +180,7 @@ static int DeleteFile(int port, const char *name)
     return McSyncResult();
 }
 
-/*
- * Never overwrite a user's file. We probe a small reserved-looking namespace
- * and only accept a filename when MCMAN says the exact entry does not exist.
- *
- * Depending on MCMAN implementation/path handling, an absent exact filename
- * can surface as either 0 entries or sceMcResNoEntry. A positive result means
- * that the candidate exists and the search must continue.
- */
+/* Never overwrite a user's file while choosing a temporary test filename. */
 static int FindUnusedTempName(int port, char *name)
 {
     int i;
@@ -193,26 +194,18 @@ static int FindUnusedTempName(int port, char *name)
 
         if (rc == 0 || rc == sceMcResNoEntry)
             return 0;
-
         if (rc < 0)
             return rc;
-
-        /* Positive result: exact filename already exists. Try the next one. */
+        /* Positive result: exact filename exists; try the next candidate. */
     }
 
-    /* Refuse to reuse an existing candidate even in this pathological case. */
     return -1000;
 }
 
 /*
- * End-to-end filesystem integrity test.
- *
- * The sequence intentionally crosses close/reopen boundaries:
- *   create -> write -> flush -> close -> reopen -> read -> compare -> delete
- *
- * This catches failures that would be invisible if we only compared buffers
- * before the data had actually travelled through MCMAN and back from the card.
- * Cleanup is part of the test result, not a best-effort afterthought.
+ * End-to-end filesystem integrity test:
+ * create -> write -> flush -> close -> reopen -> read -> compare -> delete.
+ * Cleanup is part of the result, not a best-effort afterthought.
  */
 static int RunReadWriteTest(int port, int *cleanup_rc)
 {
@@ -285,7 +278,6 @@ static int RunReadWriteTest(int port, int *cleanup_rc)
     if (*cleanup_rc < 0)
         return -1004;
 
-    /* Verify cleanup rather than trusting mcDelete() alone. */
     memset(&DirEntry, 0, sizeof(DirEntry));
     mcGetDir(port, 0, path, 0, 1, &DirEntry);
     rc = McSyncResult();
@@ -296,15 +288,8 @@ static int RunReadWriteTest(int port, int *cleanup_rc)
 }
 
 /*
- * Classify one physical memory-card port.
- *
- * Ordering is important. Authentication/detection errors are evaluated before
- * MC_TYPE_NONE because a failed probe can leave the type field at NONE; doing
- * the type check first would hide the more useful failure reason.
- *
- * Formatting permission is only granted for a reported PS2 card with an
- * explicit no-format condition. Generic I/O failure never implies permission
- * to destroy the filesystem.
+ * Classify one memory-card port.  Authentication/detection errors are checked
+ * before MC_TYPE_NONE because a failed probe can leave type at NONE.
  */
 static void InspectCard(int port)
 {
@@ -324,24 +309,20 @@ static void InspectCard(int port)
         r->health = CARD_AUTH_FAILURE;
         return;
     }
-
     if (r->info_rc <= sceMcResFailDetect) {
         r->health = CARD_DETECT_FAILURE;
         return;
     }
-
     if (r->type == MC_TYPE_NONE) {
         r->health = CARD_NO_CARD;
         return;
     }
-
     if (r->info_rc == sceMcResNoFormat || !r->formatted) {
         r->health = CARD_UNFORMATTED;
         r->format_allowed = (r->type == MC_TYPE_PS2);
         return;
     }
 
-    /* A formatted flag alone is not enough; prove that root traversal works. */
     memset(&DirEntry, 0, sizeof(DirEntry));
     mcGetDir(port, 0, "/*", 0, 1, &DirEntry);
     r->root_rc = McSyncResult();
@@ -351,17 +332,14 @@ static void InspectCard(int port)
         r->format_allowed = (r->type == MC_TYPE_PS2);
         return;
     }
-
     if (r->root_rc == sceMcResFailAuth) {
         r->health = CARD_AUTH_FAILURE;
         return;
     }
-
     if (r->root_rc <= sceMcResFailDetect) {
         r->health = CARD_DETECT_FAILURE;
         return;
     }
-
     if (r->root_rc < 0 && r->root_rc != sceMcResNoEntry) {
         r->health = CARD_IO_FAILURE;
         return;
@@ -411,14 +389,13 @@ static const char *TypeText(int type)
     }
 }
 
-/* Redraw only when state changes; there is no reason to spam the GS every loop. */
 static void Render(int selected, int confirm_format, int last_format_rc)
 {
     CardReport *r = &Reports[selected];
 
     scr_clear();
     scr_printf("PS2 Memory Card Inspector v%s - %s\n", APP_VERSION, APP_CODENAME);
-    scr_printf("Standalone diagnostic build - no FMCB installation code\n\n");
+    scr_printf("PS2DEV 2.0 / X-module diagnostic build\n\n");
     scr_printf("< LEFT / RIGHT > select slot    X test    START test both\n");
     scr_printf("SELECT exit\n\n");
 
@@ -450,15 +427,10 @@ static void Render(int selected, int confirm_format, int last_format_rc)
     if (last_format_rc != -999)
         scr_printf("\nLast format rc: %d\n", last_format_rc);
 
-    scr_printf("\nRaw MCMAN errors are shown intentionally for diagnosis.\n");
+    scr_printf("\nRaw XMCMAN errors are shown intentionally for diagnosis.\n");
 }
 
-/*
- * Destructive primitive. Callers must already have passed both gates:
- * InspectCard() must set format_allowed and the UI must receive the explicit
- * L1+R1+Triangle confirmation. Re-inspection after success verifies the new
- * filesystem through the same code path as any other card.
- */
+/* Destructive primitive; the caller must already have passed both UI gates. */
 static int FormatCard(int port)
 {
     int rc;
@@ -470,7 +442,6 @@ static int FormatCard(int port)
     return rc;
 }
 
-/* Return edge-triggered button presses while also exposing the held state. */
 static u32 ReadPadPressed(u32 *held)
 {
     struct padButtonStatus buttons;
@@ -486,7 +457,6 @@ static u32 ReadPadPressed(u32 *held)
     }
 
     if (padRead(0, 0, &buttons) != 0) {
-        /* libpad buttons are active-low, so invert them into a normal bitset. */
         state = 0xFFFFu ^ buttons.btns;
         pressed = state & ~old_state;
         old_state = state;
@@ -511,7 +481,8 @@ int main(int argc, char *argv[])
 
     init_scr();
     scr_clear();
-    scr_printf("PS2 Memory Card Inspector\nInitializing IOP and memory-card services...\n");
+    scr_printf("PS2 Memory Card Inspector\n");
+    scr_printf("Initializing IOP and memory-card services...\n");
 
     init_rc = InitIopAndDevices();
     if (init_rc < 0) {
@@ -520,7 +491,7 @@ int main(int argc, char *argv[])
         SleepThread();
     }
 
-    /* Seed both reports so switching slots immediately shows useful state. */
+    scr_printf("\nInitialization complete. Inspecting slots...\n");
     InspectCard(0);
     InspectCard(1);
 
@@ -536,7 +507,6 @@ int main(int argc, char *argv[])
             break;
 
         if (confirm_format) {
-            /* While armed, ordinary actions are ignored until confirm/cancel. */
             if (pressed & PAD_CIRCLE) {
                 confirm_format = 0;
                 dirty = 1;
@@ -569,7 +539,6 @@ int main(int argc, char *argv[])
             }
         }
 
-        /* UI throttle only; card protocol timing is handled by libmc/mcSync. */
         DelayThread(16000);
     }
 
