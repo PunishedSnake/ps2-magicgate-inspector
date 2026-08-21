@@ -2,9 +2,8 @@
  * PS2 Memory Card Inspector - optional FMCB install planning
  *
  * This is an independent, payload-free description of a normal FreeMcBoot
- * package plus a read-only mass: source backend.  Nothing in this file writes
- * to a memory card.  The eventual commit path will remain a separate stage so
- * package/card/MagicGate preflight can be audited independently.
+ * package plus a read-only mass: source backend. Nothing in this file writes
+ * to a memory card. The eventual commit path remains a separate stage.
  */
 
 #define NEWLIB_PORT_AWARE
@@ -159,11 +158,17 @@ out:
     if (status->filexio_init_rc < 0)
         return status->filexio_init_rc;
 
-    /* Give USB mass-storage enumeration a short head start.  A later manual
-     * preflight can always be retried if the device was inserted afterwards. */
     DelayThread(250000);
     status->available = 1;
     return 0;
+}
+
+void FmcbShutdownMassBackend(FmcbMassBackendStatus *status)
+{
+    if (status != NULL && status->available)
+        fileXioExit();
+    if (status != NULL)
+        status->available = 0;
 }
 
 static char DetectRegionLetter(char *romver_region)
