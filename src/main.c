@@ -10,79 +10,156 @@
 #include <kernel.h>
 #include <sifrpc.h>
 #include <iopcontrol.h>
+#include <iopcontrol_special.h>
+#include <iopheap.h>
+#include <ioprpgen.h>
 #include <loadfile.h>
 #include <delaythread.h>
 #include <libmc.h>
 #include <libpad.h>
 #include <debug.h>
+#include <sbv_patches.h>
+#include <malloc.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "card.h"
 #include "magicgate.h"
 
-#define APP_VERSION "0.2.0-dev1"
+#define APP_VERSION "0.2.0-dev2"
 #define APP_CODENAME "Briscoe"
 #define SLOT_COUNT 2
+
+extern unsigned char freesio2_irx[];
+extern unsigned int size_freesio2_irx;
+extern unsigned char freepad_irx[];
+extern unsigned int size_freepad_irx;
+extern unsigned char mcman_irx[];
+extern unsigned int size_mcman_irx;
+extern unsigned char mcserv_irx[];
+extern unsigned int size_mcserv_irx;
+extern unsigned char secrman_irx[];
+extern unsigned int size_secrman_irx;
 
 static unsigned char PadBuffer[256] __attribute__((aligned(64)));
 static CardReport Reports[SLOT_COUNT];
 static MagicGateReport MgReports[SLOT_COUNT];
 static MagicGateIopStatus MgIopStatus;
 
-static int LoadRomModule(const char *path, const char *name)
+static int LoadEmbeddedModule(const unsigned char *module, unsigned int size,
+                              const char *name)
 {
     int rc;
+    int start_rc = -999;
 
     scr_printf("[IOP] Loading %s...\n", name);
-    rc = SifLoadModule(path, 0, NULL);
+    rc = SifExecModuleBuffer((void *)module, size, 0, NULL, &start_rc);
     if (rc < 0)
-        scr_printf("[IOP] %s FAILED: rc=%d\n", name, rc);
+        scr_printf("[IOP] %s FAILED: load=%d start=%d\n", name, rc, start_rc);
     else
-        scr_printf("[IOP] %s OK: id=%d\n", name, rc);
+        scr_printf("[IOP] %s OK: id=%d start=%d\n", name, rc, start_rc);
 
     return rc;
 }
 
 /*
- * Initialize the ordinary X memory-card stack first, then add PS2SDK's open
- * SECRMAN/SECRSIF pair.  MagicGate is deliberately optional: a SECR bring-up
- * failure must not make the basic memory-card inspector unusable.
+ * Build the smallest possible IOPRP containing the PS2SDK special SECRMAN.
+ * ioprpgen adds RESET/ROMDIR/EXTINFO itself.  Rebooting with this image is
+ * important: merely loading a second SECRMAN after the ROM memory-card stack
+ * is already initialized leaves the new SECRMAN without XMCMAN callbacks.
+ */
+static int RebootIopWithSecrman(void)
+{
+    struct ioprpgen_ctx ctx;
+    struct ioprpgen_memwrite_ctx memctx;
+    struct ioprpgen_entry entries[2];
+    int image_size;
+    int written;
+    void *image;
+
+    memset(entries, 0, sizeof(entries));
+    entries[0].m_name = "SECRMAN";
+    entries[0].m_data = secrman_irx;
+    entries[0].m_data_size = size_secrman_irx;
+
+    ioprpgen_setup_membuf(&ctx, &memctx, NULL, 0);
+    image_size = ioprpgen_write_ioprp(&ctx, entries);
+    if (image_size <= 0)
+        return -3000;
+
+    image = memalign(64, image_size);
+    if (image == NULL)
+        return -3001;
+
+    ioprpgen_setup_membuf(&ctx, &memctx, image, image_size);
+    written = ioprpgen_write_ioprp(&ctx, entries);
+    if (written != image_size) {
+        free(image);
+        return -3002;
+    }
+
+    SifInitRpc(0);
+    if (!SifIopRebootBuffer(image, image_size)) {
+        free(image);
+        return -3003;
+    }
+
+    while (!SifIopSync()) {;}
+    free(image);
+    SifInitRpc(0);
+    return 0;
+}
+
+/*
+ * Initialize one coherent PS2SDK stack:
+ *
+ *   runtime IOPRP: special SECRMAN
+ *   -> freesio2 -> freepad -> XMCMAN -> XMCSERV -> SECRSIF
+ *
+ * PS2SDK's mcman.irx/mcserv.irx are built as XMCMAN/XMCSERV by default.  By
+ * loading XMCMAN after the SECRMAN reboot, its init code registers the card
+ * command and device-ID callbacks that SECRMAN needs for real MagicGate I/O.
  */
 static int InitIopAndDevices(void)
 {
     int rc;
     int mg_rc;
 
-    scr_printf("[IOP 1/8] Initializing SIF RPC...\n");
-    SifInitRpc(0);
-
-    scr_printf("[IOP 2/8] Requesting IOP reset (NULL args)...\n");
-    while (!SifIopReset(NULL, 0)) {;}
-    scr_printf("[IOP 2/8] Reset request accepted.\n");
-
-    scr_printf("[IOP 3/8] Waiting for IOP sync...\n");
-    while (!SifIopSync()) {;}
-    scr_printf("[IOP 3/8] IOP synchronized.\n");
-
-    SifInitRpc(0);
-    rc = SifLoadFileInit();
+    scr_printf("[IOP 1/9] Building SECRMAN IOPRP and rebooting IOP...\n");
+    rc = RebootIopWithSecrman();
     if (rc < 0) {
-        scr_printf("[IOP] SifLoadFileInit FAILED: %d\n", rc);
+        scr_printf("[IOP 1/9] SECRMAN reboot FAILED: %d\n", rc);
         return rc;
     }
+    scr_printf("[IOP 1/9] IOP rebooted with PS2SDK SECRMAN.\n");
 
-    scr_printf("[IOP 4/8] Loading ROM X modules...\n");
-    rc = LoadRomModule("rom0:XSIO2MAN", "XSIO2MAN");
-    if (rc < 0) return rc;
-    rc = LoadRomModule("rom0:XPADMAN", "XPADMAN");
-    if (rc < 0) return rc;
-    rc = LoadRomModule("rom0:XMCMAN", "XMCMAN");
-    if (rc < 0) return rc;
-    rc = LoadRomModule("rom0:XMCSERV", "XMCSERV");
+    scr_printf("[IOP 2/9] Initializing loadfile/IOP heap...\n");
+    rc = SifLoadFileInit();
+    if (rc < 0) {
+        scr_printf("[IOP 2/9] SifLoadFileInit FAILED: %d\n", rc);
+        return rc;
+    }
+    SifInitIopHeap();
+    sbv_patch_enable_lmb();
+
+    scr_printf("[IOP 3/9] Loading PS2SDK SIO2MAN...\n");
+    rc = LoadEmbeddedModule(freesio2_irx, size_freesio2_irx, "freesio2/X SIO2MAN");
     if (rc < 0) return rc;
 
-    scr_printf("[IOP 5/8] Loading MagicGate SECR modules...\n");
+    scr_printf("[IOP 4/9] Loading PS2SDK PADMAN...\n");
+    rc = LoadEmbeddedModule(freepad_irx, size_freepad_irx, "freepad/PADMAN");
+    if (rc < 0) return rc;
+
+    scr_printf("[IOP 5/9] Loading PS2SDK XMCMAN...\n");
+    rc = LoadEmbeddedModule(mcman_irx, size_mcman_irx, "mcman/XMCMAN");
+    if (rc < 0) return rc;
+
+    scr_printf("[IOP 6/9] Loading PS2SDK XMCSERV...\n");
+    rc = LoadEmbeddedModule(mcserv_irx, size_mcserv_irx, "mcserv/XMCSERV");
+    if (rc < 0) return rc;
+
+    scr_printf("[IOP 7/9] Loading SECRSIF...\n");
     mg_rc = MagicGateLoadIopModules(&MgIopStatus);
     scr_printf("[SECR] secrman: load=%d start=%d\n",
                MgIopStatus.secrman_load_rc, MgIopStatus.secrman_start_rc);
@@ -93,30 +170,28 @@ static int InitIopAndDevices(void)
     else
         scr_printf("[SECR] MagicGate RPC servers staged.\n");
 
+    SifExitIopHeap();
     SifLoadFileExit();
 
-    scr_printf("[IOP 6/8] Binding libmc to XMCSERV...\n");
+    scr_printf("[IOP 8/9] Binding libmc to XMCSERV...\n");
     rc = mcInit(MC_TYPE_XMC);
     if (rc < 0) {
-        scr_printf("[IOP 6/8] mcInit FAILED: %d\n", rc);
+        scr_printf("[IOP 8/9] mcInit FAILED: %d\n", rc);
         return rc;
     }
-    scr_printf("[IOP 6/8] mcInit OK: %d\n", rc);
+    scr_printf("[IOP 8/9] mcInit OK: %d\n", rc);
 
-    scr_printf("[IOP 7/8] Initializing libpad...\n");
+    scr_printf("[IOP 9/9] Initializing controller...\n");
     rc = padInit(0);
     if (rc == 0) {
-        scr_printf("[IOP 7/8] padInit FAILED.\n");
+        scr_printf("[IOP 9/9] padInit FAILED.\n");
         return -1;
     }
-    scr_printf("[IOP 7/8] padInit OK.\n");
-
-    scr_printf("[IOP 8/8] Opening controller port 0...\n");
     if (padPortOpen(0, 0, PadBuffer) == 0) {
-        scr_printf("[IOP 8/8] padPortOpen FAILED.\n");
+        scr_printf("[IOP 9/9] padPortOpen FAILED.\n");
         return -2;
     }
-    scr_printf("[IOP 8/8] Controller port open.\n");
+    scr_printf("[IOP 9/9] Controller port open.\n");
 
     return 0;
 }
@@ -130,7 +205,7 @@ static void InspectAndInvalidateMagicGate(int port)
 static void RenderHeader(int selected, int view)
 {
     scr_printf("PS2 Memory Card Inspector v%s - %s\n", APP_VERSION, APP_CODENAME);
-    scr_printf("PS2DEV 2.0 / XMCMAN + staged SECR diagnostics\n\n");
+    scr_printf("PS2DEV 2.0 / coherent XMCMAN + SECR stack\n\n");
     scr_printf("< LEFT/RIGHT > slot   X filesystem   SQUARE MagicGate\n");
     scr_printf("START both filesystems   R1 %s   SELECT exit\n\n",
                view ? "card view" : "MG details");
@@ -192,8 +267,8 @@ static void RenderMagicGateView(int selected)
     scr_printf("MagicGate:  %s\n", MagicGateResultText(mg->result));
     scr_printf("MG stage:   %s\n\n", MagicGateStageText(mg->stage));
 
-    scr_printf("SECR modules: %s\n", MgIopStatus.available ? "AVAILABLE" : "UNAVAILABLE");
-    scr_printf("  secrman load/start: %d / %d\n",
+    scr_printf("SECR stack: %s\n", MgIopStatus.available ? "AVAILABLE" : "UNAVAILABLE");
+    scr_printf("  secrman reboot: %d / %d\n",
                MgIopStatus.secrman_load_rc, MgIopStatus.secrman_start_rc);
     scr_printf("  secrsif load/start: %d / %d\n",
                MgIopStatus.secrsif_load_rc, MgIopStatus.secrsif_start_rc);
@@ -274,7 +349,7 @@ int main(int argc, char *argv[])
     init_scr();
     scr_clear();
     scr_printf("PS2 Memory Card Inspector - Briscoe bring-up\n");
-    scr_printf("Initializing IOP, memory-card and SECR services...\n");
+    scr_printf("Initializing coherent memory-card and SECR services...\n");
 
     init_rc = InitIopAndDevices();
     if (init_rc < 0) {
