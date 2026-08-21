@@ -2,13 +2,13 @@
 
 A standalone PlayStation 2 homebrew utility for inspecting memory-card health without depending on FreeMcBoot or another installer.
 
-> **Current status:** v0.1.0 **Columbo** is build-verified with PS2SDK/PS2DEV, but has not yet been validated on real hardware. Treat the results as experimental until hardware testing is completed.
+> **Current status:** v0.1.0 **Columbo** is build-verified on PS2DEV 2.0.0. The original hardware build exposed an IOP/libmc initialization bug; the current development build replaces the mixed MCMAN/XMC stack with a coherent ROM X-module stack and is awaiting real-hardware re-validation.
 
 ## What it does today
 
 `MC_INSPECTOR.ELF` currently supports both PS2 memory-card ports and can:
 
-- query the card with `mcGetInfo()` and preserve the raw MCMAN result;
+- query the card with `mcGetInfo()` and preserve the raw XMCMAN result;
 - report the card type, format state and free-cluster count;
 - verify access to the root directory;
 - run a non-destructive 4 KiB write/read/compare test;
@@ -24,6 +24,19 @@ Inspection should be non-destructive. The R/W test creates a uniquely named temp
 
 Formatting is deliberately harder to trigger than an ordinary test. It is never automatic. The user must first request formatting with **Triangle**, then confirm by holding **L1 + R1** and pressing **Triangle** again. Authentication, detection and generic I/O failures never unlock the formatter.
 
+## Runtime stack
+
+The current build uses the Sony X-module stack from the console ROM:
+
+- `rom0:XSIO2MAN`
+- `rom0:XPADMAN`
+- `rom0:XMCMAN`
+- `rom0:XMCSERV`
+
+`libmc` is initialized with `MC_TYPE_XMC`, matching `XMCMAN/XMCSERV`. This replaces the original development build, which incorrectly combined ordinary `mcman/mcserv` IRXs with the XMC client protocol and could hang during `mcInit()` on real hardware.
+
+Startup prints each IOP/module stage to the screen so an initialization failure can be identified without a serial log.
+
 ## Controls
 
 | Control | Action |
@@ -38,13 +51,13 @@ Formatting is deliberately harder to trigger than an ordinary test. It is never 
 
 ## Build
 
-The repository builds a self-contained `MC_INSPECTOR.ELF` with embedded PS2SDK IOP modules (`freesio2`, `freepad`, `mcman`, `mcserv`). CI currently uses the proven `ps2dev/ps2dev:v1.0` environment for compatibility with the toolchain used during initial bring-up.
+The project targets **PS2DEV 2.0.0**. CI builds in `ps2dev/ps2dev:v2.0.0`; the current toolchain reports GCC 15.2.0.
 
 ```sh
 make
 ```
 
-The GitHub Actions workflow additionally verifies the output with `file(1)`, calculates SHA-256 and publishes the ELF as an Actions artifact.
+The GitHub Actions workflow verifies the output with `file(1)`, calculates SHA-256 and publishes the ELF as an Actions artifact.
 
 ## Project documentation
 
