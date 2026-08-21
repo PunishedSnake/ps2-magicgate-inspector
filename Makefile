@@ -14,7 +14,8 @@ EE_LDFLAGS = -Wl,--gc-sections
 # mcInit but fails its first card probe with sceMcResFailResetAuth (-11).
 # This pinned dev5 experiment changes only the security pair so that result can
 # be attributed cleanly to the ABI/security implementation rather than to the
-# already-proven filesystem stack.
+# already-proven filesystem stack. The pinned upstream commit makes the two
+# downloaded IRXs immutable for this diagnostic build.
 FMCB_SECR_COMMIT = ac53a47a5c6eae675cc2611c7bebe62f56c7845c
 FMCB_SECR_BASE = https://raw.githubusercontent.com/israpps/FreeMcBoot-Installer/$(FMCB_SECR_COMMIT)/installer/irx/compiled
 FMCB_SECR_DIR = .build/fmcb-secr-1.3
