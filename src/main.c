@@ -1,8 +1,9 @@
 /*
  * PS2 Memory Card Inspector
  * -------------------------
- * v0.2.0 Briscoe separates ordinary filesystem health from MagicGate/KELF
- * capability and adds a read-only preflight for user-supplied FMCB packages.
+ * Briscoe dev4 keeps the hardware-validated ordinary memory-card stack as the
+ * permanent application personality. MagicGate/KELF work runs in an isolated
+ * IOP session and the normal stack is always restored before returning to UI.
  */
 
 #include <tamtypes.h>
@@ -27,7 +28,7 @@
 #include "magicgate.h"
 #include "fmcb_install.h"
 
-#define APP_VERSION "0.2.0-dev3"
+#define APP_VERSION "0.2.0-dev4"
 #define APP_CODENAME "Briscoe"
 #define SLOT_COUNT 2
 #define VIEW_CARD 0
@@ -35,14 +36,6 @@
 #define VIEW_FMCB 2
 #define VIEW_COUNT 3
 
-extern unsigned char freesio2_irx[];
-extern unsigned int size_freesio2_irx;
-extern unsigned char freepad_irx[];
-extern unsigned int size_freepad_irx;
-extern unsigned char mcman_irx[];
-extern unsigned int size_mcman_irx;
-extern unsigned char mcserv_irx[];
-extern unsigned int size_mcserv_irx;
 extern unsigned char secrman_irx[];
 extern unsigned int size_secrman_irx;
 
@@ -52,24 +45,86 @@ static MagicGateReport MgReports[SLOT_COUNT];
 static MagicGateIopStatus MgIopStatus;
 static FmcbMassBackendStatus FmcbMassStatus;
 static FmcbPackageReport FmcbReports[SLOT_COUNT];
+static int PadActive;
 
-static int LoadEmbeddedModule(const unsigned char *module, unsigned int size,
-                              const char *name)
+static int LoadRomModule(const char *path, const char *name)
 {
     int rc;
-    int start_rc = -999;
 
     scr_printf("[IOP] Loading %s...\n", name);
-    rc = SifExecModuleBuffer((void *)module, size, 0, NULL, &start_rc);
+    rc = SifLoadModule(path, 0, NULL);
     if (rc < 0)
-        scr_printf("[IOP] %s FAILED: load=%d start=%d\n", name, rc, start_rc);
+        scr_printf("[IOP] %s FAILED: rc=%d\n", name, rc);
     else
-        scr_printf("[IOP] %s OK: id=%d start=%d\n", name, rc, start_rc);
-
+        scr_printf("[IOP] %s OK: id=%d\n", name, rc);
     return rc;
 }
 
-/* Build the smallest possible IOPRP containing PS2SDK's special SECRMAN. */
+/*
+ * The normal application personality is deliberately the same ROM X-module
+ * arrangement that passed real-hardware Columbo testing. Experimental SECR
+ * code is never allowed to replace it permanently.
+ */
+static int InitNormalCardStack(void)
+{
+    int rc;
+
+    scr_printf("[NORMAL 1/6] Resetting IOP...\n");
+    SifInitRpc(0);
+    while (!SifIopReset(NULL, 0)) {;}
+    while (!SifIopSync()) {;}
+    SifInitRpc(0);
+
+    scr_printf("[NORMAL 2/6] Initializing loadfile...\n");
+    rc = SifLoadFileInit();
+    if (rc < 0)
+        return rc;
+
+    scr_printf("[NORMAL 3/6] Loading ROM XSIO2MAN/XPADMAN...\n");
+    rc = LoadRomModule("rom0:XSIO2MAN", "XSIO2MAN");
+    if (rc < 0) goto out_loadfile;
+    rc = LoadRomModule("rom0:XPADMAN", "XPADMAN");
+    if (rc < 0) goto out_loadfile;
+
+    scr_printf("[NORMAL 4/6] Loading ROM XMCMAN/XMCSERV...\n");
+    rc = LoadRomModule("rom0:XMCMAN", "XMCMAN");
+    if (rc < 0) goto out_loadfile;
+    rc = LoadRomModule("rom0:XMCSERV", "XMCSERV");
+    if (rc < 0) goto out_loadfile;
+
+out_loadfile:
+    SifLoadFileExit();
+    if (rc < 0)
+        return rc;
+
+    scr_printf("[NORMAL 5/6] Binding libmc...\n");
+    rc = mcInit(MC_TYPE_XMC);
+    if (rc < 0)
+        return rc;
+
+    scr_printf("[NORMAL 6/6] Initializing controller...\n");
+    rc = padInit(0);
+    if (rc == 0)
+        return -1;
+    if (padPortOpen(0, 0, PadBuffer) == 0) {
+        padEnd();
+        return -2;
+    }
+    PadActive = 1;
+    return 0;
+}
+
+static void ShutdownNormalClients(void)
+{
+    FmcbShutdownMassBackend(&FmcbMassStatus);
+    if (PadActive) {
+        padPortClose(0, 0);
+        padEnd();
+        PadActive = 0;
+    }
+}
+
+/* Generate the tiny SECRMAN IOPRP in EE RAM. No external IOPRP blob is used. */
 static int RebootIopWithSecrman(void)
 {
     struct ioprpgen_ctx ctx;
@@ -105,7 +160,6 @@ static int RebootIopWithSecrman(void)
         free(image);
         return -3003;
     }
-
     while (!SifIopSync()) {;}
     free(image);
     SifInitRpc(0);
@@ -113,83 +167,114 @@ static int RebootIopWithSecrman(void)
 }
 
 /*
- * Initialize one coherent PS2SDK stack:
- * runtime IOPRP: special SECRMAN
- * -> freesio2 -> freepad -> XMCMAN -> XMCSERV -> SECRSIF
+ * Isolated experimental personality. Unlike dev3 it uses the ROM X SIO2/MC
+ * modules instead of PS2SDK freesio2/XMCMAN. If this personality cannot see a
+ * card, the failure is recorded as MG-session evidence and normal operation is
+ * restored immediately afterwards.
  */
-static int InitIopAndDevices(void)
+static int InitMagicGateSession(MagicGateReport *report)
 {
     int rc;
     int mg_rc;
 
-    scr_printf("[IOP 1/9] Building SECRMAN IOPRP and rebooting IOP...\n");
+    report->stage = MG_STAGE_SESSION_SETUP;
     rc = RebootIopWithSecrman();
-    if (rc < 0) {
-        scr_printf("[IOP 1/9] SECRMAN reboot FAILED: %d\n", rc);
+    report->session_setup_rc = rc;
+    if (rc < 0)
         return rc;
-    }
-    scr_printf("[IOP 1/9] IOP rebooted with PS2SDK SECRMAN.\n");
 
-    scr_printf("[IOP 2/9] Initializing loadfile/IOP heap...\n");
     rc = SifLoadFileInit();
     if (rc < 0) {
-        scr_printf("[IOP 2/9] SifLoadFileInit FAILED: %d\n", rc);
+        report->session_setup_rc = rc;
         return rc;
     }
     SifInitIopHeap();
     sbv_patch_enable_lmb();
 
-    scr_printf("[IOP 3/9] Loading PS2SDK SIO2MAN...\n");
-    rc = LoadEmbeddedModule(freesio2_irx, size_freesio2_irx, "freesio2/X SIO2MAN");
-    if (rc < 0) return rc;
+    rc = LoadRomModule("rom0:XSIO2MAN", "MG/XSIO2MAN");
+    if (rc < 0) goto out;
+    rc = LoadRomModule("rom0:XMCMAN", "MG/XMCMAN");
+    if (rc < 0) goto out;
+    rc = LoadRomModule("rom0:XMCSERV", "MG/XMCSERV");
+    if (rc < 0) goto out;
 
-    scr_printf("[IOP 4/9] Loading PS2SDK PADMAN...\n");
-    rc = LoadEmbeddedModule(freepad_irx, size_freepad_irx, "freepad/PADMAN");
-    if (rc < 0) return rc;
-
-    scr_printf("[IOP 5/9] Loading PS2SDK XMCMAN...\n");
-    rc = LoadEmbeddedModule(mcman_irx, size_mcman_irx, "mcman/XMCMAN");
-    if (rc < 0) return rc;
-
-    scr_printf("[IOP 6/9] Loading PS2SDK XMCSERV...\n");
-    rc = LoadEmbeddedModule(mcserv_irx, size_mcserv_irx, "mcserv/XMCSERV");
-    if (rc < 0) return rc;
-
-    scr_printf("[IOP 7/9] Loading SECRSIF...\n");
     mg_rc = MagicGateLoadIopModules(&MgIopStatus);
-    scr_printf("[SECR] secrman: load=%d start=%d\n",
-               MgIopStatus.secrman_load_rc, MgIopStatus.secrman_start_rc);
-    scr_printf("[SECR] secrsif: load=%d start=%d\n",
-               MgIopStatus.secrsif_load_rc, MgIopStatus.secrsif_start_rc);
-    if (mg_rc < 0)
-        scr_printf("[SECR] WARNING: MagicGate disabled (rc=%d).\n", mg_rc);
-    else
-        scr_printf("[SECR] MagicGate RPC servers staged.\n");
+    if (mg_rc < 0) {
+        rc = mg_rc;
+        goto out;
+    }
 
+out:
     SifExitIopHeap();
     SifLoadFileExit();
-
-    scr_printf("[IOP 8/9] Binding libmc to XMCSERV...\n");
-    rc = mcInit(MC_TYPE_XMC);
-    if (rc < 0) {
-        scr_printf("[IOP 8/9] mcInit FAILED: %d\n", rc);
+    report->session_setup_rc = rc;
+    if (rc < 0)
         return rc;
-    }
-    scr_printf("[IOP 8/9] mcInit OK: %d\n", rc);
 
-    scr_printf("[IOP 9/9] Initializing controller...\n");
-    rc = padInit(0);
-    if (rc == 0) {
-        scr_printf("[IOP 9/9] padInit FAILED.\n");
-        return -1;
-    }
-    if (padPortOpen(0, 0, PadBuffer) == 0) {
-        scr_printf("[IOP 9/9] padPortOpen FAILED.\n");
-        return -2;
-    }
-    scr_printf("[IOP 9/9] Controller port open.\n");
+    rc = mcInit(MC_TYPE_XMC);
+    report->session_mcinit_rc = rc;
+    return rc;
+}
 
+static int RestoreNormalEnvironment(void)
+{
+    int rc;
+    int fmcb_rc;
+
+    scr_printf("[RESTORE] Returning to normal ROM X stack...\n");
+    rc = InitNormalCardStack();
+    if (rc < 0)
+        return rc;
+
+    fmcb_rc = FmcbInitMassBackend(&FmcbMassStatus);
+    if (fmcb_rc < 0)
+        scr_printf("[RESTORE] mass: unavailable: %d (continuing)\n", fmcb_rc);
+
+    CardInspect(0, &Reports[0]);
+    CardInspect(1, &Reports[1]);
     return 0;
+}
+
+static int RunMagicGateSession(int target_port)
+{
+    MagicGateKelfBuffer kelf;
+    MagicGateReport *report = &MgReports[target_port];
+    int rc;
+    int restore_rc;
+
+    MagicGateResetKelfBuffer(&kelf);
+    rc = MagicGatePrepareKelf(target_port, &kelf, report);
+    if (rc < 0)
+        return rc;
+
+    scr_clear();
+    scr_printf("PS2 Memory Card Inspector - isolated MagicGate session\n\n");
+    scr_printf("KELF prepared from mc%d:%s (%d bytes)\n",
+               kelf.source_port, kelf.source_path, kelf.size);
+    scr_printf("Switching away from normal card stack...\n");
+
+    ShutdownNormalClients();
+
+    rc = InitMagicGateSession(report);
+    if (rc < 0) {
+        report->result = MG_RESULT_SESSION_SETUP_FAILED;
+        scr_printf("[MG] Session setup failed: %d\n", rc);
+    } else {
+        scr_printf("[MG] Session ready. Checking target card...\n");
+        MagicGateProbePrepared(target_port, &kelf, report);
+    }
+
+    MagicGateReleaseKelf(&kelf);
+
+    restore_rc = RestoreNormalEnvironment();
+    report->restore_rc = restore_rc;
+    if (restore_rc < 0) {
+        scr_printf("\nFATAL: normal card stack restore failed: %d\n", restore_rc);
+        scr_printf("Power-cycle or reset the console.\n");
+        SleepThread();
+    }
+
+    return (report->result == MG_RESULT_PASS) ? 0 : -1;
 }
 
 static void InspectAndInvalidateMagicGate(int port)
@@ -208,7 +293,7 @@ static void RenderHeader(int selected, int view)
         page = "FMCB PREFLIGHT";
 
     scr_printf("PS2 Memory Card Inspector v%s - %s\n", APP_VERSION, APP_CODENAME);
-    scr_printf("PS2DEV 2.0 / coherent XMCMAN + SECR stack / %s\n\n", page);
+    scr_printf("PS2DEV 2.0 / normal ROM X stack + isolated SECR / %s\n\n", page);
     scr_printf("< LEFT/RIGHT > slot   X filesystem   SQUARE MagicGate\n");
     scr_printf("CIRCLE FMCB scan   R1 next page   START test both   SELECT exit\n\n");
     scr_printf("Selected: SLOT %d (mc%d:)\n", selected + 1, selected);
@@ -262,39 +347,39 @@ static void RenderMagicGateView(int selected)
     MagicGateReport *mg = &MgReports[selected];
 
     RenderHeader(selected, VIEW_MAGICGATE);
-    scr_printf("Filesystem: %s\n", CardHealthText(Reports[selected].health));
-    scr_printf("MagicGate:  %s\n", MagicGateResultText(mg->result));
-    scr_printf("MG stage:   %s\n\n", MagicGateStageText(mg->stage));
-
-    scr_printf("SECR stack: %s\n", MgIopStatus.available ? "AVAILABLE" : "UNAVAILABLE");
-    scr_printf("  secrman reboot: %d / %d\n",
-               MgIopStatus.secrman_load_rc, MgIopStatus.secrman_start_rc);
-    scr_printf("  secrsif load/start: %d / %d\n",
-               MgIopStatus.secrsif_load_rc, MgIopStatus.secrsif_start_rc);
-    scr_printf("SECR RPC bind/transport rc: %d\n\n", mg->rpc_rc);
+    scr_printf("Normal filesystem: %s\n", CardHealthText(Reports[selected].health));
+    scr_printf("MagicGate result:  %s\n", MagicGateResultText(mg->result));
+    scr_printf("MG stage:          %s\n\n", MagicGateStageText(mg->stage));
 
     if (mg->source_port >= 0) {
-        scr_printf("KELF source: mc%d:%s\n", mg->source_port, mg->source_path);
-        scr_printf("KELF size: %d bytes   source I/O rc: %d\n",
-                   mg->source_size, mg->source_io_rc);
+        scr_printf("KELF: mc%d:%s (%d bytes)\n",
+                   mg->source_port, mg->source_path, mg->source_size);
     } else {
-        scr_printf("KELF source: none found\n");
-        scr_printf("Looks for FMCB osdmain.elf on the other slot first.\n");
+        scr_printf("KELF: none found\n");
     }
 
-    scr_printf("\nDownload header: %d   reply size: %d\n",
+    scr_printf("Session setup rc:  %d\n", mg->session_setup_rc);
+    scr_printf("Session mcInit rc: %d\n", mg->session_mcinit_rc);
+    scr_printf("Session mcGetInfo: %d  type=%d fmt=%d free=%d\n",
+               mg->session_mcinfo_rc, mg->session_type,
+               mg->session_formatted, mg->session_free_clusters);
+    scr_printf("Normal restore rc: %d\n\n", mg->restore_rc);
+
+    scr_printf("SECRSIF load/start: %d / %d\n",
+               MgIopStatus.secrsif_load_rc, MgIopStatus.secrsif_start_rc);
+    scr_printf("SECR RPC rc: %d\n", mg->rpc_rc);
+    scr_printf("Download header: %d   reply size: %d\n",
                mg->header_rc, mg->header_reply_size);
     scr_printf("BIT blocks: %d   encrypted: %d   completed: %d\n",
                mg->block_count, mg->encrypted_blocks, mg->blocks_completed);
-    scr_printf("Failed block: %d\n", mg->failed_block);
-    scr_printf("Get Kbit: %d\n", mg->kbit_rc);
-    scr_printf("Get Kc:   %d\n", mg->kc_rc);
+    scr_printf("Failed block: %d   Kbit: %d   Kc: %d\n",
+               mg->failed_block, mg->kbit_rc, mg->kc_rc);
     if (mg->icvps2_required)
-        scr_printf("Get ICVPS2: %d (required)\n", mg->icvps2_rc);
+        scr_printf("ICVPS2: %d (required)\n", mg->icvps2_rc);
     else
-        scr_printf("Get ICVPS2: N/A\n");
+        scr_printf("ICVPS2: N/A\n");
 
-    scr_printf("\nNo KELF or card data is written by this probe.\n");
+    scr_printf("\nProbe is RAM-only; normal card stack is restored afterwards.\n");
 }
 
 static void RenderFmcbView(int selected)
@@ -342,7 +427,7 @@ static void RenderFmcbView(int selected)
     }
 
     scr_printf("\nCIRCLE: rescan user package\n");
-    scr_printf("INSTALL: DISABLED IN DEV3 (preflight is read-only)\n");
+    scr_printf("INSTALL: DISABLED IN DEV4 (preflight is read-only)\n");
 }
 
 static void Render(int selected, int view, int confirm_format, int last_format_rc)
@@ -397,28 +482,25 @@ int main(int argc, char *argv[])
 
     init_scr();
     scr_clear();
-    scr_printf("PS2 Memory Card Inspector - Briscoe bring-up\n");
-    scr_printf("Initializing coherent memory-card and SECR services...\n");
+    scr_printf("PS2 Memory Card Inspector - Briscoe dev4\n");
+    scr_printf("Initializing hardware-validated normal ROM X stack...\n");
 
-    init_rc = InitIopAndDevices();
+    init_rc = InitNormalCardStack();
     if (init_rc < 0) {
         scr_printf("\nInitialization failed: %d\n", init_rc);
-        scr_printf("System halted.\n");
         SleepThread();
     }
-
-    scr_printf("\n[FMCB] Initializing optional mass: package source...\n");
-    fmcb_rc = FmcbInitMassBackend(&FmcbMassStatus);
-    if (fmcb_rc < 0)
-        scr_printf("[FMCB] mass: backend unavailable: %d (Inspector continues)\n", fmcb_rc);
-    else
-        scr_printf("[FMCB] mass: backend ready.\n");
 
     scr_printf("\nInitialization complete. Inspecting slots...\n");
     InspectAndInvalidateMagicGate(0);
     InspectAndInvalidateMagicGate(1);
     FmcbResetPackageReport(&FmcbReports[0], 0);
     FmcbResetPackageReport(&FmcbReports[1], 1);
+
+    scr_printf("\n[FMCB] Initializing optional mass: source...\n");
+    fmcb_rc = FmcbInitMassBackend(&FmcbMassStatus);
+    if (fmcb_rc < 0)
+        scr_printf("[FMCB] mass: unavailable: %d (Inspector continues)\n", fmcb_rc);
 
     while (1) {
         if (dirty) {
@@ -468,8 +550,13 @@ int main(int argc, char *argv[])
                 dirty = 1;
             }
 
-            if ((pressed & PAD_SQUARE) && Reports[selected].type == MC_TYPE_PS2) {
-                MagicGateProbeCard(selected, &MgReports[selected]);
+            if (pressed & PAD_SQUARE) {
+                if (Reports[selected].type != MC_TYPE_PS2) {
+                    MagicGateResetReport(&MgReports[selected], selected);
+                    MgReports[selected].result = MG_RESULT_TARGET_NOT_PS2;
+                } else {
+                    RunMagicGateSession(selected);
+                }
                 view = VIEW_MAGICGATE;
                 dirty = 1;
             }
@@ -491,8 +578,7 @@ int main(int argc, char *argv[])
         DelayThread(16000);
     }
 
-    padPortClose(0, 0);
-    padEnd();
+    ShutdownNormalClients();
     SifExitRpc();
     return 0;
 }
