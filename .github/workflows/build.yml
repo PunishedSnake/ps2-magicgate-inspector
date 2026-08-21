@@ -26,7 +26,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Build standalone ELF in PS2DEV v1.0
+      - name: Build standalone ELF in PS2DEV v2.0.0
         shell: bash
         run: |
           set -euo pipefail
@@ -34,8 +34,8 @@ jobs:
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/work" \
             -w /work \
-            ps2dev/ps2dev:v1.0 \
-            sh -c 'apk add --no-cache build-base >/dev/null && ee-gcc --version && make'
+            ps2dev/ps2dev:v2.0.0 \
+            sh -c 'apk add --no-cache build-base >/dev/null && mips64r5900el-ps2-elf-gcc --version && make'
           cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR.ELF
 
       - name: Verify output
