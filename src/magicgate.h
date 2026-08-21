@@ -1,6 +1,8 @@
 #ifndef MCI_MAGICGATE_H
 #define MCI_MAGICGATE_H
 
+#include <errno.h>
+
 /*
  * MagicGate / KELF diagnostics for PS2 Memory Card Inspector.
  *
