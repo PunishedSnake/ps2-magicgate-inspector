@@ -1,10 +1,10 @@
 /*
  * PS2 Memory Card Inspector - MagicGate / KELF diagnostics
  *
- * Briscoe dev4 keeps ordinary card I/O and experimental SECR work in separate
- * IOP personalities.  A test KELF is acquired while the known-good normal ROM
+ * Briscoe dev6 keeps ordinary card I/O and experimental SECR work in separate
+ * IOP personalities. A test KELF is acquired while the known-good normal ROM
  * XMCMAN stack is active, retained in EE RAM, then exercised by the isolated
- * SECR session.  The resulting bound data is never written back to a card.
+ * SECR session. The resulting bound data is never written back to a card.
  */
 
 #define NEWLIB_PORT_AWARE
@@ -26,6 +26,8 @@
 
 #define MG_RPC_RETRIES 300
 #define MG_RPC_RETRY_USEC 1000
+#define MG_CARD_RETRIES 4
+#define MG_CARD_RETRY_USEC 20000
 #define MG_READ_CHUNK 4096
 #define MG_MAX_KELF_SIZE (4 * 1024 * 1024)
 #define MG_RPC_TIMEOUT (-2100)
@@ -451,7 +453,7 @@ int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
     int type = 0;
     int free_clusters = 0;
     int formatted = 0;
-    int rc;
+    int rc = sceMcResChangedCard;
     int i;
 
     if (buffer == NULL || buffer->data == NULL || buffer->size <= 0) {
@@ -464,15 +466,35 @@ int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
         return -1;
     }
 
+    /*
+     * XMCMAN uses sceMcResChangedCard (-1) as a state notification. After an
+     * IOP reboot it is normal for the first GetInfo to report CHANGED while
+     * still returning valid type/free/formatted metadata. Do not confuse that
+     * with an authentication failure. Retry a few times to establish a stable
+     * card state; if CHANGED persists but the target is clearly a PS2 card,
+     * continue the RAM-only security probe rather than producing a false card
+     * failure.
+     */
     report->stage = MG_STAGE_SESSION_CARD_CHECK;
-    mcGetInfo(target_port, 0, &type, &free_clusters, &formatted);
-    rc = McSyncResult();
-    report->session_mcinfo_rc = rc;
-    report->session_type = type;
-    report->session_free_clusters = free_clusters;
-    report->session_formatted = formatted;
+    for (i = 0; i < MG_CARD_RETRIES; i++) {
+        type = 0;
+        free_clusters = 0;
+        formatted = 0;
+        mcGetInfo(target_port, 0, &type, &free_clusters, &formatted);
+        rc = McSyncResult();
 
-    if (rc < 0 && rc != sceMcResNoFormat) {
+        report->session_mcinfo_rc = rc;
+        report->session_type = type;
+        report->session_free_clusters = free_clusters;
+        report->session_formatted = formatted;
+
+        if (rc != sceMcResChangedCard)
+            break;
+        if (i + 1 < MG_CARD_RETRIES)
+            DelayThread(MG_CARD_RETRY_USEC);
+    }
+
+    if (rc < 0 && rc != sceMcResNoFormat && rc != sceMcResChangedCard) {
         report->result = MG_RESULT_SESSION_CARD_ERROR;
         return -1;
     }
