@@ -1,12 +1,13 @@
 /*
  * PS2 Memory Card Inspector - MagicGate / KELF diagnostics
  *
- * Briscoe dev7 fixes a fundamental diagnostic mistake from dev4-dev6: an
- * installed mc?:/B?EXEC-SYSTEM/osdmain.elf is already a card-bound KELF and
- * must not be used as the input to another SecrDownloadHeader bind attempt.
+ * Briscoe dev8 fixes two diagnostic mistakes from earlier Briscoe builds:
+ * installed mc?:/B?EXEC-SYSTEM/osdmain.elf files are already card-bound KELFs
+ * and are never used as bind input, and large plaintext BIT blocks are no
+ * longer rejected merely because they exceed the 0x400-byte SECR RPC payload.
  *
- * The probe now accepts only a raw user-supplied FMCB.XLF from the optional
- * mass: package backend. It is read into EE RAM while the normal card stack is
+ * The probe accepts only a raw user-supplied FMCB.XLF from the optional mass:
+ * package backend. It is read into EE RAM while the normal card stack is
  * active, survives the isolated SECR IOP reboot, and is never written back.
  */
 
@@ -513,9 +514,14 @@ int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
     offset = bit_table.header.headersize;
     for (i = 0; i < report->block_count; i++) {
         block_size = bit_table.blocks[i].size;
+
+        /* Every BIT entry must fit within the raw KELF, but only blocks marked
+         * for download are constrained by the 0x400-byte SECRSIF RPC payload.
+         * A normal large plaintext payload block may be many kilobytes long
+         * and must simply advance the offset. The dev7 guard incorrectly
+         * rejected such blocks before even looking at their flags. */
         if (offset > (unsigned int)buffer->size ||
-            block_size > (unsigned int)buffer->size - offset ||
-            block_size > 0x400) {
+            block_size > (unsigned int)buffer->size - offset) {
             report->failed_block = i;
             report->result = MG_RESULT_INVALID_KELF;
             return -1;
@@ -523,6 +529,12 @@ int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
 
         if (bit_table.blocks[i].flags & 2) {
             report->encrypted_blocks++;
+            if (block_size > 0x400) {
+                report->failed_block = i;
+                report->result = MG_RESULT_INVALID_KELF;
+                return -1;
+            }
+
             rc = DownloadBlock(buffer->data + offset, (int)block_size);
             if (rc < 0) {
                 report->rpc_rc = rc;
