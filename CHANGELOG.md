@@ -4,6 +4,18 @@ All notable changes to PS2 Memory Card Inspector are documented here.
 
 ## [0.3.0-dev] — in development
 
+### dev5 — page-scoped diagnostics and two-way navigation
+
+- Changed slot navigation to `UP/DOWN` so controller movement matches the vertical `mc0:` / `mc1:` list on screen.
+- Added `L1` for previous result page and kept `R1` for next result page.
+- Changed plain `CROSS` to run only the diagnostic represented by the current page: filesystem, MagicGate/CardAuth or FMCB preflight.
+- Added `L2 + CROSS` as the explicit complete selected-slot scan: filesystem integrity -> MagicGate/CardAuth -> FMCB package preflight.
+- Removed automatic filesystem integrity tests at startup; reports begin in a neutral `UNKNOWN` / `NOT RUN` state.
+- Removed the implicit 4 KiB filesystem re-test from MagicGate environment restoration so a MagicGate-only request stays MagicGate-only from the user's perspective.
+- Kept `SQUARE`, normal-state `CIRCLE`, and `START` reserved for future installer/write actions.
+- Updated the dashboard footer, README and development plan to describe the final diagnostic input model.
+- Advanced the development banner to `0.3.0-dev5`.
+
 ### dev4 — unified selected-card scan
 
 - Simplified diagnostics to a target-centric control model.
@@ -18,7 +30,7 @@ All notable changes to PS2 Memory Card Inspector are documented here.
 ### dev3 — live GS progress
 
 - Added presentation-neutral progress callbacks for filesystem, MagicGate, FMCB preflight and IOP environment restoration.
-- Added a native GS progress page with a real filled progress bar, percentage, current operation and detailed explanation.
+- Added a native GS progress page with a real filled GS progress bar, percentage, current operation and detailed explanation.
 - Tied progress to actual synchronous operation stages rather than timer animation.
 - Added word-aware status wrapping and compact sidebar result labels.
 - Real-hardware testing confirmed the progress UI and existing diagnostic mechanics remained functional.
