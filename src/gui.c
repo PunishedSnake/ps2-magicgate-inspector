@@ -448,7 +448,7 @@ static qword_t *shell(qword_t *q, MciGuiPage page, int selected)
     q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
     q = rect_outline(q, 12, 8, 628, 31, Theme.border);
     q = text(q, 22, 14, "PS2 Memory Card Inspector", Theme.text);
-    snprintf(version, sizeof(version), "v0.3.0-dev1  mc%d", selected);
+    snprintf(version, sizeof(version), "v0.3.0-dev2  mc%d", selected);
     q = text_box(q, 470, 14, 618, 23, version, Theme.accent);
 
     for (i = 0; i < MCI_GUI_PAGE_COUNT; i++) {
@@ -535,7 +535,7 @@ static qword_t *render_card(qword_t *q, int selected,
     q = slot_summary(q, selected, cards, magicgate, packages);
     q = panel_title(q, 158, 55, 628, 88, "FILESYSTEM HEALTH",
                     card_health_color(r->health));
-    q = text_box(q, 315, 67, 615, 77, CardHealthText(r->health),
+    q = text_box(q, 170, 73, 615, 81, CardHealthText(r->health),
                  card_health_color(r->health));
 
     q = rect_fill(q, 158, 93, 628, 169, Theme.panel);
@@ -595,7 +595,7 @@ static qword_t *render_magicgate(qword_t *q, int selected,
     q = slot_summary(q, selected, cards, magicgate, packages);
     q = panel_title(q, 158, 55, 628, 88, "MAGICGATE / KELF CAPABILITY",
                     mg_color(mg->result));
-    q = text_box(q, 354, 67, 615, 77, MagicGateResultText(mg->result),
+    q = text_box(q, 170, 73, 615, 81, MagicGateResultText(mg->result),
                  mg_color(mg->result));
 
     q = rect_fill(q, 158, 93, 628, 123, Theme.panel);
@@ -664,7 +664,7 @@ static qword_t *render_fmcb(qword_t *q, int selected,
     q = slot_summary(q, selected, cards, magicgate, packages);
     q = panel_title(q, 158, 55, 628, 88, "FREEMCBOOT PACKAGE PREFLIGHT",
                     package_color(r->status));
-    q = text_box(q, 378, 67, 615, 77, FmcbPackageStatusText(r->status),
+    q = text_box(q, 170, 73, 615, 81, FmcbPackageStatusText(r->status),
                  package_color(r->status));
 
     q = rect_fill(q, 158, 93, 628, 126, Theme.panel);
@@ -811,7 +811,7 @@ void MciGuiRenderMessage(const char *title,
     q = rect_fill(q, 0, 0, UI_W, 4, accent);
     q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
     q = rect_outline(q, 12, 8, 628, 31, Theme.border);
-    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.3.0-dev1", Theme.text);
+    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.3.0-dev2", Theme.text);
     q = text_box(q, 20, 39, 620, 48,
                  title != NULL ? title : "Status", accent);
     q = rect_fill(q, 16, 53, 624, body_bottom, Theme.panel);
