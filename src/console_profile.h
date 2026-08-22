@@ -5,10 +5,12 @@
 
 #define MCI_ROMVER_TEXT_MAX 17
 #define MCI_MECHA_REGION_PARAMS_SIZE 13
+#define MCI_MECHAPWN_KEYSEED_WORDS 5
 
 typedef enum MciRegionUnlockKind {
     MCI_REGION_UNLOCK_NONE = 0,
     MCI_REGION_UNLOCK_REAL_DEX,
+    MCI_REGION_UNLOCK_MECHAPWN,
     MCI_REGION_UNLOCK_DEX_LIKE,
     MCI_REGION_UNLOCK_REGION_PARAMS,
     MCI_REGION_UNLOCK_AMBIGUOUS
@@ -40,9 +42,24 @@ typedef struct MciConsoleProfile {
     int region_params_all_region;
     int region_mismatch;
 
+    /* Read-only MechaPwn fingerprint. MechaPwn's region patch writes the
+     * distinctive "MechaPwn\0 EC" seed into NVM words 227..231. Reading those
+     * words lets us distinguish an actual patch from a merely DEX-like MechaCon
+     * revision without ever issuing an NVM write command. */
+    int nvm_keyseed_probe_rc;
+    u16 nvm_keyseed[MCI_MECHAPWN_KEYSEED_WORDS];
+    int mechapwn_signature;
+    int mechapwn_dex_mode;
+    int mechapwn_cex_region_override;
+
     MciRegionUnlockKind unlock_kind;
     int region_unlocked;
     int compact_region_safe;
+
+    /* Deckard + MechaPwn CEX can move the FMCB system-update region. A normal
+     * single-region install is therefore intentionally rejected until the
+     * transaction engine covers a verified cross-region plan. */
+    int cross_region_required;
 } MciConsoleProfile;
 
 /* Read-only probe. ROMVER/PSXVER come from rom0: while MechaCon state is read
