@@ -1,6 +1,6 @@
 /*
  * Briscoe dev10 diagnostic shim.
- * CI marker: hardware candidate 8.
+ * CI marker: hardware candidate 9.
  *
  * Real hardware shows the PS2SDK v1 MCSERV returning RESIDENT_END and the
  * next LOADFILE RPC never completing. For this one diagnostic build we skip
