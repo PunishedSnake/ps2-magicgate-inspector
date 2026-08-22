@@ -6,24 +6,28 @@ EE_LIBS = -ldebug -lpad -lmc -lfileXio -lioprpgen -liopreboot -lpatches -lkernel
 EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections
 EE_LDFLAGS = -Wl,--gc-sections
 
-# Briscoe dev8 keeps the real-hardware-validated Sony ROM X stack for ordinary
-# memory-card I/O and the pinned FMCB SECRMAN/SECRSIF 1.3 pair for the isolated
-# security session. MagicGate/KELF probing uses only the raw user-supplied
-# mass:/FMCB/SYSTEM/FMCB.XLF (or mass0:/mass1:) as its bind input.
+# Briscoe dev9 keeps the hardware-validated Sony ROM X stack for ordinary
+# Inspector work, but the isolated MagicGate session now mirrors the toolchain
+# used by FreeMcBoot Installer itself:
+#   PS2DEV/PS2SDK v1.0 freesio2 + freepad + mcman + mcserv
+#   pinned FMCB SECRMAN/SECRSIF 1.3
+# The EE application and all normal UI/filesystem code remain PS2DEV v2.0.
 #
-# Real hardware exposed a dev7 BIT parser bug: the 0x400-byte SECRSIF RPC limit
-# was incorrectly applied to every BIT entry, including large plaintext blocks
-# that are never sent through SecrDownloadBlock(). dev8 applies that limit only
-# to blocks marked for SECR download (flags & 2), matching SecrDownloadFile().
-# CI marker: dev8 hardware candidate build 1.
+# CI stages the v1.0 IOP modules into FMCB_COMPAT_DIR before invoking this
+# Makefile. This avoids mixing the current PS2SDK v2 MCMAN (secrman import 1.4)
+# with the classic FMCB security library (secrman 1.3).
 FMCB_SECR_COMMIT = ac53a47a5c6eae675cc2611c7bebe62f56c7845c
 FMCB_SECR_BASE = https://raw.githubusercontent.com/israpps/FreeMcBoot-Installer/$(FMCB_SECR_COMMIT)/installer/irx/compiled
 FMCB_SECR_DIR = .build/fmcb-secr-1.3
 FMCB_SECRMAN = $(FMCB_SECR_DIR)/secrman.irx
 FMCB_SECRSIF = $(FMCB_SECR_DIR)/secrsif.irx
 
+FMCB_COMPAT_DIR ?= .build/fmcb-ps2sdk-v1
+FMCB_COMPAT_IRX_FILES = freesio2.irx freepad.irx mcman.irx mcserv.irx
+FMCB_COMPAT_OBJS = $(addprefix fmcb_,$(FMCB_COMPAT_IRX_FILES:.irx=_irx.o))
+
 PS2SDK_IRX_FILES = iomanX.irx fileXio.irx usbd.irx usbhdfsd.irx
-EE_OBJS += secrman_irx.o secrsif_irx.o $(PS2SDK_IRX_FILES:.irx=_irx.o)
+EE_OBJS += secrman_irx.o secrsif_irx.o $(FMCB_COMPAT_OBJS) $(PS2SDK_IRX_FILES:.irx=_irx.o)
 
 $(FMCB_SECR_DIR):
 	mkdir -p $@
@@ -45,6 +49,10 @@ secrman_irx.c: $(FMCB_SECRMAN)
 
 secrsif_irx.c: $(FMCB_SECRSIF)
 	$(PS2SDK)/bin/bin2c $< $@ secrsif_irx
+
+fmcb_%_irx.c: $(FMCB_COMPAT_DIR)/%.irx
+	@test -f $< || { echo "Missing FMCB compatibility IRX: $<"; echo "Stage PS2DEV v1.0 IOP modules before building."; exit 1; }
+	$(PS2SDK)/bin/bin2c $< $@ fmcb_$*_irx
 
 %_irx.c:
 	$(PS2SDK)/bin/bin2c $(PS2SDK)/iop/irx/$*.irx $@ $*_irx
