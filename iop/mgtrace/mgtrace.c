@@ -1,5 +1,6 @@
 #include <types.h>
 #include <irx.h>
+#include <loadcore.h>
 #include <sifman.h>
 #include <sifcmd.h>
 #include <thbase.h>
