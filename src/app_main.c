@@ -1,0 +1,472 @@
+/* SPDX-License-Identifier: MIT */
+/*
+ * PS2 Memory Card Inspector 0.3.0 development controller.
+ *
+ * 0.2.0 established the hardware behavior. This controller keeps that IOP /
+ * MagicGate architecture intact while replacing the libdebug text dashboard
+ * with the native Graphics Synthesizer frontend in gui.c.
+ */
+
+#include <tamtypes.h>
+#include <kernel.h>
+#include <sifrpc.h>
+#include <iopcontrol.h>
+#include <iopcontrol_special.h>
+#include <iopheap.h>
+#include <ioprpgen.h>
+#include <loadfile.h>
+#include <delaythread.h>
+#include <libmc.h>
+#include <libpad.h>
+#include <debug.h>
+#include <sbv_patches.h>
+#include <malloc.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "card.h"
+#include "magicgate.h"
+#include "fmcb_install.h"
+#include "gui.h"
+
+#define SLOT_COUNT 2
+
+#define MG_SIO2_LABEL "MG/PS2SDK2 SIO2MAN"
+#define MG_PAD_LABEL "MG/PS2SDK2 PADMAN"
+#define MG_MCMAN_LABEL "MG/PS2SDK2 MCMAN"
+#define MG_MCSERV_LABEL "MG/PS2SDK2 MCSERV"
+
+extern unsigned char secrman_irx[];
+extern unsigned int size_secrman_irx;
+extern unsigned char fmcb_freesio2_irx[];
+extern unsigned int size_fmcb_freesio2_irx;
+extern unsigned char fmcb_freepad_irx[];
+extern unsigned int size_fmcb_freepad_irx;
+extern unsigned char fmcb_mcman_irx[];
+extern unsigned int size_fmcb_mcman_irx;
+extern unsigned char fmcb_mcserv_irx[];
+extern unsigned int size_fmcb_mcserv_irx;
+
+static unsigned char PadBuffer[256] __attribute__((aligned(64)));
+static CardReport Reports[SLOT_COUNT];
+static MagicGateReport MgReports[SLOT_COUNT];
+static MagicGateIopStatus MgIopStatus;
+static FmcbMassBackendStatus FmcbMassStatus;
+static FmcbPackageReport FmcbReports[SLOT_COUNT];
+static int PadActive;
+
+static int LoadRomModule(const char *path)
+{
+    return SifLoadModule(path, 0, NULL);
+}
+
+static int LoadEmbeddedModule(void *data, unsigned int size)
+{
+    int start_rc = -999;
+    return SifExecModuleBuffer(data, size, 0, NULL, &start_rc);
+}
+
+/*
+ * Normal application personality: the Sony ROM X stack remains the only stack
+ * used for ordinary filesystem work. This is unchanged from the hardware-
+ * validated 0.2.0 release.
+ */
+static int InitNormalCardStack(void)
+{
+    int rc;
+
+    SifInitRpc(0);
+    while (!SifIopReset(NULL, 0)) {;}
+    while (!SifIopSync()) {;}
+    SifInitRpc(0);
+
+    rc = SifLoadFileInit();
+    if (rc < 0)
+        return rc;
+
+    rc = LoadRomModule("rom0:XSIO2MAN");
+    if (rc < 0) goto out_loadfile;
+    rc = LoadRomModule("rom0:XPADMAN");
+    if (rc < 0) goto out_loadfile;
+    rc = LoadRomModule("rom0:XMCMAN");
+    if (rc < 0) goto out_loadfile;
+    rc = LoadRomModule("rom0:XMCSERV");
+
+out_loadfile:
+    SifLoadFileExit();
+    if (rc < 0)
+        return rc;
+
+    rc = mcInit(MC_TYPE_XMC);
+    if (rc < 0)
+        return rc;
+
+    rc = padInit(0);
+    if (rc == 0)
+        return -1;
+    if (padPortOpen(0, 0, PadBuffer) == 0) {
+        padEnd();
+        return -2;
+    }
+    PadActive = 1;
+    return 0;
+}
+
+static void ShutdownNormalClients(void)
+{
+    FmcbShutdownMassBackend(&FmcbMassStatus);
+    if (PadActive) {
+        padPortClose(0, 0);
+        padEnd();
+        PadActive = 0;
+    }
+}
+
+/* Generate the minimal IOPRP used by the isolated SECRMAN 1.4 session. */
+static int RebootIopWithSecrman(void)
+{
+    struct ioprpgen_ctx ctx;
+    struct ioprpgen_memwrite_ctx memctx;
+    struct ioprpgen_entry entries[2];
+    int image_size;
+    int written;
+    void *image;
+
+    memset(entries, 0, sizeof(entries));
+    entries[0].m_name = "SECRMAN";
+    entries[0].m_data = secrman_irx;
+    entries[0].m_data_size = size_secrman_irx;
+
+    ioprpgen_setup_membuf(&ctx, &memctx, NULL, 0);
+    image_size = ioprpgen_write_ioprp(&ctx, entries);
+    if (image_size <= 0)
+        return -3000;
+
+    image = memalign(64, image_size);
+    if (image == NULL)
+        return -3001;
+
+    ioprpgen_setup_membuf(&ctx, &memctx, image, image_size);
+    written = ioprpgen_write_ioprp(&ctx, entries);
+    if (written != image_size) {
+        free(image);
+        return -3002;
+    }
+
+    SifInitRpc(0);
+    if (!SifIopRebootBuffer(image, image_size)) {
+        free(image);
+        return -3003;
+    }
+    while (!SifIopSync()) {;}
+    free(image);
+    SifInitRpc(0);
+    return 0;
+}
+
+/*
+ * Security personality: PS2SDK 2.0 SECRMAN 1.4 + matching SIO2/PAD/MCMAN.
+ * MCSERV is deliberately passed through the existing wrapper, which skips its
+ * actual start while keeping MCMAN resident for CardAuth callbacks.
+ */
+static int InitMagicGateSession(MagicGateReport *report)
+{
+    int rc;
+    int mg_rc;
+
+    report->stage = MG_STAGE_SESSION_SETUP;
+    rc = RebootIopWithSecrman();
+    report->session_setup_rc = rc;
+    if (rc < 0)
+        return rc;
+
+    rc = SifLoadFileInit();
+    if (rc < 0) {
+        report->session_setup_rc = rc;
+        return rc;
+    }
+    SifInitIopHeap();
+    sbv_patch_enable_lmb();
+
+    (void)MG_SIO2_LABEL;
+    (void)MG_PAD_LABEL;
+    (void)MG_MCMAN_LABEL;
+    (void)MG_MCSERV_LABEL;
+
+    rc = LoadEmbeddedModule(fmcb_freesio2_irx, size_fmcb_freesio2_irx);
+    if (rc < 0) goto out;
+    rc = LoadEmbeddedModule(fmcb_freepad_irx, size_fmcb_freepad_irx);
+    if (rc < 0) goto out;
+    rc = LoadEmbeddedModule(fmcb_mcman_irx, size_fmcb_mcman_irx);
+    if (rc < 0) goto out;
+    rc = LoadEmbeddedModule(fmcb_mcserv_irx, size_fmcb_mcserv_irx);
+    if (rc < 0) goto out;
+
+    mg_rc = MagicGateLoadIopModules(&MgIopStatus);
+    if (mg_rc < 0) {
+        rc = mg_rc;
+        goto out;
+    }
+    rc = 0;
+
+out:
+    SifExitIopHeap();
+    SifLoadFileExit();
+    report->session_setup_rc = rc;
+    if (rc < 0)
+        return rc;
+
+    rc = mcInit(MC_TYPE_XMC);
+    report->session_mcinit_rc = rc;
+    return rc;
+}
+
+static int RestoreNormalEnvironment(void)
+{
+    int rc;
+    int fmcb_rc;
+
+    MciGuiRenderMessage("Restoring normal environment",
+                        "Rebuilding Sony ROM XSIO2MAN / XPADMAN / XMCMAN / XMCSERV.\n"
+                        "Ordinary filesystem I/O resumes only after this completes.",
+                        NULL, MCI_GUI_TONE_INFO);
+
+    rc = InitNormalCardStack();
+    if (rc < 0)
+        return rc;
+
+    fmcb_rc = FmcbInitMassBackend(&FmcbMassStatus);
+    (void)fmcb_rc; /* mass: is optional; package page exposes availability. */
+
+    CardInspect(0, &Reports[0]);
+    CardInspect(1, &Reports[1]);
+    return 0;
+}
+
+static int RunMagicGateSession(int target_port)
+{
+    MagicGateKelfBuffer kelf;
+    MagicGateReport *report = &MgReports[target_port];
+    int rc;
+    int restore_rc;
+
+    MagicGateResetKelfBuffer(&kelf);
+    MciGuiRenderMessage("Preparing MagicGate probe",
+                        "Reading and validating raw FMCB.XLF under the normal ROM X stack.\n"
+                        "The source KELF remains in EE RAM.",
+                        NULL, MCI_GUI_TONE_INFO);
+
+    rc = MagicGatePrepareKelf(target_port, &kelf, report);
+    if (rc < 0)
+        return rc;
+
+    MciGuiRenderMessage("Isolated security session",
+                        "Switching IOP personality to PS2SDK 2.0 SECRMAN 1.4.\n"
+                        "The bound KELF is a RAM-only capability probe and will not be written.",
+                        NULL, MCI_GUI_TONE_WARNING);
+
+    ShutdownNormalClients();
+
+    rc = InitMagicGateSession(report);
+    if (rc < 0) {
+        report->result = MG_RESULT_SESSION_SETUP_FAILED;
+    } else {
+        MagicGateProbePrepared(target_port, &kelf, report);
+    }
+
+    MagicGateReleaseKelf(&kelf);
+
+    restore_rc = RestoreNormalEnvironment();
+    report->restore_rc = restore_rc;
+    if (restore_rc < 0) {
+        MciGuiRenderFatal("Normal stack restore failed",
+                          "The security session ended, but the known-good ROM X card stack could not be reconstructed safely.",
+                          restore_rc);
+        SleepThread();
+    }
+
+    return report->result == MG_RESULT_PASS ? 0 : -1;
+}
+
+static void InspectAndInvalidateMagicGate(int port)
+{
+    CardInspect(port, &Reports[port]);
+    MagicGateResetReport(&MgReports[port], port);
+}
+
+static u32 ReadPadPressed(u32 *held)
+{
+    struct padButtonStatus buttons;
+    static u32 old_state;
+    u32 state = 0;
+    u32 pressed = 0;
+    int pad_state;
+
+    pad_state = padGetState(0, 0);
+    if (pad_state != PAD_STATE_STABLE && pad_state != PAD_STATE_FINDCTP1) {
+        *held = old_state;
+        return 0;
+    }
+
+    if (padRead(0, 0, &buttons) != 0) {
+        state = 0xFFFFu ^ buttons.btns;
+        pressed = state & ~old_state;
+        old_state = state;
+    }
+
+    *held = state;
+    return pressed;
+}
+
+static void RenderDashboard(int selected, MciGuiPage page,
+                            int confirm_format, int last_format_rc)
+{
+    MciGuiRenderDashboard(selected, page, Reports, MgReports, &MgIopStatus,
+                          &FmcbMassStatus, FmcbReports,
+                          confirm_format, last_format_rc);
+}
+
+int main(int argc, char *argv[])
+{
+    int selected = 0;
+    MciGuiPage page = MCI_GUI_CARD;
+    int confirm_format = 0;
+    int last_format_rc = -999;
+    int init_rc;
+    int fmcb_rc;
+    int dirty = 1;
+    u32 held;
+    u32 pressed;
+
+    (void)argc;
+    (void)argv;
+
+    /* Keep the same CRT bootstrap that proved reliable in the HDD manager. */
+    init_scr();
+    if (MciGuiInit() < 0) {
+        scr_clear();
+        scr_printf("PS2 Memory Card Inspector 0.3.0-dev1\n\n");
+        scr_printf("GS frontend initialization failed.\n");
+        SleepThread();
+    }
+
+    MciGuiRenderMessage("Starting",
+                        "Initializing the hardware-validated Sony ROM X memory-card stack.",
+                        NULL, MCI_GUI_TONE_INFO);
+    init_rc = InitNormalCardStack();
+    if (init_rc < 0) {
+        MciGuiRenderFatal("Initialization failed",
+                          "The normal memory-card environment could not be initialized.",
+                          init_rc);
+        SleepThread();
+    }
+
+    MciGuiRenderMessage("Inspecting cards",
+                        "Running the ordinary filesystem inspection on both slots.",
+                        NULL, MCI_GUI_TONE_INFO);
+    InspectAndInvalidateMagicGate(0);
+    InspectAndInvalidateMagicGate(1);
+    FmcbResetPackageReport(&FmcbReports[0], 0);
+    FmcbResetPackageReport(&FmcbReports[1], 1);
+
+    MciGuiRenderMessage("USB package source",
+                        "Initializing optional mass: support for the user-supplied FreeMcBoot package.",
+                        NULL, MCI_GUI_TONE_INFO);
+    fmcb_rc = FmcbInitMassBackend(&FmcbMassStatus);
+    (void)fmcb_rc;
+
+    while (1) {
+        if (dirty) {
+            RenderDashboard(selected, page, confirm_format, last_format_rc);
+            dirty = 0;
+        }
+
+        pressed = ReadPadPressed(&held);
+
+        if (pressed & PAD_SELECT)
+            break;
+
+        if (confirm_format) {
+            if (pressed & PAD_CIRCLE) {
+                confirm_format = 0;
+                dirty = 1;
+            } else if ((pressed & PAD_TRIANGLE) &&
+                       (held & PAD_L1) && (held & PAD_R1)) {
+                MciGuiRenderMessage("Formatting memory card",
+                                    "Destructive format is in progress. Do not remove the card.",
+                                    NULL, MCI_GUI_TONE_DANGER);
+                last_format_rc = CardFormat(selected, &Reports[selected]);
+                MagicGateResetReport(&MgReports[selected], selected);
+                FmcbResetPackageReport(&FmcbReports[selected], selected);
+                confirm_format = 0;
+                dirty = 1;
+            }
+        } else {
+            if (pressed & (PAD_LEFT | PAD_RIGHT)) {
+                selected ^= 1;
+                last_format_rc = -999;
+                dirty = 1;
+            }
+
+            if (pressed & PAD_R1) {
+                page = (MciGuiPage)(((unsigned int)page + 1u) % MCI_GUI_PAGE_COUNT);
+                dirty = 1;
+            }
+
+            if (pressed & PAD_CROSS) {
+                MciGuiRenderMessage("Filesystem test",
+                                    "Inspecting the selected card and running the temporary 4 KiB integrity test.",
+                                    NULL, MCI_GUI_TONE_INFO);
+                InspectAndInvalidateMagicGate(selected);
+                page = MCI_GUI_CARD;
+                dirty = 1;
+            }
+
+            if (pressed & PAD_START) {
+                MciGuiRenderMessage("Filesystem test",
+                                    "Inspecting both memory-card slots.",
+                                    NULL, MCI_GUI_TONE_INFO);
+                InspectAndInvalidateMagicGate(0);
+                InspectAndInvalidateMagicGate(1);
+                page = MCI_GUI_CARD;
+                dirty = 1;
+            }
+
+            if (pressed & PAD_SQUARE) {
+                if (Reports[selected].type != MC_TYPE_PS2) {
+                    MagicGateResetReport(&MgReports[selected], selected);
+                    MgReports[selected].result = MG_RESULT_TARGET_NOT_PS2;
+                } else {
+                    RunMagicGateSession(selected);
+                }
+                page = MCI_GUI_MAGICGATE;
+                dirty = 1;
+            }
+
+            if (pressed & PAD_CIRCLE) {
+                MciGuiRenderMessage("FMCB package preflight",
+                                    "Scanning the user-supplied package on mass: without writing to the memory card.",
+                                    NULL, MCI_GUI_TONE_INFO);
+                FmcbProbeMassPackage(selected, &FmcbMassStatus,
+                                     &FmcbReports[selected]);
+                page = MCI_GUI_FMCB;
+                dirty = 1;
+            }
+
+            if ((pressed & PAD_TRIANGLE) && Reports[selected].format_allowed) {
+                confirm_format = 1;
+                page = MCI_GUI_CARD;
+                dirty = 1;
+            }
+        }
+
+        DelayThread(16000);
+    }
+
+    MciGuiRenderMessage("Exiting",
+                        "Closing controller and USB clients.",
+                        NULL, MCI_GUI_TONE_INFO);
+    ShutdownNormalClients();
+    SifExitRpc();
+    return 0;
+}
