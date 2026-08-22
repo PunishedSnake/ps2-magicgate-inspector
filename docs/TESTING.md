@@ -41,14 +41,15 @@ The ordinary card path must continue to use the normal ROM X stack.
 
 Expected sequence:
 
-1. `mcGetInfo()` succeeds or returns a state the UI correctly classifies;
-2. root directory can be queried for a healthy formatted PS2 card;
-3. temporary 4 KiB file is created;
-4. deterministic data is written and flushed;
-5. file is reopened and read;
-6. all bytes compare;
-7. file is deleted;
-8. deletion/cleanup is verified.
+1. `mcGetInfo()` and existing error classification behave as before;
+2. root directory query behaves as before;
+3. the Inspector chooses an unused temporary filename rather than overwriting an existing file;
+4. the card is rechecked before the write;
+5. 4096 bytes of deterministic data are written and flushed;
+6. the file is closed, reopened and read;
+7. all bytes compare;
+8. the file is deleted;
+9. deletion is verified.
 
 Known hardware baseline: both official Sony cards completed the full create/write/flush/reopen/read/compare/delete path.
 
@@ -195,6 +196,8 @@ Corrected comparison build:
 workflow #109
 ELF SHA256 b5c1df1c4f51b756bf6c62e5d3fc1a9a414362eab77bf3ad13cd095fc7e4723c
 ```
+
+Later documentation/banner/comment cleanup produces a different ELF hash even when the selected security stack is unchanged, so hardware results should always quote the exact tested artifact checksum.
 
 ## FMCB preflight tests
 
