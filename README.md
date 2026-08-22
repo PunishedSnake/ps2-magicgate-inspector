@@ -110,18 +110,20 @@ For the wider package layout, see [FMCB package](docs/FMCB_PACKAGE.md).
 
 ## Controls
 
+The 0.3 development UI is deliberately **target-centric**. Left/Right selects the card; Cross always runs the complete read-only diagnostic suite for that selected slot, regardless of which results tab is currently visible. This keeps Square, Circle and Start free for future installer/write actions instead of spending one button per diagnostic subsystem.
+
 | Control | Action |
 | --- | --- |
 | Left / Right | Select `mc0:` or `mc1:` |
-| Cross | Inspect selected filesystem |
-| Start | Inspect both filesystems |
-| Square | Run isolated RAM-only MagicGate/KELF probe |
-| Circle | Scan the FMCB package on USB |
-| R1 | Cycle Card / MagicGate / FMCB Preflight pages |
+| Cross | Run full selected-card scan: filesystem -> MagicGate/CardAuth -> FMCB preflight |
+| R1 | Cycle Card / MagicGate / FMCB Preflight result pages |
 | Triangle | Arm format when allowed |
 | L1 + R1 + Triangle | Confirm destructive format |
 | Circle during format confirmation | Cancel |
+| Square / Circle / Start | Reserved for future actions outside format confirmation |
 | Select | Exit |
+
+Changing the visible page does not change what Cross runs. Changing the selected slot changes the target of the next full scan.
 
 ## Building
 
