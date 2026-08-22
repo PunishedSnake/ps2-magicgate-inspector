@@ -1,22 +1,28 @@
 .DEFAULT_GOAL := MC_INSPECTOR.ELF
 
 EE_BIN = MC_INSPECTOR.ELF
-EE_OBJS = src/main.o src/card.o src/magicgate.o src/fmcb_install.o
+EE_OBJS = src/main.o src/card.o src/magicgate.o src/fmcb_install.o src/dev10_nomcserv.o
 EE_LIBS = -ldebug -lpad -lmc -lfileXio -lioprpgen -liopreboot -lpatches -lkernel
 EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections
-EE_LDFLAGS = -Wl,--gc-sections
+EE_LDFLAGS = -Wl,--gc-sections \
+	-Wl,--wrap=SifExecModuleBuffer \
+	-Wl,--wrap=mcInit \
+	-Wl,--wrap=mcGetInfo \
+	-Wl,--wrap=mcSync
 
-# Briscoe dev9 keeps the hardware-validated Sony ROM X stack for ordinary
-# Inspector work, but the isolated MagicGate session now mirrors the toolchain
-# used by FreeMcBoot Installer itself:
-#   PS2DEV/PS2SDK v1.0 freesio2 + freepad + mcman + mcserv
-#   pinned FMCB SECRMAN/SECRSIF 1.3
-# The EE application and all normal UI/filesystem code remain PS2DEV v2.0.
+# Briscoe dev10 keeps the hardware-validated Sony ROM X stack for ordinary
+# Inspector work. The isolated MagicGate session still uses PS2SDK v1-era
+# freesio2/freepad/mcman plus the pinned FMCB SECRMAN/SECRSIF export-1.3 pair,
+# but deliberately skips the temporary MCSERV v1 RPC server.
 #
-# CI stages the v1.0 IOP modules into FMCB_COMPAT_DIR before invoking this
-# Makefile. This avoids mixing the current PS2SDK v2 MCMAN (secrman import 1.4)
-# with the classic FMCB security library (secrman 1.3).
-# CI marker: dev9 FMCB-v1 IOP compatibility candidate 3.
+# Real hardware showed MCSERV v1 returning RESIDENT_END and the immediately
+# following LOADFILE RPC never returning. dev10 therefore isolates the IOP-side
+# MCMAN -> SECRMAN card-command callback path from the old EE libmc/MCSERV path.
+# A tiny linker-wrap shim fakes only the isolated mcInit/mcGetInfo check; normal
+# pre-probe and restored ROM X operation still use the real libmc implementation.
+#
+# CI stages the v1.0 IOP modules before invoking this Makefile. The EE program
+# itself remains built with PS2DEV v2.0.
 FMCB_SECR_COMMIT = ac53a47a5c6eae675cc2611c7bebe62f56c7845c
 FMCB_SECR_BASE = https://raw.githubusercontent.com/israpps/FreeMcBoot-Installer/$(FMCB_SECR_COMMIT)/installer/irx/compiled
 FMCB_SECR_DIR = .build/fmcb-secr-1.3
@@ -34,13 +40,13 @@ $(FMCB_SECR_DIR):
 	mkdir -p $@
 
 $(FMCB_SECRMAN): | $(FMCB_SECR_DIR)
-	@echo "Fetching pinned FMCB SECRMAN 1.3 compatibility module..."
+	@echo "Fetching pinned FMCB SECRMAN compatibility module..."
 	wget -q -O $@ $(FMCB_SECR_BASE)/secrman.irx
 	@test "$$(wc -c < $@)" -eq 15533 || { echo "Unexpected secrman.irx size"; rm -f $@; exit 1; }
 	@sha256sum $@
 
 $(FMCB_SECRSIF): | $(FMCB_SECR_DIR)
-	@echo "Fetching pinned FMCB SECRSIF 1.3 compatibility bridge..."
+	@echo "Fetching pinned FMCB SECRSIF compatibility bridge..."
 	wget -q -O $@ $(FMCB_SECR_BASE)/secrsif.irx
 	@test "$$(wc -c < $@)" -eq 4685 || { echo "Unexpected secrsif.irx size"; rm -f $@; exit 1; }
 	@sha256sum $@
