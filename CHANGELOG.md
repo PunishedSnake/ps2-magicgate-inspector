@@ -25,11 +25,15 @@ All notable changes to PS2 Memory Card Inspector are documented here.
 - dev11 hardware trace returned `F3: tr=1 stat6c=0001D100 id=FF st=FF`. `stat6c` indicates RX FIFO error plus missing ACK on queue slot 0. Review of the pinned FMCB SECRMAN then showed that this F3 reset was an extra diagnostic command: the real `SecrDownloadGetKbit()` path starts directly with Mechacon pre-encryption followed by `F2/50 -> 51 -> 52 -> 53`. Because dev11 stopped at the extra F3, it did not test the actual failing CardAuth path.
 - dev12 removes that false prerequisite entirely and instruments the original SECRMAN function in-place. Both tested official Sony cards produced the same real failure: `pre=1/1`, then `CARD ENCRYPT HALF 0`, command `0x50`, `tr=1 stat6c=0001D100 id=FF st=FF`. This proves both Mechacon Kbit halves were prepared successfully and the first real CardAuth command was sent to a non-responding SIO2 channel.
 - Comparing that result with the reference FMCB installer exposed the caller bug: FMCB signs with `SecrDownloadFile(2 + port, slot, ...)`, while Inspector used `port` directly. Since CardAuth writes `port_ctrl1[port]` and `(port & 3)` into SIO2 regdata, Inspector's 0/1 selected controller channels instead of memory-card channels 2/3. dev13 applies the correct mapping.
+- dev13 hardware validation: both tested official Sony 8 MB cards now complete the entire RAM-only MagicGate probe with `PASS`, including `DownloadHeader = 1`, the encrypted BIT block, `Kbit = 1` and `Kc = 1`.
+- A third-party 64 MB card without MagicGate support remains filesystem-readable but fails the real CardAuth path at the first `F2/50` with `pre=1/1`, `tr=1 stat6c=0001D100 id=FF st=FF`, i.e. RX error + missing ACK. This is the expected negative control: Mechacon preparation succeeds, but the card does not answer the MagicGate CardAuth command.
+- A separate third-party 64 MB card marked as MagicGate-capable completes the same probe with `PASS`. Capacity and Sony branding are therefore not the deciding factors; the probe is detecting whether the card/controller actually implements the required MagicGate/CardAuth protocol sufficiently to bind a KELF.
+- Taken together, the positive and negative controls validate the corrected SECR port mapping and establish the RAM-only KELF probe as a practical functional MagicGate capability test. A printed MagicGate logo alone is not treated as proof; successful protocol completion is.
 
 ### FMCB package preflight
 
 - Added optional read-only `mass:` package discovery and manifest validation.
-- Installation writes remain disabled while the MagicGate backend is under hardware validation.
+- Installation writes remain disabled while the write/install path itself is still awaiting hardware validation; the underlying MagicGate/KELF bind primitive is now hardware-validated by positive and negative card controls.
 
 ## [0.1.1-dev] — "Columbo"
 
