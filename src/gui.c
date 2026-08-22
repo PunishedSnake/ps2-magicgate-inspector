@@ -1,37 +1,44 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * PS2 Memory Card Inspector - native GS frontend
+ * PS2 Memory Card Inspector - native GS frontend, 0.4 generation
  *
- * This renderer is intentionally based on the proven 640x224 frontend used by
- * fhdb-bootstrap-manager 0.4.0. The important hardware lesson is preserved:
- * author the UI directly in FIELD coordinates instead of drawing at 448 lines
- * and applying fractional Y transforms to an 8x8 bitmap font.
- *
- * Unlike the HDD manager, Memory Card Inspector 0.3.0 has exactly one display
- * personality. init_scr() performs the known-good CRT/read-circuit bootstrap;
- * this module then owns application rendering through libdraw/GIF DMA. There
- * is no mode switcher, alternate framebuffer reservation, or resolution menu.
+ * The logical UI remains the hardware-proven 640x224 design validated during
+ * 0.3 development. 0.4 ports the corrected runtime display architecture from
+ * fhdb-bootstrap-manager 0.4.3: native FIELD output is the recovery baseline,
+ * while 480p/576p/720p/1080i use a separately reserved VRAM area and a
+ * pixel-snapped logical viewport. This avoids stretching the old framebuffer
+ * by guesswork and keeps text/panels aligned in every mode.
  */
 
 #include <kernel.h>
+#include <rom0_info.h>
+#include <syscallnr.h>
 #include <tamtypes.h>
+#include <timer.h>
+
 #include <debug.h>
 #include <dma.h>
+#include <dma_registers.h>
 #include <draw.h>
+#include <gif_registers.h>
 #include <graph.h>
+#include <gs_privileged.h>
 #include <gs_psm.h>
 #include <packet.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "gui.h"
+#include "ui_layout.h"
+#include "video_mode.h"
 
 #define UI_W 640
 #define UI_H 224
 #define UI_FRAMES 2
 #define UI_CONTEXT 0
-#define UI_PACKET_QWORDS 8192
+#define UI_PACKET_QWORDS 12288
 #define FONT_SRC_W 8
 #define FONT_SRC_H 8
 #define GLYPH_W 8
@@ -39,6 +46,17 @@
 #define LINE_STEP 10
 #define ATLAS_W 128
 #define ATLAS_H 64
+
+#define ALT_STORAGE_W 640
+#define ALT_STORAGE_H 1080
+#define ALT_STORAGE_PSM GS_PSM_16
+
+#define VSYNC_TIMEOUT_MS 250u
+#define GIF_TIMEOUT_MS 250u
+#define GIF_CHCR (*(volatile u32 *)0x1000A000)
+#define NATIVE_PMODE 0x000000000000FF62ULL
+#define NATIVE_DISPFB2 0x0000000000001400ULL
+#define NATIVE_DISPLAY2 0x001BF9FF0983227CULL
 
 extern const u8 msx[];
 
@@ -63,7 +81,26 @@ typedef struct UiPalette {
     UiRgb disabled;
 } UiPalette;
 
-/* Aqua is the default visual language carried over from the 0.4.0 HDD UI. */
+typedef struct MciVideoSpec {
+    MciVideoMode id;
+    int interlace;
+    int graph_mode;
+    int frame_mode;
+    int flicker_filter;
+    int screen_x;
+    int screen_y;
+    unsigned int psm;
+    int filtered_presentation;
+    int explicit_display;
+    int crt_mode;
+    int display_x;
+    int display_y;
+    unsigned int magh;
+    unsigned int magv;
+    unsigned int display_width;
+    unsigned int display_height;
+} MciVideoSpec;
+
 static const UiPalette Theme = {
     {  5,  12,  18},
     { 12,  25,  33},
@@ -79,17 +116,116 @@ static const UiPalette Theme = {
     { 52,  62,  68}
 };
 
-static framebuffer_t Frames[UI_FRAMES];
+/* Timings/display windows are intentionally kept in lockstep with the
+ * hardware-tested fhdb-bootstrap-manager 0.4.3 implementation. */
+static const MciVideoSpec VideoSpecs[MCI_VIDEO_MODE_COUNT] = {
+    {MCI_VIDEO_NATIVE,
+     GRAPH_MODE_INTERLACED, GRAPH_MODE_AUTO, GRAPH_MODE_FIELD, GRAPH_ENABLE,
+     0, 0, GS_PSM_32, 1, 0, 0, 0, 0, 0, 0, 0, 0},
+    {MCI_VIDEO_480P,
+     GRAPH_MODE_NONINTERLACED, GRAPH_MODE_HDTV_480P, GRAPH_MODE_FRAME,
+     GRAPH_DISABLE, 0, 0, GS_PSM_32, 0, 0,
+     0x50, 232, 35, 1, 0, 1440, 448},
+    {MCI_VIDEO_576P,
+     GRAPH_MODE_NONINTERLACED, GRAPH_MODE_HDTV_576P, GRAPH_MODE_FRAME,
+     GRAPH_DISABLE, 0, 0, GS_PSM_32, 0, 1,
+     0x53, 255, 44, 1, 0, 1440, 576},
+    {MCI_VIDEO_720P,
+     GRAPH_MODE_NONINTERLACED, GRAPH_MODE_HDTV_720P, GRAPH_MODE_FRAME,
+     GRAPH_DISABLE, 0, 0, GS_PSM_32, 0, 1,
+     0x52, 306, 24, 1, 0, 1280, 720},
+    {MCI_VIDEO_1080I,
+     GRAPH_MODE_INTERLACED, GRAPH_MODE_HDTV_1080I, GRAPH_MODE_FRAME,
+     GRAPH_DISABLE, 0, 0, GS_PSM_32, 0, 1,
+     0x51, 236, 47, 2, 0, 1920, 1080}
+};
+
+static framebuffer_t NativeFrames[UI_FRAMES];
+static framebuffer_t AltFrames[UI_FRAMES];
+static framebuffer_t *ActiveFrames = NativeFrames;
+static unsigned int ActiveFrameCount = UI_FRAMES;
 static zbuffer_t Zbuffer;
 static texbuffer_t FontTexture;
 static clutbuffer_t NoClut;
 static lod_t FontLod;
 static blend_t AlphaBlend;
 static packet_t *RenderPacket;
+static packet_t *BootstrapPacket;
+static packet_t *ClearPacket;
 static unsigned int DrawFrame = 1;
 static u32 FontAtlas[ATLAS_W * ATLAS_H] __attribute__((aligned(64)));
 static int RendererReady;
 static int Blending = -1;
+static int DrawStateDirty;
+static MciVideoMode CurrentVideoMode = MCI_VIDEO_NATIVE;
+static MciUiLayout Layout;
+static int FilteredPresentation = 1;
+
+static int wait_gif_idle(unsigned int timeout_ms)
+{
+    u64 start = GetTimerSystemTime();
+    u64 timeout = MSec2TimerBusClock(timeout_ms);
+
+    while ((GIF_CHCR & 0x100u) != 0u) {
+        if (GetTimerSystemTime() - start >= timeout)
+            return -1;
+    }
+    return 0;
+}
+
+static int wait_finish(unsigned int timeout_ms)
+{
+    u64 start = GetTimerSystemTime();
+    u64 timeout = MSec2TimerBusClock(timeout_ms);
+
+    while ((*GS_REG_CSR & 2u) == 0u) {
+        if (GetTimerSystemTime() - start >= timeout)
+            return -1;
+    }
+    *GS_REG_CSR = 2u;
+    return 0;
+}
+
+static int wait_vsync(unsigned int timeout_ms)
+{
+    u64 start = GetTimerSystemTime();
+    u64 timeout = MSec2TimerBusClock(timeout_ms);
+
+    *GS_REG_CSR = 8u;
+    while ((*GS_REG_CSR & 8u) == 0u) {
+        if (GetTimerSystemTime() - start >= timeout)
+            return -1;
+    }
+    return 0;
+}
+
+static int submit_and_wait(packet_t *packet, qword_t *q)
+{
+    int rc;
+
+    if (wait_gif_idle(GIF_TIMEOUT_MS) < 0)
+        return -1;
+    *GS_REG_CSR = 2u;
+    __asm__ __volatile__("sync.l; sync.p");
+    rc = dma_channel_send_normal(DMA_CHANNEL_GIF, packet->data,
+                                 (int)(q - packet->data), 0, 0);
+    __asm__ __volatile__("sync.l; sync.p");
+    if (rc < 0 || wait_gif_idle(GIF_TIMEOUT_MS) < 0 ||
+        wait_finish(GIF_TIMEOUT_MS) < 0)
+        return -1;
+    return 0;
+}
+
+static void reset_gif_path(void)
+{
+    GIF_CHCR = 0u;
+    GIF_REG_CTRL = GIF_SET_CTRL(1, 0);
+    __asm__ __volatile__("sync.l; sync.p");
+    GIF_REG_CTRL = GIF_SET_CTRL(0, 0);
+    *DMA_REG_STAT = DMA_SET_STAT(1u << DMA_CHANNEL_GIF, 0, 0, 0, 0, 0, 0);
+    (void)dma_channel_initialize(DMA_CHANNEL_GIF, NULL, 0);
+    dma_channel_fast_waits(DMA_CHANNEL_GIF);
+}
 
 static void color_set(color_t *color, UiRgb rgb)
 {
@@ -116,11 +252,11 @@ static qword_t *rect_fill(qword_t *q, float x0, float y0,
 {
     rect_t rect;
 
-    rect.v0.x = x0;
-    rect.v0.y = y0;
+    rect.v0.x = MciUiSnapX(&Layout, x0);
+    rect.v0.y = MciUiSnapY(&Layout, y0);
     rect.v0.z = 1;
-    rect.v1.x = x1;
-    rect.v1.y = y1;
+    rect.v1.x = MciUiSnapX(&Layout, x1);
+    rect.v1.y = MciUiSnapY(&Layout, y1);
     rect.v1.z = 1;
     color_set(&rect.color, rgb);
     blend_select(0);
@@ -132,11 +268,11 @@ static qword_t *rect_outline(qword_t *q, float x0, float y0,
 {
     rect_t rect;
 
-    rect.v0.x = x0;
-    rect.v0.y = y0;
+    rect.v0.x = MciUiSnapX(&Layout, x0);
+    rect.v0.y = MciUiSnapY(&Layout, y0);
     rect.v0.z = 1;
-    rect.v1.x = x1;
-    rect.v1.y = y1;
+    rect.v1.x = MciUiSnapX(&Layout, x1);
+    rect.v1.y = MciUiSnapY(&Layout, y1);
     rect.v1.z = 1;
     color_set(&rect.color, rgb);
     blend_select(0);
@@ -149,17 +285,22 @@ static qword_t *glyph(qword_t *q, float x, float y,
     texrect_t g;
     unsigned int gx;
     unsigned int gy;
+    unsigned int px;
+    unsigned int py;
+    unsigned int pw;
+    unsigned int ph;
 
     if (ch >= 128u)
         ch = '?';
     gx = ((unsigned int)ch & 15u) * FONT_SRC_W;
     gy = ((unsigned int)ch >> 4) * FONT_SRC_H;
+    MciUiTextCell(&Layout, x, y, &px, &py, &pw, &ph);
 
-    g.v0.x = x;
-    g.v0.y = y;
+    g.v0.x = (float)px;
+    g.v0.y = (float)py;
     g.v0.z = 2;
-    g.v1.x = x + GLYPH_W;
-    g.v1.y = y + GLYPH_H;
+    g.v1.x = (float)(px + pw);
+    g.v1.y = (float)(py + ph);
     g.v1.z = 2;
     g.t0.u = (float)gx;
     g.t0.v = (float)gy;
@@ -171,10 +312,6 @@ static qword_t *glyph(qword_t *q, float x, float y,
     return draw_rect_textured(q, UI_CONTEXT, &g);
 }
 
-/*
- * Word-aware wrapping keeps status prose readable. Long tokens still fall back
- * to character wrapping, but ordinary words move intact to the next line.
- */
 static qword_t *text_box(qword_t *q, float x, float y,
                          float max_x, float max_y,
                          const char *value, UiRgb rgb)
@@ -276,23 +413,51 @@ static void font_build(void)
     FlushCache(0);
 }
 
-static int frame_allocate(void)
+static int allocate_pair(framebuffer_t pair[UI_FRAMES],
+                         unsigned int width, unsigned int height,
+                         unsigned int psm, int require_zero)
 {
     unsigned int i;
 
-    graph_vram_clear();
     for (i = 0; i < UI_FRAMES; i++) {
-        int address = graph_vram_allocate(UI_W, UI_H, GS_PSM_32,
-                                          GRAPH_ALIGN_PAGE);
-        if (address < 0 || (i == 0u && address != 0))
+        int address = graph_vram_allocate(width, height, psm, GRAPH_ALIGN_PAGE);
+        if (address < 0 || (require_zero && i == 0u && address != 0))
             return -1;
-        Frames[i].address = (unsigned int)address;
-        Frames[i].width = UI_W;
-        Frames[i].height = UI_H;
-        Frames[i].psm = GS_PSM_32;
-        Frames[i].mask = 0;
+        pair[i].address = (unsigned int)address;
+        pair[i].width = width;
+        pair[i].height = height;
+        pair[i].psm = psm;
+        pair[i].mask = 0;
     }
     return 0;
+}
+
+static int apply_layout(const MciVideoSpec *spec)
+{
+    const MciVideoGeometry *g = MciVideoModeGeometry(spec->id);
+
+    if (g == NULL)
+        return -1;
+    if (MciUiLayoutConfigure(&Layout, g->surface_width, g->surface_height,
+                             g->frame_width, g->frame_height,
+                             g->viewport_x, g->viewport_y,
+                             g->viewport_width, g->viewport_height) < 0)
+        return -2;
+    FilteredPresentation = spec->filtered_presentation;
+    return 0;
+}
+
+static void configure_alt_frames(const MciVideoSpec *spec)
+{
+    const MciVideoGeometry *g = MciVideoModeGeometry(spec->id);
+    unsigned int i;
+
+    for (i = 0; i < UI_FRAMES; i++) {
+        AltFrames[i].width = g->frame_width;
+        AltFrames[i].height = g->frame_height;
+        AltFrames[i].psm = spec->psm;
+        AltFrames[i].mask = 0;
+    }
 }
 
 static int environment_setup(void)
@@ -305,13 +470,19 @@ static int environment_setup(void)
     dma_channel_initialize(DMA_CHANNEL_GIF, NULL, 0);
     dma_channel_fast_waits(DMA_CHANNEL_GIF);
 
-    if (frame_allocate() < 0)
+    graph_vram_clear();
+    if (allocate_pair(NativeFrames, UI_W, UI_H, GS_PSM_32, 1) < 0)
         return -1;
+    /* Reserve a contiguous block large enough for every 0.4.3 display layout.
+     * The bases stay fixed; per-mode stride/height/PSM are changed in place. */
+    if (allocate_pair(AltFrames, ALT_STORAGE_W, ALT_STORAGE_H,
+                      ALT_STORAGE_PSM, 0) < 0)
+        return -2;
 
     texture_address = graph_vram_allocate(ATLAS_W, ATLAS_H, GS_PSM_32,
                                           GRAPH_ALIGN_BLOCK);
     if (texture_address < 0)
-        return -2;
+        return -3;
     FontTexture.address = (unsigned int)texture_address;
 
     Zbuffer.enable = DRAW_DISABLE;
@@ -320,22 +491,35 @@ static int environment_setup(void)
     Zbuffer.zsm = GS_ZBUF_32;
     Zbuffer.mask = 1;
 
-    packet = packet_init(128, PACKET_NORMAL);
+    packet = packet_init(256, PACKET_NORMAL);
     if (packet == NULL)
-        return -3;
+        return -4;
     q = packet->data;
     for (i = 0; i < UI_FRAMES; i++) {
-        q = draw_setup_environment(q, UI_CONTEXT, &Frames[i], &Zbuffer);
+        q = draw_setup_environment(q, UI_CONTEXT, &NativeFrames[i], &Zbuffer);
         q = draw_clear(q, UI_CONTEXT, 0, 0, UI_W, UI_H, 0, 0, 0);
     }
-    q = draw_setup_environment(q, UI_CONTEXT, &Frames[DrawFrame], &Zbuffer);
+    for (i = 0; i < UI_FRAMES; i++) {
+        q = draw_setup_environment(q, UI_CONTEXT, &AltFrames[i], &Zbuffer);
+        q = draw_clear(q, UI_CONTEXT, 0, 0,
+                       ALT_STORAGE_W, ALT_STORAGE_H, 0, 0, 0);
+    }
+
+    ActiveFrames = NativeFrames;
+    ActiveFrameCount = UI_FRAMES;
+    DrawFrame = 1u;
+    if (apply_layout(&VideoSpecs[MCI_VIDEO_NATIVE]) < 0) {
+        packet_free(packet);
+        return -5;
+    }
+    q = draw_setup_environment(q, UI_CONTEXT, &ActiveFrames[DrawFrame], &Zbuffer);
     q = draw_primitive_xyoffset(q, UI_CONTEXT, 2048.0f, 2048.0f);
     q = draw_scissor_area(q, UI_CONTEXT, 0, UI_W - 1, 0, UI_H - 1);
     q = draw_finish(q);
-    dma_wait_fast();
-    dma_channel_send_normal(DMA_CHANNEL_GIF, packet->data,
-                            (int)(q - packet->data), 0, 0);
-    draw_wait_finish();
+    if (submit_and_wait(packet, q) < 0) {
+        packet_free(packet);
+        return -6;
+    }
     packet_free(packet);
     return 0;
 }
@@ -397,21 +581,243 @@ static int texture_setup(void)
     q = draw_texturebuffer(q, UI_CONTEXT, &FontTexture, &NoClut);
     q = draw_alpha_blending(q, UI_CONTEXT, &AlphaBlend);
     q = draw_finish(q);
-    dma_wait_fast();
-    dma_channel_send_normal(DMA_CHANNEL_GIF, packet->data,
-                            (int)(q - packet->data), 0, 0);
-    draw_wait_finish();
+    if (submit_and_wait(packet, q) < 0) {
+        packet_free(packet);
+        return -2;
+    }
     packet_free(packet);
     return 0;
+}
+
+static void present_framebuffer(const framebuffer_t *frame)
+{
+    if (FilteredPresentation)
+        graph_set_framebuffer_filtered(frame->address, frame->width,
+                                       frame->psm, 0, 0);
+    else
+        graph_set_framebuffer(1, frame->address, frame->width,
+                              frame->psm, 0, 0);
+}
+
+static int clear_active_frames(framebuffer_t pair[UI_FRAMES],
+                               unsigned int count)
+{
+    qword_t *q;
+    unsigned int i;
+
+    if (ClearPacket == NULL || count == 0u || count > UI_FRAMES)
+        return -1;
+    packet_reset(ClearPacket);
+    q = ClearPacket->data;
+    for (i = 0; i < count; i++) {
+        q = draw_setup_environment(q, UI_CONTEXT, &pair[i], &Zbuffer);
+        q = draw_clear(q, UI_CONTEXT, 0, 0,
+                       pair[i].width, pair[i].height, 0, 0, 0);
+    }
+    q = draw_finish(q);
+    return submit_and_wait(ClearPacket, q);
+}
+
+static int rom_version_number(void)
+{
+    char romname[16];
+
+    memset(romname, 0, sizeof(romname));
+    GetRomName(romname);
+    return (int)strtol(romname, NULL, 10);
+}
+
+static int setup_legacy_576p(void)
+{
+    u64 gcont = ((u64)GetGsVParam() & 1u) << 25;
+
+    if (graph_set_mode(GRAPH_MODE_NONINTERLACED, GRAPH_MODE_HDTV_480P,
+                       GRAPH_MODE_FRAME, GRAPH_DISABLE) < 0)
+        return -1;
+    *GS_REG_SMODE1 = 0x00000017404B0504ULL | gcont;
+    *GS_REG_SYNCH1 = 0x000402E02003C827ULL;
+    *GS_REG_SYNCH2 = 0x000000000019CA67ULL;
+    *GS_REG_SYNCHV = 0x00A9000002700005ULL;
+    *GS_REG_SMODE2 = 0u;
+    *GS_REG_SRFSH = 4u;
+    *GS_REG_SMODE1 = 0x0000001740490504ULL | gcont;
+    __asm__ __volatile__("sync.l; sync.p");
+    return 0;
+}
+
+static void program_explicit_display(const MciVideoSpec *spec)
+{
+    int dx = spec->display_x;
+    int dy = spec->display_y;
+    u64 display;
+
+    if (GetSyscallHandler(__NR__GetGsDxDyOffset) != NULL) {
+        int ox, oy, ignored_w, ignored_h;
+        _GetGsDxDyOffset(spec->crt_mode, &ox, &oy, &ignored_w, &ignored_h);
+        dx += ox;
+        dy += oy;
+    }
+    if (spec->id == MCI_VIDEO_1080I)
+        *GS_REG_SMODE2 = GS_SET_SMODE2(1, 1, 0);
+    display = GS_SET_DISPLAY(dx, dy, spec->magh, spec->magv,
+                             spec->display_width - 1u,
+                             spec->display_height - 1u);
+    *GS_REG_DISPLAY1 = display;
+    *GS_REG_DISPLAY2 = display;
+}
+
+static int bootstrap_native(void)
+{
+    qword_t *q;
+
+    graph_disable_output();
+    *GS_REG_CSR = 0x200u;
+    GsPutIMR(0xff00u);
+    SetGsCrt(GRAPH_MODE_INTERLACED, graph_get_region(), GRAPH_MODE_FIELD);
+    __asm__ __volatile__("sync.l; sync.p");
+
+    ActiveFrames = NativeFrames;
+    ActiveFrameCount = UI_FRAMES;
+    DrawFrame = 1u;
+    if (apply_layout(&VideoSpecs[MCI_VIDEO_NATIVE]) < 0)
+        return -1;
+
+    *GS_REG_DISPFB1 = 0u;
+    *GS_REG_DISPFB2 = NATIVE_DISPFB2;
+    *GS_REG_DISPLAY1 = 0u;
+    *GS_REG_DISPLAY2 = NATIVE_DISPLAY2;
+    *GS_REG_BGCOLOR = 0u;
+
+    packet_reset(BootstrapPacket);
+    q = BootstrapPacket->data;
+    q = draw_setup_environment(q, UI_CONTEXT, &NativeFrames[DrawFrame], &Zbuffer);
+    q = draw_primitive_xyoffset(q, UI_CONTEXT, 2048.0f, 2048.0f);
+    q = draw_scissor_area(q, UI_CONTEXT, 0, UI_W - 1, 0, UI_H - 1);
+    q = draw_texture_sampling(q, UI_CONTEXT, &FontLod);
+    q = draw_texturebuffer(q, UI_CONTEXT, &FontTexture, &NoClut);
+    q = draw_alpha_blending(q, UI_CONTEXT, &AlphaBlend);
+    q = draw_finish(q);
+    if (submit_and_wait(BootstrapPacket, q) < 0)
+        return -2;
+    *GS_REG_PMODE = NATIVE_PMODE;
+    __asm__ __volatile__("sync.l; sync.p");
+    graph_enable_output();
+    Blending = -1;
+    DrawStateDirty = 0;
+    CurrentVideoMode = MCI_VIDEO_NATIVE;
+    return 0;
+}
+
+static int restore_native(int hard)
+{
+    int rc;
+
+    if (hard || wait_gif_idle(GIF_TIMEOUT_MS) < 0)
+        reset_gif_path();
+    rc = bootstrap_native();
+    if (rc < 0 && !hard) {
+        reset_gif_path();
+        rc = bootstrap_native();
+    }
+    return rc;
+}
+
+int MciGuiApplyVideoMode(MciVideoMode mode)
+{
+    const MciVideoSpec *spec;
+    const MciVideoGeometry *g;
+    int rc;
+
+    if (!RendererReady)
+        return -1;
+    if ((unsigned int)mode >= MCI_VIDEO_MODE_COUNT)
+        return -2;
+    if (mode == CurrentVideoMode)
+        return 0;
+    if (wait_gif_idle(GIF_TIMEOUT_MS) < 0)
+        return -3;
+    if (wait_vsync(VSYNC_TIMEOUT_MS) < 0)
+        return -4;
+    if (mode == MCI_VIDEO_NATIVE)
+        return restore_native(0);
+
+    spec = &VideoSpecs[(unsigned int)mode];
+    g = MciVideoModeGeometry(mode);
+    if (g == NULL)
+        return -5;
+
+    graph_disable_output();
+    if (mode == MCI_VIDEO_576P && rom_version_number() < 220)
+        rc = setup_legacy_576p();
+    else
+        rc = graph_set_mode(spec->interlace, spec->graph_mode,
+                            spec->frame_mode, spec->flicker_filter);
+    if (rc < 0) {
+        (void)restore_native(1);
+        return -6;
+    }
+
+    if (spec->explicit_display) {
+        program_explicit_display(spec);
+    } else if (graph_set_screen(spec->screen_x, spec->screen_y,
+                                g->surface_width, g->surface_height) < 0) {
+        (void)restore_native(1);
+        return -7;
+    }
+
+    configure_alt_frames(spec);
+    if (clear_active_frames(AltFrames, g->frame_count) < 0) {
+        (void)restore_native(1);
+        return -8;
+    }
+    ActiveFrames = AltFrames;
+    ActiveFrameCount = g->frame_count;
+    if (apply_layout(spec) < 0) {
+        (void)restore_native(1);
+        return -9;
+    }
+    CurrentVideoMode = mode;
+    DrawFrame = 0u;
+    graph_set_bgcolor(0, 0, 0);
+    present_framebuffer(&AltFrames[ActiveFrameCount > 1u ? 1u : 0u]);
+    Blending = -1;
+    DrawStateDirty = 1;
+    graph_enable_output();
+    if (wait_vsync(VSYNC_TIMEOUT_MS) < 0) {
+        (void)restore_native(1);
+        return -10;
+    }
+    return 0;
+}
+
+MciVideoMode MciGuiCurrentVideoMode(void)
+{
+    return CurrentVideoMode;
 }
 
 static qword_t *frame_begin(packet_t **packet_out)
 {
     qword_t *q;
 
-    dma_wait_fast();
+    if (wait_gif_idle(GIF_TIMEOUT_MS) < 0)
+        reset_gif_path();
+    packet_reset(RenderPacket);
     q = RenderPacket->data;
-    q = draw_framebuffer(q, UI_CONTEXT, &Frames[DrawFrame]);
+    if (DrawStateDirty) {
+        q = draw_setup_environment(q, UI_CONTEXT, &ActiveFrames[DrawFrame], &Zbuffer);
+        q = draw_primitive_xyoffset(q, UI_CONTEXT, 2048.0f, 2048.0f);
+        q = draw_scissor_area(q, UI_CONTEXT, 0,
+                              Layout.active_width - 1u,
+                              0, Layout.active_height - 1u);
+        q = draw_texture_sampling(q, UI_CONTEXT, &FontLod);
+        q = draw_texturebuffer(q, UI_CONTEXT, &FontTexture, &NoClut);
+        q = draw_alpha_blending(q, UI_CONTEXT, &AlphaBlend);
+        DrawStateDirty = 0;
+    } else {
+        q = draw_framebuffer(q, UI_CONTEXT, &ActiveFrames[DrawFrame]);
+    }
+    q = draw_clear(q, UI_CONTEXT, 0, 0,
+                   Layout.active_width, Layout.active_height, 0, 0, 0);
     *packet_out = RenderPacket;
     return q;
 }
@@ -420,15 +826,26 @@ static void frame_end(packet_t *packet, qword_t *q)
 {
     unsigned int complete = DrawFrame;
 
+    if (ActiveFrameCount == 1u && wait_vsync(VSYNC_TIMEOUT_MS) < 0) {
+        (void)restore_native(1);
+        return;
+    }
     q = draw_finish(q);
-    dma_channel_send_normal(DMA_CHANNEL_GIF, packet->data,
-                            (int)(q - packet->data), 0, 0);
-    draw_wait_finish();
-    graph_wait_vsync();
-    graph_set_framebuffer_filtered(Frames[complete].address,
-                                   Frames[complete].width,
-                                   Frames[complete].psm, 0, 0);
-    DrawFrame ^= 1u;
+    if (submit_and_wait(packet, q) < 0) {
+        (void)restore_native(1);
+        return;
+    }
+    if (ActiveFrameCount > 1u && wait_vsync(VSYNC_TIMEOUT_MS) < 0) {
+        (void)restore_native(1);
+        return;
+    }
+    if (CurrentVideoMode == MCI_VIDEO_1080I &&
+        wait_vsync(VSYNC_TIMEOUT_MS) < 0) {
+        (void)restore_native(1);
+        return;
+    }
+    present_framebuffer(&ActiveFrames[complete]);
+    DrawFrame = (DrawFrame + 1u) % ActiveFrameCount;
 }
 
 static UiRgb tone_color(MciGuiTone tone)
@@ -530,28 +947,29 @@ static const char *package_short_status(FmcbPackageStatus status)
 static qword_t *shell(qword_t *q, MciGuiPage page, int selected)
 {
     static const char *const tabs[MCI_GUI_PAGE_COUNT] = {
-        "CARD", "MAGICGATE", "FMCB PREFLIGHT"
+        "CARD", "MAGICGATE", "FMCB PREFLIGHT", "SETTINGS"
     };
-    char version[64];
+    static const float tab_x[MCI_GUI_PAGE_COUNT + 1] = {
+        14.0f, 126.0f, 270.0f, 472.0f, 626.0f
+    };
+    char version[80];
     unsigned int i;
-    float tab_x[4] = {14.0f, 146.0f, 322.0f, 626.0f};
 
     q = rect_fill(q, 0, 0, UI_W, UI_H, Theme.background);
     q = rect_fill(q, 0, 0, UI_W, 4, Theme.accent);
     q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
     q = rect_outline(q, 12, 8, 628, 31, Theme.border);
     q = text(q, 22, 14, "PS2 Memory Card Inspector", Theme.text);
-    snprintf(version, sizeof(version), "v0.3.0-dev5  mc%d", selected);
-    q = text_box(q, 470, 14, 618, 23, version, Theme.accent);
+    snprintf(version, sizeof(version), "v0.4.0-dev1  mc%d", selected);
+    q = text_box(q, 462, 14, 618, 23, version, Theme.accent);
 
     for (i = 0; i < MCI_GUI_PAGE_COUNT; i++) {
         UiRgb bg = i == (unsigned int)page ? Theme.panel_alt : Theme.panel;
         UiRgb fg = i == (unsigned int)page ? Theme.accent : Theme.muted;
         q = rect_fill(q, tab_x[i], 35, tab_x[i + 1] - 4, 51, bg);
         if (i == (unsigned int)page)
-            q = rect_fill(q, tab_x[i], 49, tab_x[i + 1] - 4, 51,
-                          Theme.accent);
-        q = text_box(q, tab_x[i] + 8, 40, tab_x[i + 1] - 12, 48,
+            q = rect_fill(q, tab_x[i], 49, tab_x[i + 1] - 4, 51, Theme.accent);
+        q = text_box(q, tab_x[i] + 7, 40, tab_x[i + 1] - 10, 48,
                      tabs[i], fg);
     }
     return q;
@@ -579,7 +997,6 @@ static qword_t *slot_summary(qword_t *q, int selected,
             q = rect_fill(q, 20, y0, 24, y0 + 49, Theme.accent);
         snprintf(line, sizeof(line), "SLOT %d   mc%d:", i + 1, i);
         q = text_box(q, 30, y0 + 5, 137, y0 + 13, line, Theme.text);
-
         q = text(q, 30, y0 + 18, "FS", Theme.muted);
         q = text_box(q, 54, y0 + 18, 141, y0 + 26,
                      card_short_status(cards[i].health),
@@ -603,8 +1020,7 @@ static qword_t *panel_title(qword_t *q, float x0, float y0,
     q = rect_fill(q, x0, y0, x1, y1, Theme.panel);
     q = rect_outline(q, x0, y0, x1, y1, Theme.border);
     q = rect_fill(q, x0, y0, x0 + 4, y1, accent);
-    q = text_box(q, x0 + 12, y0 + 6, x1 - 8, y0 + 14,
-                 title, Theme.muted);
+    q = text_box(q, x0 + 12, y0 + 6, x1 - 8, y0 + 14, title, Theme.muted);
     return q;
 }
 
@@ -633,28 +1049,24 @@ static qword_t *render_card(qword_t *q, int selected,
 
     q = rect_fill(q, 158, 93, 628, 169, Theme.panel);
     q = rect_outline(q, 158, 93, 628, 169, Theme.border);
-    snprintf(line, sizeof(line), "%d (%s)", r->info_rc,
-             CardResultText(r->info_rc));
+    snprintf(line, sizeof(line), "%d (%s)", r->info_rc, CardResultText(r->info_rc));
     q = value_line(q, 172, 101, "mcGetInfo", line, Theme.text);
     snprintf(line, sizeof(line), "%d (%s)", r->type, CardTypeText(r->type));
     q = value_line(q, 172, 113, "Card type", line, Theme.text);
     snprintf(line, sizeof(line), "%d    free=%d", r->formatted, r->free_clusters);
     q = value_line(q, 172, 125, "Formatted", line, Theme.text);
-    snprintf(line, sizeof(line), "%d (%s)", r->root_rc,
-             CardResultText(r->root_rc));
+    snprintf(line, sizeof(line), "%d (%s)", r->root_rc, CardResultText(r->root_rc));
     q = value_line(q, 172, 137, "Root dir", line, Theme.text);
     snprintf(line, sizeof(line), "%s  rc=%d cleanup=%d",
              CardRwStageText(r->rw_stage), r->rw_rc, r->cleanup_rc);
-    q = value_line(q, 172, 149, "4 KiB R/W", line,
+    q = value_line(q, 172, 149, "R/W verify", line,
                    r->rw_rc == 0 ? Theme.success : Theme.text);
 
     if (confirm_format) {
         q = rect_fill(q, 158, 174, 628, 202, Theme.panel_alt);
         q = rect_outline(q, 158, 174, 628, 202, Theme.danger);
-        q = text(q, 172, 180, "FORMAT CONFIRMATION - ALL DATA WILL BE ERASED",
-                 Theme.danger);
-        q = text(q, 172, 191, "Hold L1 + R1 and press TRIANGLE. CIRCLE cancels.",
-                 Theme.warning);
+        q = text(q, 172, 180, "FORMAT CONFIRMATION - ALL DATA WILL BE ERASED", Theme.danger);
+        q = text(q, 172, 191, "Hold L1 + R1 and press TRIANGLE. CIRCLE cancels.", Theme.warning);
     } else {
         q = rect_fill(q, 158, 174, 628, 202, Theme.panel);
         q = rect_outline(q, 158, 174, 628, 202, Theme.border);
@@ -668,9 +1080,7 @@ static qword_t *render_card(qword_t *q, int selected,
             q = text_box(q, 172, 191, 615, 199, line,
                          last_format_rc == 0 ? Theme.success : Theme.danger);
         } else {
-            q = text(q, 172, 191,
-                     "Filesystem and MagicGate are evaluated independently.",
-                     Theme.muted);
+            q = text(q, 172, 191, "Filesystem and MagicGate are evaluated independently.", Theme.muted);
         }
     }
     return q;
@@ -686,10 +1096,8 @@ static qword_t *render_magicgate(qword_t *q, int selected,
     char line[160];
 
     q = slot_summary(q, selected, cards, magicgate, packages);
-    q = panel_title(q, 158, 55, 628, 88, "MAGICGATE / KELF CAPABILITY",
-                    mg_color(mg->result));
-    q = text_box(q, 170, 73, 615, 81, MagicGateResultText(mg->result),
-                 mg_color(mg->result));
+    q = panel_title(q, 158, 55, 628, 88, "MAGICGATE / KELF CAPABILITY", mg_color(mg->result));
+    q = text_box(q, 170, 73, 615, 81, MagicGateResultText(mg->result), mg_color(mg->result));
 
     q = rect_fill(q, 158, 93, 628, 123, Theme.panel);
     q = rect_outline(q, 158, 93, 628, 123, Theme.border);
@@ -705,18 +1113,15 @@ static qword_t *render_magicgate(qword_t *q, int selected,
     q = rect_fill(q, 158, 128, 389, 202, Theme.panel);
     q = rect_outline(q, 158, 128, 389, 202, Theme.border);
     q = text(q, 172, 136, "SECURITY SESSION", Theme.muted);
-    snprintf(line, sizeof(line), "setup %d   mcInit %d", mg->session_setup_rc,
-             mg->session_mcinit_rc);
+    snprintf(line, sizeof(line), "setup %d   mcInit %d", mg->session_setup_rc, mg->session_mcinit_rc);
     q = text(q, 172, 149, line, Theme.text);
     snprintf(line, sizeof(line), "mcInfo %d  type %d fmt %d", mg->session_mcinfo_rc,
              mg->session_type, mg->session_formatted);
     q = text(q, 172, 160, line, Theme.text);
     snprintf(line, sizeof(line), "restore %d   RPC %d", mg->restore_rc, mg->rpc_rc);
-    q = text(q, 172, 171, line,
-             mg->restore_rc == 0 ? Theme.success : Theme.text);
+    q = text(q, 172, 171, line, mg->restore_rc == 0 ? Theme.success : Theme.text);
     if (mg_iop != NULL) {
-        snprintf(line, sizeof(line), "SECRSIF %d/%d", mg_iop->secrsif_load_rc,
-                 mg_iop->secrsif_start_rc);
+        snprintf(line, sizeof(line), "SECRSIF %d/%d", mg_iop->secrsif_load_rc, mg_iop->secrsif_start_rc);
         q = text(q, 172, 182, line, Theme.text);
     }
     q = text(q, 172, 193, "Backend: PS2SDK 2.0 SECRMAN 1.4", Theme.accent);
@@ -724,8 +1129,7 @@ static qword_t *render_magicgate(qword_t *q, int selected,
     q = rect_fill(q, 395, 128, 628, 202, Theme.panel);
     q = rect_outline(q, 395, 128, 628, 202, Theme.border);
     q = text(q, 409, 136, "BIND PIPELINE", Theme.muted);
-    snprintf(line, sizeof(line), "Header %d  reply %d", mg->header_rc,
-             mg->header_reply_size);
+    snprintf(line, sizeof(line), "Header %d  reply %d", mg->header_rc, mg->header_reply_size);
     q = text(q, 409, 149, line, Theme.text);
     snprintf(line, sizeof(line), "BIT %d  enc %d  done %d", mg->block_count,
              mg->encrypted_blocks, mg->blocks_completed);
@@ -739,7 +1143,7 @@ static qword_t *render_magicgate(qword_t *q, int selected,
     } else {
         q = text(q, 409, 182, "ICVPS2 N/A", Theme.muted);
     }
-    q = text(q, 409, 193, "RAM-only; no KELF is written", Theme.muted);
+    q = text(q, 409, 193, "Probe is RAM-only", Theme.muted);
     return q;
 }
 
@@ -755,10 +1159,8 @@ static qword_t *render_fmcb(qword_t *q, int selected,
     int i;
 
     q = slot_summary(q, selected, cards, magicgate, packages);
-    q = panel_title(q, 158, 55, 628, 88, "FREEMCBOOT PACKAGE PREFLIGHT",
-                    package_color(r->status));
-    q = text_box(q, 170, 73, 615, 81, FmcbPackageStatusText(r->status),
-                 package_color(r->status));
+    q = panel_title(q, 158, 55, 628, 88, "FREEMCBOOT PACKAGE / INSTALLER", package_color(r->status));
+    q = text_box(q, 170, 73, 615, 81, FmcbPackageStatusText(r->status), package_color(r->status));
 
     q = rect_fill(q, 158, 93, 628, 126, Theme.panel);
     q = rect_outline(q, 158, 93, 628, 126, Theme.border);
@@ -780,12 +1182,13 @@ static qword_t *render_fmcb(qword_t *q, int selected,
     snprintf(line, sizeof(line), "Required %d/%d  missing %d",
              r->found_required, r->plan.required_files, r->missing_required);
     q = text(q, 172, 164, line,
-             r->missing_required == 0 && r->status == FMCB_PACKAGE_READY
-                 ? Theme.success : Theme.text);
+             r->missing_required == 0 && r->status == FMCB_PACKAGE_READY ? Theme.success : Theme.text);
     snprintf(line, sizeof(line), "Optional %d/%d   KELF %d",
              r->found_optional, r->plan.optional_files, r->plan.kelf_files);
     q = text(q, 172, 176, line, Theme.text);
-    q = text(q, 172, 190, "0.3 write path: NOT ENABLED YET", Theme.warning);
+    q = text(q, 172, 190,
+             r->status == FMCB_PACKAGE_READY ? "SQUARE  Open verified installer" : "Run preflight before installation",
+             r->status == FMCB_PACKAGE_READY ? Theme.accent : Theme.warning);
 
     q = rect_fill(q, 424, 131, 628, 202, Theme.panel);
     q = rect_outline(q, 424, 131, 628, 202, Theme.border);
@@ -806,14 +1209,70 @@ static qword_t *render_fmcb(qword_t *q, int selected,
     return q;
 }
 
+static qword_t *settings_row(qword_t *q, int row, int selected,
+                             const char *name, const char *value,
+                             const char *hint)
+{
+    float y0 = 70.0f + (float)row * 30.0f;
+    UiRgb bg = row == selected ? Theme.panel_alt : Theme.panel;
+    UiRgb border = row == selected ? Theme.accent : Theme.border;
+
+    q = rect_fill(q, 24, y0, 616, y0 + 26, bg);
+    q = rect_outline(q, 24, y0, 616, y0 + 26, border);
+    if (row == selected)
+        q = rect_fill(q, 24, y0, 29, y0 + 26, Theme.accent);
+    q = text_box(q, 38, y0 + 4, 310, y0 + 12, name, Theme.text);
+    q = text_box(q, 322, y0 + 4, 604, y0 + 12, value, Theme.accent);
+    q = text_box(q, 38, y0 + 15, 604, y0 + 23, hint, Theme.muted);
+    return q;
+}
+
+static qword_t *render_settings(qword_t *q,
+                                const MciSettings *settings,
+                                int selected_row, int last_video_rc)
+{
+    char video[96];
+    char footer[96];
+
+    q = panel_title(q, 12, 55, 628, 65, "SETTINGS", Theme.accent);
+    snprintf(video, sizeof(video), "%s%s",
+             MciVideoModeName(settings->video_mode),
+             settings->video_mode == MciGuiCurrentVideoMode() ? "  [ACTIVE]" : "  [PENDING]");
+    q = settings_row(q, 0, selected_row, "Display mode", video,
+                     "LEFT/RIGHT chooses a mode; X applies it. Native is the recovery fallback.");
+    q = settings_row(q, 1, selected_row, "Filesystem test",
+                     MciFsTestProfileName(settings->fs_profile),
+                     "Quick is the 0.3 baseline; extended profiles increase disposable verification traffic.");
+    q = settings_row(q, 2, selected_row, "Preserve existing CNF",
+                     settings->preserve_existing_cnfs ? "YES" : "NO",
+                     "Installer can keep an existing FREEMCB.CNF instead of replacing user configuration.");
+    q = settings_row(q, 3, selected_row, "Install read-back verify",
+                     settings->verify_every_install_file ? "ENFORCED" : "DISABLED",
+                     "Every committed installer file should be reopened and compared before success.");
+
+    q = rect_fill(q, 24, 190, 616, 202, Theme.panel_alt);
+    q = rect_outline(q, 24, 190, 616, 202, Theme.border);
+    if (last_video_rc == -999)
+        snprintf(footer, sizeof(footer), "Current output: %s", MciVideoModeName(MciGuiCurrentVideoMode()));
+    else
+        snprintf(footer, sizeof(footer), "Last display switch rc=%d   current=%s",
+                 last_video_rc, MciVideoModeName(MciGuiCurrentVideoMode()));
+    q = text_box(q, 34, 193, 606, 201, footer,
+                 last_video_rc < 0 && last_video_rc != -999 ? Theme.danger : Theme.muted);
+    return q;
+}
+
 static qword_t *footer(qword_t *q, MciGuiPage page, int confirm_format)
 {
     const char *line;
 
-    (void)page;
     q = rect_fill(q, 0, 205, UI_W, UI_H, Theme.panel_alt);
     if (confirm_format) {
         line = "L1+R1+TRIANGLE Confirm format        CIRCLE Cancel";
+    } else if (page == MCI_GUI_SETTINGS) {
+        line = "UP/DOWN Setting   LEFT/RIGHT Change   X Apply   L1/R1 Page   SELECT Exit";
+    } else if (page == MCI_GUI_FMCB) {
+        line = "UP/DOWN Slot   X Preflight   SQUARE Installer   L2+X Full scan   L1/R1 Page";
     } else {
         line = "UP/DOWN Slot   X Test   L2+X Full scan   L1/R1 Page   SELECT Exit";
     }
@@ -832,13 +1291,18 @@ int MciGuiInit(void)
     if (texture_setup() < 0)
         return -3;
 
+    BootstrapPacket = packet_init(96, PACKET_NORMAL);
+    ClearPacket = packet_init(256, PACKET_NORMAL);
     RenderPacket = packet_init(UI_PACKET_QWORDS, PACKET_NORMAL);
-    if (RenderPacket == NULL)
+    if (BootstrapPacket == NULL || ClearPacket == NULL || RenderPacket == NULL)
         return -4;
+
+    DrawStateDirty = 0;
+    CurrentVideoMode = MCI_VIDEO_NATIVE;
     RendererReady = 1;
-    MciGuiRenderMessage("Starting 0.3.0",
-                        "Native Graphics Synthesizer frontend ready.\n"
-                        "Using the hardware-proven 640x224 layout; no video mode selector.",
+    MciGuiRenderMessage("Starting 0.4.0",
+                        "Graphics Synthesizer frontend ready.\n"
+                        "Settings can switch among the display modes carried forward from the hardware-tested 0.4.3 HDD-manager backend.",
                         NULL, MCI_GUI_TONE_INFO);
     return 0;
 }
@@ -855,13 +1319,17 @@ void MciGuiRenderDashboard(int selected,
                            const MagicGateIopStatus *mg_iop,
                            const FmcbMassBackendStatus *mass,
                            const FmcbPackageReport packages[2],
+                           const MciSettings *settings,
+                           int settings_row,
+                           int last_video_rc,
                            int confirm_format,
                            int last_format_rc)
 {
     packet_t *packet;
     qword_t *q;
 
-    if (!RendererReady || cards == NULL || magicgate == NULL || packages == NULL)
+    if (!RendererReady || cards == NULL || magicgate == NULL ||
+        packages == NULL || settings == NULL)
         return;
     if (selected < 0 || selected > 1)
         selected = 0;
@@ -874,6 +1342,8 @@ void MciGuiRenderDashboard(int selected,
         q = render_magicgate(q, selected, cards, magicgate, mg_iop, packages);
     else if (page == MCI_GUI_FMCB)
         q = render_fmcb(q, selected, cards, magicgate, mass, packages);
+    else if (page == MCI_GUI_SETTINGS)
+        q = render_settings(q, settings, settings_row, last_video_rc);
     else
         q = render_card(q, selected, cards, magicgate, packages,
                         confirm_format, last_format_rc);
@@ -901,9 +1371,8 @@ void MciGuiRenderMessage(const char *title,
     q = rect_fill(q, 0, 0, UI_W, 4, accent);
     q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
     q = rect_outline(q, 12, 8, 628, 31, Theme.border);
-    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.3.0-dev5", Theme.text);
-    q = text_box(q, 20, 39, 620, 48,
-                 title != NULL ? title : "Status", accent);
+    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.4.0-dev1", Theme.text);
+    q = text_box(q, 20, 39, 620, 48, title != NULL ? title : "Status", accent);
     q = rect_fill(q, 16, 53, 624, body_bottom, Theme.panel);
     q = rect_outline(q, 16, 53, 624, body_bottom, Theme.border);
     q = text_box(q, 30, 64, 610, body_bottom - 8.0f,
@@ -932,10 +1401,8 @@ void MciGuiRenderProgress(const char *title,
 
     if (!RendererReady)
         return;
-    if (percent < 0)
-        percent = 0;
-    if (percent > 100)
-        percent = 100;
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
 
     accent = tone_color(tone);
     fill_x = inner_x0 + (inner_x1 - inner_x0) * ((float)percent / 100.0f);
@@ -946,30 +1413,23 @@ void MciGuiRenderProgress(const char *title,
     q = rect_fill(q, 0, 0, UI_W, 4, accent);
     q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
     q = rect_outline(q, 12, 8, 628, 31, Theme.border);
-    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.3.0-dev5", Theme.text);
-
-    q = text_box(q, 20, 39, 620, 48,
-                 title != NULL ? title : "Working", accent);
+    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.4.0-dev1", Theme.text);
+    q = text_box(q, 20, 39, 620, 48, title != NULL ? title : "Working", accent);
     q = rect_fill(q, 16, 53, 624, 196, Theme.panel);
     q = rect_outline(q, 16, 53, 624, 196, Theme.border);
-
     q = text_box(q, 30, 65, 610, 75,
                  action != NULL ? action : "Working...", Theme.text);
-    q = text_box(q, 30, 84, 610, 121,
-                 detail != NULL ? detail : "", Theme.muted);
-
+    q = text_box(q, 30, 84, 610, 121, detail != NULL ? detail : "", Theme.muted);
     q = text(q, 30, 130, "PROGRESS", Theme.muted);
     q = text_box(q, 566, 130, 610, 138, pct, accent);
     q = rect_fill(q, 30, 145, 610, 164, Theme.panel_alt);
     q = rect_outline(q, 30, 145, 610, 164, Theme.border);
     if (percent > 0)
         q = rect_fill(q, inner_x0, 148, fill_x, 161, accent);
-
     q = text_box(q, 30, 176, 610, 187,
                  percent >= 100 ? "Operation complete; returning to the dashboard."
                                 : "Working synchronously; controls resume when this step completes.",
                  percent >= 100 ? Theme.success : Theme.muted);
-
     if (footer_text != NULL && footer_text[0] != '\0') {
         q = rect_fill(q, 0, 202, UI_W, UI_H, Theme.panel_alt);
         q = text_box(q, 20, 211, 620, 220, footer_text, Theme.muted);
