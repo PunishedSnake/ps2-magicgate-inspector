@@ -1,12 +1,12 @@
 # MagicGate / CardAuth findings
 
-This document records the hardware findings behind the Briscoe MagicGate implementation. It exists so that the low-level conclusions do not disappear into development logs or get reintroduced as regressions later.
+This document preserves the hardware findings behind Briscoe so the low-level conclusions do not disappear into development logs or get reintroduced as regressions.
 
-## What the Inspector is testing
+## What Inspector tests
 
-The current MagicGate test is a **functional KELF binding probe**, not a logo/vendor check and not a filesystem check.
+The MagicGate test is a **functional KELF-binding probe**, not a logo/vendor check and not a filesystem check.
 
-The raw user-supplied `FMCB.XLF` is read into EE RAM while the known-good normal memory-card stack is active. In an isolated security session the Inspector then exercises the same SECR stages needed to obtain card-bound KELF material:
+A raw user-supplied `FMCB.XLF` is read into EE RAM while the normal Sony ROM card stack is active. The isolated PS2SDK 2.0 security session then exercises:
 
 ```text
 DownloadHeader
@@ -24,81 +24,75 @@ DownloadHeader
   -> optional ICVPS2 when required by the KELF
 ```
 
-Nothing produced by this probe is written to the card.
+Nothing produced by the probe is written to the card.
 
-## The critical port distinction
+## Critical port distinction
 
-There are two different port number spaces involved:
+Two port-number spaces are involved:
 
-- EE/libmc logical memory-card ports: `0` and `1`;
-- SIO2 physical device channels used directly by SECRMAN CardAuth: memory cards are `2` and `3`.
+- libmc logical memory-card ports: `0` and `1`;
+- physical SIO2 channels used directly by SECRMAN CardAuth: memory cards are `2` and `3`.
 
-The reference FreeMcBoot installer calls:
+The reference FreeMcBoot binding path calls:
 
 ```c
 SecrDownloadFile(2 + port, slot, buffer)
 ```
 
-SECRMAN's CardAuth code uses the supplied port directly when filling `sio2packet.port_ctrl1[port]`, `port_ctrl2[port]` and the low bits of `regdata[0]`.
-
-Therefore the correct translation is:
+SECRMAN CardAuth uses the supplied number directly in SIO2 packet setup. Therefore Inspector must translate:
 
 ```text
 mc0 logical 0 -> SECR/SIO2 physical 2
 mc1 logical 1 -> SECR/SIO2 physical 3
 ```
 
-The Inspector performs this translation only at the SECRSIF RPC boundary for calls that carry a memory-card port (`DOWNLOAD_HEADER`, `GET_KBIT`, and `GET_KC`). Normal libmc calls remain on logical `0/1`.
+Only SECRSIF RPCs carrying a memory-card port are translated (`DOWNLOAD_HEADER`, `GET_KBIT`, `GET_KC`). Normal libmc calls remain logical 0/1.
 
 ## Why `0001D100 / FF / FF` mattered
 
-Before the port correction, both official Sony cards repeatedly produced:
+Before the correction, both official Sony cards repeatedly produced:
 
 ```text
 tr=1 stat6c=0001D100 id=FF st=FF
 ```
 
-The important distinction is that `sio2_transfer()` returning `1` means the transfer cycle ran; it does not mean the protocol transaction succeeded. The `stat6c` value indicated receive-side failure and missing ACK. `FF/FF` was consistent with no valid card response.
+`sio2_transfer()` returning `1` only means the transfer cycle ran; it does not prove protocol success. `stat6c` showed receive-side failure and missing ACK, while `FF/FF` was consistent with no valid card response.
 
-Once the logical-to-physical port mapping was fixed, the same two cards completed Kbit and Kc immediately. A third-party card without functional MagicGate continued to produce the same no-ACK pattern at the correct physical card channel, which turned the old failure signature into a useful negative-control signature rather than a transport bug.
+Once the correct physical card channels were used, those Sony cards immediately completed Kbit and Kc. A different third-party card without functional MagicGate continued to produce the same no-ACK condition **on the correct channel**, making the signature a useful negative control rather than a transport bug.
 
-## Development sequence and conclusions
+## Investigation sequence
 
 ### dev7 — BIT validation false positive
 
-Both official Sony cards passed filesystem checks, session setup, SECR RPC binding, `DownloadHeader`, and the encrypted BIT block. The Inspector then falsely rejected a large plaintext BIT entry because the code applied SECRSIF's `0x400` RPC-payload limit to every BIT entry.
+Both Sony cards reached `DownloadHeader` and the encrypted BIT block. Inspector then rejected a large plaintext BIT entry because the 0x400-byte SECRSIF block-RPC limit was incorrectly applied to every entry.
 
-Fix: the `0x400` limit applies only to blocks actually sent through `DownloadBlock` (`flags & 2`). Large plaintext payload blocks only advance the KELF offset.
+Fix: apply 0x400 only to entries actually sent to `DownloadBlock` (`flags & 2`). Large plaintext entries only advance the KELF offset.
 
-### dev8 — first real Kbit failure
+### dev8 — first genuine Kbit failure
 
-After correcting BIT semantics, both cards reached `GET KBIT` and both returned `0`. This was the first stage that required the SECRMAN `card_encrypt()` path and its MCMAN callbacks.
+After fixing BIT semantics, both cards reached GET_KBIT and returned 0. This was the first tested stage that required SECRMAN `card_encrypt()` and MCMAN's callbacks.
 
-The identical result on a card that already booted FMCB and one rejected by a stock installer made a card-specific defect unlikely.
+### dev9/dev10 — isolated card-stack behavior
 
-### dev9/dev10 — matching the FMCB-era IOP personality
+The temporary card stack was aligned with the security implementation. Hardware testing showed temporary MCSERV could report successful residency and still wedge the following LOADFILE RPC.
 
-The isolated security environment was aligned with the PS2SDK-v1 generation used by the FreeMcBoot Installer compatibility source. Loading temporary MCSERV was found to wedge a later LOADFILE RPC on real hardware.
-
-Fix: keep MCMAN resident, skip temporary MCSERV, emulate only the EE-side `mcInit/mcGetInfo/mcSync` sanity query used immediately before the RAM-only probe, then restore the complete normal ROM X stack afterward.
+Fix: keep MCMAN resident, skip temporary MCSERV, emulate only the immediate EE-side libmc sanity query, and rebuild the normal Sony ROM X stack after the probe.
 
 ### dev11 — useful wrong command
 
-An independent tracer inserted an `F3` authentication reset before attempting the Kbit transform and observed:
+A diagnostic tracer inserted F3 before Kbit and observed:
 
 ```text
 F3: tr=1 stat6c=0001D100 id=FF st=FF
 ```
 
-Source review then showed that `F3` is **not** a prerequisite of the real `SecrDownloadGetKbit()` path. The actual Kbit card transform starts directly at `F2/50`.
+Source review showed F3 is not a prerequisite of real `SecrDownloadGetKbit()`. The real Kbit card transform starts at `F2/50` after Mechacon preparation.
 
 Conclusion: post-failure command replay can perturb or misrepresent the path being diagnosed. The tracer was retired.
 
 ### dev12 — instrument the real GET_KBIT
 
-The pinned SECRMAN source was instrumented in place. On failure only, its normal 16-byte Kbit return buffer was replaced with a compact diagnostic record.
-
-Both Sony cards reported:
+SECRMAN was instrumented in place. Both Sony cards reported:
 
 ```text
 pre=1/1
@@ -107,27 +101,31 @@ command=50
 tr=1 stat6c=0001D100 id=FF st=FF
 ```
 
-This proved:
-
-1. both Mechacon Kbit halves were prepared;
-2. failure occurred in the first real card-side encryption command;
-3. the problem was before `51/52/53` and was not a missing Kbit from Mechacon.
+This proved both Mechacon Kbit halves were prepared and the failure occurred at the first genuine CardAuth command.
 
 ### dev13 — physical SIO2 port correction
 
-Comparing the caller with FreeMcBoot exposed the `2 + port` convention. After mapping logical `0/1` to physical `2/3` at the SECR boundary:
+Comparing the caller with the FreeMcBoot reference exposed the `2 + port` convention. After translating logical 0/1 to physical 2/3 at the SECR boundary:
 
-- both official Sony 8 MB cards completed the full probe;
-- `Kbit=1` and `Kc=1` on both;
-- the security session restored the ordinary ROM stack successfully afterward.
+- both Sony 8 MB cards completed the full probe;
+- `Kbit=1` and `Kc=1`;
+- normal ROM stack restoration remained functional.
 
-That made the port mapping hardware-validated.
+### PS2SDK 2.0 SECRMAN 1.4 validation
+
+A modern backend was then built from pinned PS2SDK 2.0 source with equivalent failed-GET_KBIT instrumentation.
+
+It reproduced the same hardware matrix:
+
+- Sony 8 MB: `FUNCTIONAL`;
+- third-party 64 MB with functional MagicGate: `FUNCTIONAL`;
+- third-party 64 MB without functional MagicGate: `NOT SUPPORTED / NO CARD AUTH ACK`.
+
+That result allowed the project to retire the historical compatibility backend and ship 0.2.0 with PS2SDK 2.0 SECRMAN 1.4 as the single production security implementation.
 
 ## Positive and negative controls
 
-### Positive controls
-
-Two official Sony 8 MB cards:
+Known positive behavior:
 
 ```text
 filesystem PASS
@@ -138,49 +136,41 @@ Kc = 1
 MagicGate = FUNCTIONAL
 ```
 
-A third-party 64 MB card carrying a MagicGate marking also completed the same probe.
-
-### Negative control
-
-A different third-party 64 MB card remained fully usable as a PS2 filesystem but failed the first real CardAuth command:
+Known negative-control behavior:
 
 ```text
+filesystem PASS
 pre=1/1
 F2/50
 tr=1
 stat6c=0001D100
 id=FF
 st=FF
+MagicGate = NOT SUPPORTED / NO CARD AUTH ACK
 ```
 
-Because the same transport/backend passes other cards on the same console, this is classified as:
+Filesystem compatibility therefore does not imply MagicGate capability. Likewise, card capacity, Sony branding and a printed MagicGate logo are not used as trust signals.
 
-```text
-NOT SUPPORTED / NO CARD AUTH ACK
-```
-
-This distinction is central to the project: **filesystem compatibility does not imply MagicGate capability**.
-
-## Current result classification
+## Result classification
 
 `FUNCTIONAL`
 : Full RAM-only KELF binding probe completed.
 
 `NOT SUPPORTED / NO CARD AUTH ACK`
-: Known negative-control signature: both pre-encrypted Kbit halves exist and the first `F2/50` receives a missing-ACK/no-valid-response condition.
+: Hardware-validated negative-control signature: both Kbit halves were prepared, but the first CardAuth command received no valid ACK/response.
 
 `PROTOCOL ERROR / CARD AUTH`
-: CardAuth was reached but failed with a different command/status/ID/checksum/SIO2 condition. This should not be automatically interpreted as “no MagicGate”.
+: CardAuth was reached but failed with a different command, response ID/status, checksum or SIO2 condition. This is not automatically interpreted as no MagicGate.
 
 `TEST INDETERMINATE / MECHACON`
-: Failure occurred while obtaining/preparing Kbit before a conclusive card-side test.
+: Failure occurred before a conclusive card-side result.
 
 Other session/RPC/KELF errors
-: Probe infrastructure or input failure. These are not card capability verdicts.
+: Probe infrastructure or input failure, not a card capability verdict.
 
 ## Diagnostic record format
 
-Both supported SECR profiles intentionally emit the same failure record through the 16-byte Kbit response **only when GET_KBIT fails**. Successful behavior is left unchanged.
+The instrumented PS2SDK 2.0 SECRMAN 1.4 emits this 16-byte record **only when GET_KBIT fails**:
 
 | Byte | Meaning |
 | ---: | --- |
@@ -198,16 +188,10 @@ Both supported SECR profiles intentionally emit the same failure record through 
 | 14 | first Mechacon step succeeded |
 | 15 | second Mechacon step succeeded |
 
-The record exists for diagnostics, not as a public protocol or persistent on-card format.
+Successful GET_KBIT behavior is unchanged and no persistent/on-card diagnostic format is created.
 
-## What this test does not prove
+## What `FUNCTIONAL` proves
 
-A `FUNCTIONAL` result proves that the tested card/controller can complete the KELF-binding operations exercised by this probe on the tested PS2 stack. It does not certify every possible MagicGate operation, every console revision, or long-term card reliability.
+A `FUNCTIONAL` result proves that the tested card/controller can complete the KELF-binding operations exercised by this probe on the tested PS2/security stack. It does not certify every possible MagicGate operation, every console revision or long-term card reliability.
 
-Likewise, a printed “MagicGate” label is not used as a trust signal. The project deliberately prefers observed protocol behavior.
-
-## Next validation step
-
-The modern PS2SDK 2.0 SECRMAN 1.4 backend now builds successfully with equivalent instrumentation. It should be tested against the same card matrix before replacing the hardware-validated `fmcb13` baseline.
-
-Only after the selected backend is stable should the project move to a controlled **bind -> write -> read-back -> verify -> rollback** experiment for FMCB installation.
+The next project milestone is not deeper read-only authentication. It is a deliberately controlled **bind -> write -> close/reopen -> read-back -> verify -> rollback** experiment before any general FMCB installation mode is enabled.
