@@ -2,9 +2,10 @@
  * PS2 Memory Card Inspector - FMCB normal-install planning and USB preflight
  *
  * The system-update destination is selected from the console's active runtime
- * profile, not from a sticker assumption. ROMVER still owns the OSDSYS lookup
- * path, while console_profile.c cross-checks Dragon/Deckard MechaCon state so a
- * MechaPwn/DEX-like console is not silently mistaken for stock retail hardware.
+ * profile, not from a sticker assumption. ROMVER owns the active OSDSYS lookup
+ * path while console_profile.c cross-checks Dragon/Deckard MechaCon state and a
+ * read-only MechaPwn NVM fingerprint. Deckard CEX region switching is rejected
+ * here until the transaction engine can cover all region destinations safely.
  */
 
 #define NEWLIB_PORT_AWARE
@@ -135,9 +136,8 @@ void FmcbBuildInstallPlan(int target_port, const MciConsoleProfile *console,
     }
     ResolveOsdName(plan->rom_version, plan->destination_osd);
 
-    plan->compact_unlock_candidate = plan->console.region_unlocked &&
-                                     !plan->console.rom_is_dex &&
-                                     !plan->console.region_mismatch;
+    plan->compact_unlock_candidate = plan->console.compact_region_safe &&
+                                     !plan->console.rom_is_dex;
     plan->compact_unlock_active = plan->console.rom_is_dex;
 
     for (i = 0; i < FmcbPackageEntryCount(); i++) {
@@ -283,12 +283,12 @@ static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *repor
     int rc;
     int count;
 
-    MciProgressUpdate(MCI_PROGRESS_FMCB, 18, "Profiling ROMVER and MechaCon",
-                      "Reading the active ROMVER, MechaCon revision and read-only region parameters before choosing an FMCB system-update location.");
+    MciProgressUpdate(MCI_PROGRESS_FMCB, 18, "Profiling ROMVER, MechaCon and NVM",
+                      "Reading active ROMVER, MechaCon revision, region diagnostics and the read-only MechaPwn key-seed fingerprint before choosing an FMCB policy.");
     profile_rc = MciConsoleProfileProbe(&console);
 
     MciProgressUpdate(MCI_PROGRESS_FMCB, 26, "Building the install plan",
-                      "Cross-checking the active OSD region with MechaCon state, then resolving the exact system folder and OSDSYS update filename.");
+                      "Resolving the active system-update folder and rejecting region-switching states that require a verified cross-region transaction.");
     FmcbBuildInstallPlan(target_port, &console, &report->plan);
     report->entry_count = FmcbPackageEntryCount();
     snprintf(report->source_root, sizeof(report->source_root), "%s", root);
@@ -303,8 +303,15 @@ static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *repor
     if (console.region_mismatch) {
         report->status = FMCB_PACKAGE_REGION_AMBIGUOUS;
         MciProgressUpdate(MCI_PROGRESS_FMCB, 100,
-                          "ROMVER and MechaCon region state disagree",
-                          "The console appears region-modified or transiently inconsistent. Installation is blocked rather than guessing which system-update directory OSDSYS will use.");
+                          "MechaPwn region transition is not settled",
+                          "The detected Deckard DEX-like policy expects the A system-update region, but active ROMVER has not converged to it. Reboot the console before installing.");
+        return -1;
+    }
+    if (console.cross_region_required) {
+        report->status = FMCB_PACKAGE_CROSS_REGION_REQUIRED;
+        MciProgressUpdate(MCI_PROGRESS_FMCB, 100,
+                          "Deckard MechaPwn CEX needs cross-region FMCB",
+                          "A one-region install could stop booting after a later MechaPwn CEX region change. This build blocks writes until the verified transaction engine covers every regional system-update destination.");
         return -1;
     }
 
@@ -353,12 +360,13 @@ static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *repor
     report->status = report->plan.package_complete ? FMCB_PACKAGE_READY
                                                     : FMCB_PACKAGE_INCOMPLETE;
     snprintf(detail, sizeof(detail),
-             "Found %d/%d required; target %s/%s. ROM %04X %c, Mecha %u.%02u, policy: %s.",
+             "Found %d/%d required; target %s/%s. ROM %04X %c, Mecha %u.%02u, NVM sig=%s, policy: %s.",
              report->found_required, report->plan.required_files,
              report->plan.destination_system, report->plan.destination_osd,
              report->plan.rom_version, report->plan.romver_region,
              report->plan.console.mecha_major,
              report->plan.console.mecha_minor,
+             report->plan.console.mechapwn_signature ? "MechaPwn" : "none",
              MciConsoleRegionPolicyText(&report->plan.console));
     MciProgressUpdate(MCI_PROGRESS_FMCB, 100,
                       "FMCB package preflight complete", detail);
@@ -409,7 +417,8 @@ const char *FmcbPackageStatusText(FmcbPackageStatus status)
         case FMCB_PACKAGE_INCOMPLETE: return "INCOMPLETE";
         case FMCB_PACKAGE_READY: return "READY FOR VERIFIED INSTALL";
         case FMCB_PACKAGE_UNSUPPORTED_CONSOLE: return "UNSUPPORTED/UNKNOWN CONSOLE";
-        case FMCB_PACKAGE_REGION_AMBIGUOUS: return "ROMVER / MECHACON REGION MISMATCH";
+        case FMCB_PACKAGE_REGION_AMBIGUOUS: return "MECHAPWN REGION TRANSITION / REBOOT";
+        case FMCB_PACKAGE_CROSS_REGION_REQUIRED: return "MECHAPWN CEX: CROSS-REGION REQUIRED";
         default: return "NOT SCANNED";
     }
 }
