@@ -1,44 +1,26 @@
 # Release codenames
 
-PS2 Memory Card Inspector releases use codenames based on detectives, police officers and investigators — famous, obscure, serious or slightly ridiculous. The name should fit the character of the milestone rather than being assigned randomly.
+PS2 Memory Card Inspector development releases use alphabetical codenames. The codename is a development-line label, not an indication of compatibility with a particular console model or memory card.
 
-## Current plan
+## Current sequence
 
-| Version | Codename | Why it fits |
+| Version line | Codename | Focus |
 | --- | --- | --- |
-| v0.1.0 | **Columbo** | The first standalone build keeps asking the card one more question and cares more about inconsistencies than appearances. |
-| v0.2.0 | **Briscoe** | Lennie Briscoe: practical, procedural, and a good fit for better error evidence and report handling. |
-| v0.3.0 | **Poirot** | Capability fingerprinting and MagicGate investigation are about identifying the tiny details that do not quite match. |
-| v0.4.0 | **Kojak** | Recovery work should be direct and unsentimental, but still know exactly what it is doing. |
-| v0.5.0 | **Dale Cooper** | Reporting/UI work can afford to become a little friendlier and stranger without compromising the evidence. |
-| v1.0.0 | **Inspector Gadget** | Reserved for the stable release for reasons requiring no further explanation. |
+| `0.1.x` | **Columbo** | Standalone memory-card filesystem inspection and hardware validation |
+| `0.2.x` | **Briscoe** | MagicGate/KELF capability probing, FMCB package preflight and security-backend validation |
 
-These names are proposed as the initial canon. Intermediate versions can be inserted without forcing every candidate below into a numbered slot.
+Future names should continue alphabetically where practical.
 
-## Candidate pool
+## Briscoe naming scope
 
-Useful future names:
+Briscoe covers the transition from a filesystem-only inspector to a tool that can distinguish:
 
-- **Sherlock** / **Holmes** — deep protocol or forensic analysis;
-- **Marple** — quiet consistency checks and anomaly detection;
-- **Somerset** — mature forensic/reporting milestone;
-- **Marge Gunderson** — reliability and careful evidence gathering;
-- **Harry Bosch** — low-level investigative work;
-- **John Munch** — oddball compatibility cases and unexplained card behavior;
-- **Frank Drebin** — an intentionally chaotic experimental branch, if we ever deserve one;
-- **Clarice Starling** — deeper forensic inspection;
-- **Scully** — skeptical verification of claims made by weird hardware;
-- **L** — narrow, obsessive protocol investigation;
-- **Benoit Blanc** — polished diagnostics and explanatory reports;
-- **Zenigata** — persistent pursuit of cards that keep escaping normal classification;
-- **Dick Gumshoe** — perfect for a scrappy developer/debug build;
-- **Adachi** — probably best avoided for a release involving trusted conclusions.
+- ordinary PS2 filesystem usability;
+- real MagicGate/CardAuth capability;
+- KELF binding readiness;
+- FMCB package readiness;
+- infrastructure/protocol failures that are not valid card-capability verdicts.
 
-## Naming rules
+The line deliberately remains read-only with respect to FMCB installation until a bind/write/read-back/rollback transaction is validated on hardware.
 
-1. Stable numbered releases get one codename each.
-2. Patch releases inherit the parent codename: `0.2.1 Briscoe` remains Briscoe.
-3. Nightly/CI artifacts do not receive new codenames.
-4. A codename should not imply a feature the release does not contain.
-5. Names are project flavor, not an excuse to hide semantic versioning; the numeric version remains authoritative.
-6. **Inspector Gadget stays reserved for 1.0.0.**
+Internal experiment numbers such as the historical dev7/dev8/dev11/dev12/dev13 sequence are preserved in the changelog and MagicGate investigation document for debugging history, but should not become permanent component names in production source.
