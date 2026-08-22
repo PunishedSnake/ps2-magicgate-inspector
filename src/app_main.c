@@ -31,6 +31,7 @@
 #include "magicgate.h"
 #include "fmcb_install.h"
 #include "fmcb_transaction.h"
+#include "fmcb_recovery.h"
 #include "gui.h"
 #include "progress.h"
 #include "settings.h"
@@ -56,6 +57,7 @@ static MagicGateIopStatus MgIopStatus;
 static FmcbMassBackendStatus FmcbMassStatus;
 static FmcbPackageReport FmcbReports[SLOT_COUNT];
 static FmcbInstallReport InstallReports[SLOT_COUNT];
+static FmcbRecoveryStatus RecoveryStatus;
 static MciSettings Settings;
 static int PadActive;
 
@@ -364,6 +366,11 @@ static unsigned int CurrentFsTestBytes(void)
     return MciFsTestProfileBytes(Settings.fs_profile);
 }
 
+static int RefreshRecoveryStatus(void)
+{
+    return FmcbRecoveryProbe(&FmcbMassStatus, &RecoveryStatus);
+}
+
 static void RunSelectedPageTest(int target_port, MciGuiPage page)
 {
     switch (page) {
@@ -373,6 +380,7 @@ static void RunSelectedPageTest(int target_port, MciGuiPage page)
         case MCI_GUI_FMCB:
             (void)FmcbProbeMassPackage(target_port, &FmcbMassStatus,
                                        &FmcbReports[target_port]);
+            (void)RefreshRecoveryStatus();
             break;
         case MCI_GUI_SETTINGS:
             break;
@@ -402,11 +410,20 @@ static void RunSelectedFullScan(int target_port)
     }
     (void)FmcbProbeMassPackage(target_port, &FmcbMassStatus,
                                &FmcbReports[target_port]);
+    (void)RefreshRecoveryStatus();
 }
 
 static int RevalidateInstallerPreconditions(int target_port, char *reason,
                                             unsigned int reason_size)
 {
+    (void)RefreshRecoveryStatus();
+    if (RecoveryStatus.present) {
+        snprintf(reason, reason_size,
+                 "Persistent FMCB recovery state exists (%s). Recover that transaction before starting another install.",
+                 FmcbRecoveryStateText(RecoveryStatus.state));
+        return -4;
+    }
+
     CardInspectSized(target_port, &Reports[target_port], CurrentFsTestBytes());
     if (Reports[target_port].health != CARD_OK) {
         snprintf(reason, reason_size, "Filesystem verification is not PASS (%s).",
@@ -433,11 +450,11 @@ static int RunVerifiedInstaller(int target_port)
 {
     FmcbInstallOptions options;
     FmcbInstallReport *report = &InstallReports[target_port];
-    char reason[192];
+    char reason[224];
     int rc;
 
     MciGuiRenderMessage("Revalidating before installation",
-                        "The selected card, MagicGate capability and USB package are re-tested immediately before the first destination write.",
+                        "The selected card, MagicGate capability, active ROMVER/MechaCon policy and USB package are re-tested immediately before the first destination write.",
                         NULL, MCI_GUI_TONE_WARNING);
     rc = RevalidateInstallerPreconditions(target_port, reason, sizeof(reason));
     if (rc < 0) {
@@ -454,27 +471,77 @@ static int RunVerifiedInstaller(int target_port)
     rc = FmcbInstallNormalTransactional(target_port,
                                         &FmcbReports[target_port],
                                         &options,
-                                        BindKelfForInstaller, NULL, report);
+                                        BindKelfForInstaller, NULL,
+                                        &RecoveryStatus, report);
     if (rc == 0) {
-        char result[256];
+        char result[360];
         snprintf(result, sizeof(result),
-                 "Normal FMCB installation completed on mc%d. %d/%d manifest entries committed or intentionally preserved. Every written file passed full read-back comparison.",
-                 target_port, report->files_committed, report->files_total);
+                 "Normal FMCB installation completed on mc%d. %d/%d selected entries committed or intentionally preserved. Every write passed full read-back comparison. Space check: free=%d, payload=%u, reclaimable=%u, reserve=%u clusters. Persistent recovery state was committed and removed.",
+                 target_port, report->files_committed, report->files_total,
+                 report->free_clusters, report->payload_clusters,
+                 report->reclaimable_clusters, report->reserve_clusters);
         MciGuiRenderMessage("FMCB install PASS / VERIFIED", result,
                             "CROSS or CIRCLE returns to the dashboard.",
                             MCI_GUI_TONE_SUCCESS);
     } else {
-        char result[320];
+        char result[420];
         snprintf(result, sizeof(result),
-                 "Install failed at %s: %s. Files committed before failure: %d/%d. Rollback rc=%d. A rollback failure is critical and must be inspected before using the card.",
+                 "Install failed at %s: %s. Files committed before failure: %d/%d. space rc=%d, recovery rc=%d, rollback rc=%d. If recovery remains present, do not start another install; restore the recorded transaction first.",
                  FmcbInstallStageText(report->stage),
                  FmcbInstallResultText(report->result),
                  report->files_committed, report->files_total,
+                 report->space_rc, report->recovery_rc,
                  report->rollback_rc);
+        (void)RefreshRecoveryStatus();
         MciGuiRenderMessage("FMCB install failed", result,
                             "CROSS or CIRCLE returns to the dashboard.",
-                            report->result == FMCB_INSTALL_RESULT_ROLLBACK_FAILED
+                            report->result == FMCB_INSTALL_RESULT_ROLLBACK_FAILED ||
+                            RecoveryStatus.state == FMCB_RECOVERY_CORRUPT
                                 ? MCI_GUI_TONE_DANGER : MCI_GUI_TONE_WARNING);
+    }
+    return rc;
+}
+
+static int RunPendingRecovery(void)
+{
+    char result[320];
+    int target;
+    int rollback_rc = 0;
+    int rc;
+
+    (void)RefreshRecoveryStatus();
+    if (!RecoveryStatus.present || !RecoveryStatus.valid) {
+        MciGuiRenderMessage("FMCB recovery unavailable",
+                            RecoveryStatus.present
+                                ? "A recovery directory exists, but neither checksummed journal slot is valid. Automatic card writes are blocked; preserve the USB contents for manual inspection."
+                                : "No incomplete FMCB transaction is currently recorded on the connected package device.",
+                            "CROSS or CIRCLE returns to the dashboard.",
+                            RecoveryStatus.present ? MCI_GUI_TONE_DANGER
+                                                   : MCI_GUI_TONE_INFO);
+        return -1;
+    }
+
+    target = RecoveryStatus.target_port;
+    MciGuiRenderMessage("Recovering FMCB transaction",
+                        "The persistent journal is being replayed in reverse. Only destinations captured before the interrupted install are restored, and each restored backup is verified against USB.",
+                        NULL, MCI_GUI_TONE_WARNING);
+    rc = FmcbRecoveryRun(&RecoveryStatus, &rollback_rc);
+    if (rc == 0) {
+        if (target >= 0 && target < SLOT_COUNT)
+            ResetSlotReports(target);
+        snprintf(result, sizeof(result),
+                 "Recovery completed for mc%d. Every prepared destination was restored to its captured pre-install state and the USB recovery journal was removed.",
+                 target);
+        MciGuiRenderMessage("FMCB recovery PASS", result,
+                            "CROSS or CIRCLE returns to the dashboard.",
+                            MCI_GUI_TONE_SUCCESS);
+    } else {
+        snprintf(result, sizeof(result),
+                 "Recovery stopped with rc=%d (rollback rc=%d). The persistent journal has been retained. Do not install over it and do not move the journal to another card.",
+                 rc, rollback_rc);
+        MciGuiRenderMessage("FMCB recovery incomplete", result,
+                            "CROSS or CIRCLE returns to the dashboard.",
+                            MCI_GUI_TONE_DANGER);
     }
     return rc;
 }
@@ -537,6 +604,7 @@ int main(int argc, char *argv[])
     int last_video_rc = -999;
     int confirm_format = 0;
     int confirm_install = 0;
+    int confirm_recovery = 0;
     int install_result_modal = 0;
     int last_format_rc = -999;
     int init_rc;
@@ -548,6 +616,8 @@ int main(int argc, char *argv[])
     (void)argc;
     (void)argv;
     MciSettingsDefaults(&Settings);
+    memset(&RecoveryStatus, 0, sizeof(RecoveryStatus));
+    RecoveryStatus.target_port = -1;
 
     init_scr();
     if (MciGuiInit() < 0) {
@@ -571,6 +641,9 @@ int main(int argc, char *argv[])
     ResetSlotReports(1);
     fmcb_rc = FmcbInitMassBackend(&FmcbMassStatus);
     (void)fmcb_rc;
+    (void)RefreshRecoveryStatus();
+    if (RecoveryStatus.present)
+        page = MCI_GUI_FMCB;
 
     while (1) {
         if (dirty) {
@@ -585,6 +658,20 @@ int main(int argc, char *argv[])
             if (pressed & (PAD_CROSS | PAD_CIRCLE)) {
                 install_result_modal = 0;
                 dirty = 1;
+            }
+            DelayThread(16000);
+            continue;
+        }
+
+        if (confirm_recovery) {
+            if (pressed & PAD_CIRCLE) {
+                confirm_recovery = 0;
+                dirty = 1;
+            } else if ((pressed & PAD_TRIANGLE) &&
+                       (held & PAD_L1) && (held & PAD_R1)) {
+                confirm_recovery = 0;
+                (void)RunPendingRecovery();
+                install_result_modal = 1;
             }
             DelayThread(16000);
             continue;
@@ -667,20 +754,54 @@ int main(int argc, char *argv[])
             }
 
             if ((pressed & PAD_SQUARE) && page == MCI_GUI_FMCB) {
-                if (FmcbReports[selected].status != FMCB_PACKAGE_READY) {
+                (void)RefreshRecoveryStatus();
+                if (RecoveryStatus.present) {
+                    if (!RecoveryStatus.valid) {
+                        MciGuiRenderMessage("Recovery journal requires inspection",
+                                            "An FMCB recovery directory exists, but neither checksummed journal slot is valid. A new installation is blocked so the evidence is not overwritten.",
+                                            "CROSS or CIRCLE returns to the dashboard.",
+                                            MCI_GUI_TONE_DANGER);
+                        install_result_modal = 1;
+                    } else {
+                        char message[360];
+                        snprintf(message, sizeof(message),
+                                 "Recover the interrupted FMCB transaction recorded for mc%d?\n\nState: %s\nPrepared destinations: %d\nUSB root: %s\n\nRecovery validates the card transaction marker, restores every captured destination in reverse order, verifies restored files, then removes the journal.",
+                                 RecoveryStatus.target_port,
+                                 FmcbRecoveryStateText(RecoveryStatus.state),
+                                 RecoveryStatus.prepared_files,
+                                 RecoveryStatus.source_root);
+                        MciGuiRenderMessage("FMCB RECOVERY CONFIRMATION", message,
+                                            "Hold L1 + R1 and press TRIANGLE to recover. CIRCLE cancels.",
+                                            MCI_GUI_TONE_DANGER);
+                        confirm_recovery = 1;
+                    }
+                } else if (FmcbReports[selected].status != FMCB_PACKAGE_READY) {
                     MciGuiRenderMessage("Installer locked",
                                         "Run FMCB Preflight with CROSS first. The normal installer is armed only for a package that resolves every required source and destination.",
                                         "CROSS or CIRCLE returns to the dashboard.",
                                         MCI_GUI_TONE_WARNING);
                     install_result_modal = 1;
                 } else {
-                    char message[320];
+                    const FmcbInstallPlan *plan = &FmcbReports[selected].plan;
+                    const char *compact;
+                    char message[640];
+
+                    if (plan->compact_unlock_active)
+                        compact = "Real DEX profile: compact reference manifest ACTIVE; ENDVDPL is omitted.";
+                    else if (plan->compact_unlock_candidate)
+                        compact = "DEX-like/region-unlocked MechaCon detected: compact manifest candidate found, but the CEX payload is retained until hardware validation proves ENDVDPL can be omitted safely.";
+                    else
+                        compact = "Retail region policy: normal CEX manifest.";
+
                     snprintf(message, sizeof(message),
-                             "Install normal FreeMcBoot to mc%d:\n\nTarget: %s/%s\nROM: %04X region %c\n\nThe card, MagicGate and package will be revalidated. Existing targets are backed up in EE RAM and every write is reopened and compared. Runtime failures trigger rollback. Power loss during writes is still inherently unsafe.",
-                             selected, FmcbReports[selected].plan.destination_system,
-                             FmcbReports[selected].plan.destination_osd,
-                             FmcbReports[selected].plan.rom_version,
-                             FmcbReports[selected].plan.region_letter);
+                             "Install normal FreeMcBoot to mc%d:\n\nTarget: %s/%s\nROMVER: %04X%c  MechaCon: %u.%02u\nPolicy: %s\n%s\n\nThe card, MagicGate and package will be revalidated. Space is simulated before writes. Every replaced target is persisted and verified on USB, every card write is read back, and an interrupted transaction can be recovered on the marked target card.",
+                             selected, plan->destination_system,
+                             plan->destination_osd, plan->rom_version,
+                             plan->romver_region,
+                             plan->console.mecha_major,
+                             plan->console.mecha_minor,
+                             MciConsoleRegionPolicyText(&plan->console),
+                             compact);
                     MciGuiRenderMessage("FMCB INSTALL CONFIRMATION", message,
                                         "Hold L1 + R1 and press SQUARE to install. CIRCLE cancels.",
                                         MCI_GUI_TONE_DANGER);
