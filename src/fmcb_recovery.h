@@ -39,6 +39,9 @@ int FmcbRecoveryBegin(const FmcbPackageReport *package,
  * the target card. Recovery refuses to modify a card without the matching
  * token, preventing a stale journal from being applied to a different card. */
 int FmcbRecoveryArmCard(FmcbRecoveryStatus *status, int target_port);
+int FmcbRecoveryCheckCard(FmcbRecoveryStatus *status, int target_port);
+int FmcbRecoveryClearCardMarker(const FmcbRecoveryStatus *status,
+                                int target_port);
 
 /* Persist the original destination (or its absence) to USB, verify the backup,
  * then atomically advance the journal. The target itself is never modified. */
@@ -57,12 +60,12 @@ int FmcbRecoveryRecordDirectories(FmcbRecoveryStatus *status,
                                   int created_sysconf_dir);
 
 /* Restore every prepared destination in reverse order from persistent USB
- * backups. Safe to run again after another interruption, but only on the card
- * carrying the matching transaction marker. */
+ * backups. The UI validates the card marker before replaying a journal from a
+ * previous boot; in-process rollback is already pinned to the same card slot. */
 int FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc);
 
-/* Mark a successful transaction committed, then remove the card marker,
- * backups and both journal slots. */
+/* Publish COMMITTED and remove backup/journal metadata. The caller then removes
+ * the card marker using a saved copy of the pre-finish recovery status. */
 int FmcbRecoveryFinish(FmcbRecoveryStatus *status);
 
 const char *FmcbRecoveryStateText(FmcbRecoveryState state);
