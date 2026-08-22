@@ -123,7 +123,7 @@ The 0.3 development UI is deliberately **target-centric**. Left/Right selects th
 | Square / Circle / Start | Reserved for future actions outside format confirmation |
 | Select | Exit |
 
-Changing the visible page does not change what Cross runs. Changing the selected slot changes the target of the next full scan.
+Changing the visible page does not change what Cross runs. Changing the selected slot changes the target of the next full scan; the test does not auto-start merely because the selection moved.
 
 ## Building
 
