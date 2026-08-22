@@ -31,14 +31,13 @@ jobs:
           git diff --check
           git diff --stat
 
-      - name: Commit patch and restore normal CI
+      - name: Commit code-only patch
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git show HEAD^:.github/workflows/build.yml > .github/workflows/build.yml
-          git rm -f tools/apply_settings_marquee.py tools/APPLY_SETTINGS_MARQUEE .github/workflows/one-shot-settings-marquee.yml
-          git add src/settings.h src/settings.c src/fmcb_transaction.h src/fmcb_transaction.c src/gui.h src/gui.c src/app_main.c .github/workflows/build.yml
+          git rm -f tools/apply_settings_marquee.py tools/APPLY_SETTINGS_MARQUEE
+          git add src/settings.h src/settings.c src/fmcb_transaction.h src/fmcb_transaction.c src/gui.h src/gui.c src/app_main.c
           git commit -m 'feat(ui): add verify policies and marquee overflow text'
           git push origin HEAD:feat/0.4.0
