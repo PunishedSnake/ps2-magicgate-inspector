@@ -1,3 +1,4 @@
+IOP_SRC_DIR = ./
 IOP_OBJS = mgtrace.o imports.o
 IOP_CFLAGS += -G0 -O2 -Wall -Wextra -I../..
 
