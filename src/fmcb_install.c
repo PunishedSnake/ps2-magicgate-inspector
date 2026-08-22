@@ -1,10 +1,10 @@
 /*
  * PS2 Memory Card Inspector - FMCB normal-install planning and USB preflight
  *
- * The manifest follows the normal CEX install shape used by FreeMcBoot while
- * remaining payload-free: the user supplies the package under mass:/FMCB.
- * 0.4 resolves region icon names and legacy OSDSYS destination filenames here
- * so preflight and the later transaction engine cannot disagree.
+ * The system-update destination is selected from the console's active runtime
+ * profile, not from a sticker assumption. ROMVER still owns the OSDSYS lookup
+ * path, while console_profile.c cross-checks Dragon/Deckard MechaCon state so a
+ * MechaPwn/DEX-like console is not silently mistaken for stock retail hardware.
  */
 
 #define NEWLIB_PORT_AWARE
@@ -17,7 +17,6 @@
 #include <sbv_patches.h>
 #include <fileXio_rpc.h>
 #include <io_common.h>
-#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -35,7 +34,11 @@ extern unsigned int size_usbhdfsd_irx;
 
 static const FmcbPackageEntry NormalInstallManifest[] = {
     {"SYSTEM/FMCB.XLF",       "REGION_SYSTEM/OSD",       FMCB_FILE_REQUIRED | FMCB_FILE_KELF},
-    {"SYSTEM/ENDVDPL.XRX",    "SYS-CONF/endvdpl.irx",   FMCB_FILE_REQUIRED | FMCB_FILE_KELF},
+    /* The reference FMCB installer omits ENDVDPL on a real DEX ROM. We preserve
+     * that proven distinction, but do not yet assume that every DEX-like
+     * MechaPwn configuration can omit it until that compact path is tested on
+     * hardware. */
+    {"SYSTEM/ENDVDPL.XRX",    "SYS-CONF/endvdpl.irx",   FMCB_FILE_REQUIRED | FMCB_FILE_KELF | FMCB_FILE_CEX_ONLY},
     {"SYSTEM/FMCB.ICN",       "REGION_SYSTEM/FMCB.icn", FMCB_FILE_REQUIRED | FMCB_FILE_RESOURCE},
     {"SYSTEM/B?ICON.SYS",     "REGION_SYSTEM/icon.sys", FMCB_FILE_REQUIRED | FMCB_FILE_RESOURCE},
     {"SYS-CONF/FMCB_CFG.ELF", "SYS-CONF/FMCB_CFG.ELF",  FMCB_FILE_REQUIRED | FMCB_FILE_CONFIG},
@@ -74,42 +77,75 @@ const FmcbPackageEntry *FmcbPackageEntryAt(int index)
     return &NormalInstallManifest[index];
 }
 
+int FmcbPackageEntrySelected(const FmcbInstallPlan *plan, int index)
+{
+    const FmcbPackageEntry *entry = FmcbPackageEntryAt(index);
+
+    if (plan == NULL || entry == NULL)
+        return 0;
+    if ((entry->flags & FMCB_FILE_CEX_ONLY) && plan->console.rom_is_dex)
+        return 0;
+    return 1;
+}
+
 static void ResolveOsdName(unsigned int rom_version, char out[32])
 {
     if (rom_version < 0x0130u) {
         unsigned int version;
+
+        /* Match the reference FMCB installer exactly. v1.00/v1.01 require the
+         * patched 1.30 update; other pre-1.30 ROMs look for the next 0x10
+         * update filename. The value is already expressed as hexadecimal
+         * hundredths, so there is deliberately no >> 4 here. */
         if (rom_version == 0x0100u || rom_version == 0x0101u)
             version = 0x0130u;
         else
-            version = (rom_version + 0x000Fu) & ~0x000Fu;
-        snprintf(out, 32, "osd%03X.elf", version >> 4);
+            version = (rom_version + 0x0010u) & ~0x000Fu;
+        snprintf(out, 32, "osd%03X.elf", version);
     } else {
         snprintf(out, 32, "osdmain.elf");
     }
 }
 
-void FmcbBuildInstallPlan(int target_port, char region_letter,
-                          unsigned int rom_version, FmcbInstallPlan *plan)
+void FmcbBuildInstallPlan(int target_port, const MciConsoleProfile *console,
+                          FmcbInstallPlan *plan)
 {
     int i;
 
     memset(plan, 0, sizeof(*plan));
     plan->target_port = target_port;
-    plan->region_letter = region_letter;
-    plan->rom_version = rom_version;
+    if (console != NULL)
+        plan->console = *console;
+    else {
+        plan->console.romver_region = '?';
+        plan->console.mg_folder_region = '?';
+    }
 
-    if (region_letter == 'I' || region_letter == 'A' ||
-        region_letter == 'E' || region_letter == 'C') {
+    plan->romver_region = plan->console.romver_region;
+    plan->rom_version = plan->console.rom_version;
+    plan->region_letter = plan->console.mg_folder_region;
+
+    if (plan->region_letter == 'I' || plan->region_letter == 'A' ||
+        plan->region_letter == 'E' || plan->region_letter == 'C') {
         snprintf(plan->destination_system, sizeof(plan->destination_system),
-                 "B%cEXEC-SYSTEM", region_letter);
+                 "B%cEXEC-SYSTEM", plan->region_letter);
     } else {
         snprintf(plan->destination_system, sizeof(plan->destination_system),
                  "UNKNOWN");
     }
-    ResolveOsdName(rom_version, plan->destination_osd);
+    ResolveOsdName(plan->rom_version, plan->destination_osd);
+
+    plan->compact_unlock_candidate = plan->console.region_unlocked &&
+                                     !plan->console.rom_is_dex &&
+                                     !plan->console.region_mismatch;
+    plan->compact_unlock_active = plan->console.rom_is_dex;
 
     for (i = 0; i < FmcbPackageEntryCount(); i++) {
         const FmcbPackageEntry *entry = &NormalInstallManifest[i];
+
+        if (!FmcbPackageEntrySelected(plan, i))
+            continue;
+        plan->selected_files++;
         if (entry->flags & FMCB_FILE_REQUIRED) plan->required_files++;
         if (entry->flags & FMCB_FILE_KELF) plan->kelf_files++;
         if (entry->flags & FMCB_FILE_CONFIG) plan->config_files++;
@@ -173,7 +209,7 @@ int FmcbInitMassBackend(FmcbMassBackendStatus *status)
     if (rc < 0) goto out;
 
     MciProgressUpdate(MCI_PROGRESS_ENVIRONMENT, 38, "Loading fileXio",
-                      "Starting the EE/IOP file service used for ROMVER and USB package access.");
+                      "Starting the EE/IOP file service used for ROMVER, MechaCon-aware preflight and USB package access.");
     rc = ExecEmbedded(fileXio_irx, size_fileXio_irx, &start_rc);
     status->filexio_module_rc = rc;
     if (rc < 0) goto out;
@@ -185,7 +221,7 @@ int FmcbInitMassBackend(FmcbMassBackendStatus *status)
     if (rc < 0) goto out;
 
     MciProgressUpdate(MCI_PROGRESS_ENVIRONMENT, 70, "Loading the USB mass-storage driver",
-                      "Starting USBHDFSD so a user-supplied FMCB package can be read from mass:.");
+                      "Starting USBHDFSD so a user-supplied FMCB package and recovery journal can use mass:.");
     rc = ExecEmbedded(usbhdfsd_irx, size_usbhdfsd_irx, &start_rc);
     status->usbhdfsd_rc = rc;
 
@@ -204,7 +240,7 @@ out:
     DelayThread(250000);
     status->available = 1;
     MciProgressUpdate(MCI_PROGRESS_ENVIRONMENT, 100, "USB package backend ready",
-                      "mass: access is available for FMCB package discovery and installation sources.");
+                      "mass: access is available for FMCB package discovery, installation sources and recovery state.");
     return 0;
 }
 
@@ -214,42 +250,6 @@ void FmcbShutdownMassBackend(FmcbMassBackendStatus *status)
         fileXioExit();
     if (status != NULL)
         status->available = 0;
-}
-
-static char DetectConsole(char *romver_region, unsigned int *rom_version)
-{
-    char romver[17];
-    char version_text[5];
-    int fd;
-    int rc;
-
-    memset(romver, 0, sizeof(romver));
-    if (romver_region != NULL) *romver_region = '?';
-    if (rom_version != NULL) *rom_version = 0;
-
-    fd = fileXioOpen("rom0:ROMVER", FIO_O_RDONLY);
-    if (fd < 0)
-        return '?';
-    rc = fileXioRead(fd, romver, sizeof(romver) - 1);
-    fileXioClose(fd);
-    if (rc <= 4)
-        return '?';
-
-    memcpy(version_text, romver, 4);
-    version_text[4] = '\0';
-    if (rom_version != NULL)
-        *rom_version = (unsigned int)strtoul(version_text, NULL, 16);
-    if (romver_region != NULL)
-        *romver_region = romver[4];
-
-    switch (romver[4]) {
-        case 'J': return 'I';
-        case 'A':
-        case 'H': return 'A';
-        case 'E': return 'E';
-        case 'C': return 'C';
-        default: return '?';
-    }
 }
 
 void FmcbResetPackageReport(FmcbPackageReport *report, int target_port)
@@ -274,32 +274,37 @@ static void ResolveSourcePath(const FmcbPackageEntry *entry, char region,
 static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *report)
 {
     iox_stat_t stat;
+    MciConsoleProfile console;
     char full_path[FMCB_PATH_MAX + FMCB_SOURCE_ROOT_MAX + 4];
     char relative[FMCB_PATH_MAX];
-    char detail[224];
-    char region;
-    char romver_region;
-    unsigned int rom_version;
+    char detail[256];
+    int profile_rc;
     int i;
     int rc;
     int count;
 
-    MciProgressUpdate(MCI_PROGRESS_FMCB, 20, "Reading ROMVER",
-                      "Resolving console ROM revision and MagicGate region for exact FMCB destinations.");
-    region = DetectConsole(&romver_region, &rom_version);
+    MciProgressUpdate(MCI_PROGRESS_FMCB, 18, "Profiling ROMVER and MechaCon",
+                      "Reading the active ROMVER, MechaCon revision and read-only region parameters before choosing an FMCB system-update location.");
+    profile_rc = MciConsoleProfileProbe(&console);
 
     MciProgressUpdate(MCI_PROGRESS_FMCB, 26, "Building the install plan",
-                      "Resolving region-specific icons, OSDSYS filename and required KELF/resources.");
-    FmcbBuildInstallPlan(target_port, region, rom_version, &report->plan);
-    report->plan.romver_region = romver_region;
+                      "Cross-checking the active OSD region with MechaCon state, then resolving the exact system folder and OSDSYS update filename.");
+    FmcbBuildInstallPlan(target_port, &console, &report->plan);
     report->entry_count = FmcbPackageEntryCount();
     snprintf(report->source_root, sizeof(report->source_root), "%s", root);
 
-    if (region == '?') {
+    if (profile_rc < 0 || console.mg_folder_region == '?' || console.is_psx) {
         report->status = FMCB_PACKAGE_UNSUPPORTED_CONSOLE;
         MciProgressUpdate(MCI_PROGRESS_FMCB, 100,
-                          "Preflight cannot resolve this console region",
-                          "ROMVER did not map to a supported normal-install destination; no card writes were attempted.");
+                          "Preflight cannot resolve a supported PS2 target",
+                          "The active ROMVER/console type did not map to a supported normal FMCB destination; no card writes were attempted.");
+        return -1;
+    }
+    if (console.region_mismatch) {
+        report->status = FMCB_PACKAGE_REGION_AMBIGUOUS;
+        MciProgressUpdate(MCI_PROGRESS_FMCB, 100,
+                          "ROMVER and MechaCon region state disagree",
+                          "The console appears region-modified or transiently inconsistent. Installation is blocked rather than guessing which system-update directory OSDSYS will use.");
         return -1;
     }
 
@@ -309,15 +314,18 @@ static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *repor
         FmcbPackageFileStatus *file = &report->files[i];
         int percent = 30 + ((i * 60) / (count > 0 ? count : 1));
 
-        ResolveSourcePath(entry, region, relative, sizeof(relative));
+        ResolveSourcePath(entry, report->plan.region_letter, relative,
+                          sizeof(relative));
         memset(file, 0, sizeof(*file));
         file->flags = entry->flags;
+        file->selected = FmcbPackageEntrySelected(&report->plan, i);
         file->stat_rc = -999;
         snprintf(file->relative_path, sizeof(file->relative_path), "%s", relative);
         snprintf(full_path, sizeof(full_path), "%s/%s", root, relative);
 
-        snprintf(detail, sizeof(detail), "Checking %s (%s).", relative,
-                 (entry->flags & FMCB_FILE_REQUIRED) ? "required" : "optional");
+        snprintf(detail, sizeof(detail), "Checking %s (%s%s).", relative,
+                 file->selected ? "selected" : "omitted for real DEX",
+                 (entry->flags & FMCB_FILE_REQUIRED) ? ", required" : "");
         MciProgressUpdate(MCI_PROGRESS_FMCB, percent,
                           "Scanning the package manifest", detail);
 
@@ -327,10 +335,16 @@ static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *repor
         if (rc >= 0 && stat.size > 0) {
             file->found = 1;
             file->size = stat.size;
-            report->total_found_bytes += stat.size;
-            if (entry->flags & FMCB_FILE_REQUIRED) report->found_required++;
-            if (entry->flags & FMCB_FILE_OPTIONAL) report->found_optional++;
-        } else if (entry->flags & FMCB_FILE_REQUIRED) {
+            if (file->selected) {
+                report->total_found_bytes += stat.size;
+                if (entry->flags & FMCB_FILE_REQUIRED) report->found_required++;
+                if (entry->flags & FMCB_FILE_OPTIONAL) report->found_optional++;
+            }
+            if ((entry->flags & FMCB_FILE_CEX_ONLY) &&
+                (report->plan.compact_unlock_active ||
+                 report->plan.compact_unlock_candidate))
+                report->plan.compact_possible_savings += stat.size;
+        } else if (file->selected && (entry->flags & FMCB_FILE_REQUIRED)) {
             report->missing_required++;
         }
     }
@@ -339,10 +353,13 @@ static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *repor
     report->status = report->plan.package_complete ? FMCB_PACKAGE_READY
                                                     : FMCB_PACKAGE_INCOMPLETE;
     snprintf(detail, sizeof(detail),
-             "Found %d/%d required; %d missing. Target %s/%s, ROM %04X.",
+             "Found %d/%d required; target %s/%s. ROM %04X %c, Mecha %u.%02u, policy: %s.",
              report->found_required, report->plan.required_files,
-             report->missing_required, report->plan.destination_system,
-             report->plan.destination_osd, report->plan.rom_version);
+             report->plan.destination_system, report->plan.destination_osd,
+             report->plan.rom_version, report->plan.romver_region,
+             report->plan.console.mecha_major,
+             report->plan.console.mecha_minor,
+             MciConsoleRegionPolicyText(&report->plan.console));
     MciProgressUpdate(MCI_PROGRESS_FMCB, 100,
                       "FMCB package preflight complete", detail);
     return report->plan.package_complete ? 0 : -1;
@@ -391,7 +408,8 @@ const char *FmcbPackageStatusText(FmcbPackageStatus status)
         case FMCB_PACKAGE_NOT_FOUND: return "PACKAGE NOT FOUND";
         case FMCB_PACKAGE_INCOMPLETE: return "INCOMPLETE";
         case FMCB_PACKAGE_READY: return "READY FOR VERIFIED INSTALL";
-        case FMCB_PACKAGE_UNSUPPORTED_CONSOLE: return "UNSUPPORTED/UNKNOWN REGION";
+        case FMCB_PACKAGE_UNSUPPORTED_CONSOLE: return "UNSUPPORTED/UNKNOWN CONSOLE";
+        case FMCB_PACKAGE_REGION_AMBIGUOUS: return "ROMVER / MECHACON REGION MISMATCH";
         default: return "NOT SCANNED";
     }
 }
