@@ -43,7 +43,7 @@ jobs:
             -v "$GITHUB_WORKSPACE:/work" \
             -w /work \
             ps2dev/ps2dev:v1.0 \
-            sh -c 'set -eu; apk add --no-cache git python3 build-base >/dev/null; for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/fmcb-ps2sdk-v1/$f"; done; git init -q /tmp/fmcb; git -C /tmp/fmcb remote add origin https://github.com/israpps/FreeMcBoot-Installer.git; git -C /tmp/fmcb fetch -q --depth 1 origin ac53a47a5c6eae675cc2611c7bebe62f56c7845c; git -C /tmp/fmcb checkout -q FETCH_HEAD; python3 /work/tools/patch_fmcb_secrman_dev12.py /tmp/fmcb/installer/irx/source/secrman; make -C /tmp/fmcb/installer/irx/source/secrman clean all; cp /tmp/fmcb/installer/irx/source/secrman/secrman.irx /work/.build/fmcb-secr-dev12/secrman.irx'
+            sh -c 'set -eu; apk add --no-cache git python3 build-base >/dev/null; for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/fmcb-ps2sdk-v1/$f"; done; git init -q /tmp/fmcb; git -C /tmp/fmcb remote add origin https://github.com/israpps/FreeMcBoot-Installer.git; git -C /tmp/fmcb fetch -q --depth 1 origin ac53a47a5c6eae675cc2611c7bebe62f56c7845c; git -C /tmp/fmcb checkout -q FETCH_HEAD; python3 /work/tools/patch_fmcb_secrman_dev12.py /tmp/fmcb/installer/irx/source/secrman; make -C /tmp/fmcb/installer/irx/source/secrman clean all; cp /tmp/fmcb/installer/irx/source/secrman/irx/secrman.irx /work/.build/fmcb-secr-dev12/secrman.irx'
           ls -lh .build/fmcb-ps2sdk-v1 .build/fmcb-secr-dev12
           sha256sum .build/fmcb-ps2sdk-v1/*.irx .build/fmcb-secr-dev12/secrman.irx
 
