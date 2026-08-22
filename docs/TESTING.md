@@ -1,75 +1,81 @@
 # Hardware and regression testing
 
-PS2 Memory Card Inspector is developed against real PlayStation 2 hardware. Emulator-only success is not considered sufficient for memory-card, SIO2 or MagicGate changes.
+PS2 Memory Card Inspector is validated on real PlayStation 2 hardware. Emulator-only success is not sufficient for memory-card, SIO2 or MagicGate changes.
 
-This document defines the current regression matrix and records which conclusions have real-hardware evidence behind them.
+## Release backend
 
-## General test rule
-
-When reporting a result, record at minimum:
+0.2.0 uses the PS2SDK 2.0 SECRMAN 1.4 backend built from pinned PS2SDK commit:
 
 ```text
-application revision / commit
-SECR_PROFILE
+a13b5971ec0e39c7ba8b8559b80a4e81c8425352
+```
+
+The final release candidate must continue to reproduce the hardware matrix below after any code/documentation cleanup that changes the ELF.
+
+## Hardware matrix
+
+| Card | Role | Filesystem | MagicGate |
+| --- | --- | --- | --- |
+| Sony 8 MB A | positive control | PASS | `FUNCTIONAL` |
+| Sony 8 MB B | positive control | PASS | `FUNCTIONAL` |
+| Third-party 64 MB, functional MagicGate | third-party positive control | PASS | `FUNCTIONAL` |
+| Third-party 64 MB, no functional MagicGate | negative control | PASS | `NOT SUPPORTED / NO CARD AUTH ACK` |
+
+The PS2SDK 2.0 SECRMAN 1.4 build reproduced the same positive/negative behavior that was previously established with the compatibility baseline. That closes the backend-comparison milestone.
+
+## Minimum data for a regression report
+
+Record:
+
+```text
+Inspector version / commit
+ELF SHA-256
 selected slot
 card description
 filesystem result
 MagicGate result
 Kbit/Kc values or failure stage
-stat6c / id / status when a CardAuth failure is shown
+stat6c / id / status when shown
 normal-stack restore result
 ```
 
-A MagicGate screenshot without the security profile is incomplete regression data.
-
-## Known card matrix
-
-The Briscoe investigation currently has four useful physical cards:
-
-| Card | Role | Filesystem | `fmcb13` MagicGate |
-| --- | --- | --- | --- |
-| Official Sony 8 MB A | positive control | PASS | FUNCTIONAL |
-| Official Sony 8 MB B | positive control | PASS | FUNCTIONAL |
-| Third-party 64 MB, no functional MagicGate | negative control | PASS | `NOT SUPPORTED / NO CARD AUTH ACK` |
-| Third-party 64 MB, MagicGate-capable | third-party positive control | PASS | FUNCTIONAL |
-
-The last two cards are particularly useful because they prove that capacity and manufacturer branding are not proxies for actual CardAuth behavior.
+Because 0.2.0 has one production backend, a separate profile name is no longer required, but the exact ELF checksum still matters.
 
 ## Filesystem regression test
 
-The ordinary card path must continue to use the normal ROM X stack.
+The ordinary card path must remain on the Sony ROM X stack.
 
 Expected sequence:
 
-1. `mcGetInfo()` and existing error classification behave as before;
-2. root directory query behaves as before;
-3. the Inspector chooses an unused temporary filename rather than overwriting an existing file;
-4. the card is rechecked before the write;
-5. 4096 bytes of deterministic data are written and flushed;
+1. `mcGetInfo()` and error classification work;
+2. root-directory query works;
+3. Inspector chooses an unused temporary filename;
+4. the card is rechecked before writing;
+5. 4096 deterministic bytes are written and flushed;
 6. the file is closed, reopened and read;
 7. all bytes compare;
 8. the file is deleted;
 9. deletion is verified.
 
-Known hardware baseline: both official Sony cards completed the full create/write/flush/reopen/read/compare/delete path.
+Known baseline: both official Sony cards passed the full create/write/flush/reopen/read/compare/delete path.
 
-Any change to the isolated security stack that breaks this ordinary path **after restoration** is a regression even if MagicGate itself passes.
+Any MagicGate change that breaks this ordinary path after restoration is a regression even if the security probe itself passes.
 
-## MagicGate positive-control test
+## Positive-control MagicGate test
 
-For each positive-control card:
+For a known-good card:
 
-1. place a raw `FMCB.XLF` at `mass:/FMCB/SYSTEM/FMCB.XLF` or an accepted numbered `mass` path;
-2. run the MagicGate probe;
+1. place raw `FMCB.XLF` at an accepted `mass:` path;
+2. run the Square/MagicGate probe;
 3. confirm session setup succeeds;
 4. confirm `DownloadHeader = 1`;
-5. confirm the expected encrypted BIT block count completes;
+5. confirm required encrypted BIT blocks complete;
 6. confirm `Kbit = 1`;
 7. confirm `Kc = 1`;
-8. confirm final result is `FUNCTIONAL`;
-9. after returning to the UI, rerun ordinary filesystem inspection to verify the ROM X stack was restored correctly.
+8. confirm final result is `FUNCTIONAL` and stage is `DONE`;
+9. rerun ordinary filesystem inspection afterwards to confirm normal-stack restoration.
 
-For the currently used FMCB.XLF test input the observed BIT summary has been:
+For the FMCB.XLF used during development the observed BIT summary was:
 
 ```text
 BIT blocks: 2
@@ -77,13 +83,13 @@ encrypted: 1
 completed: 1
 ```
 
-Do not hardcode those values as a universal KELF rule; they describe the current test file.
+Those values describe that test file and must not be hardcoded as a universal KELF rule.
 
-## MagicGate negative-control test
+## Negative-control MagicGate test
 
-The known third-party 64 MB card without functional MagicGate is expected to remain filesystem-readable but fail the first real Kbit CardAuth transaction.
+The known third-party 64 MB card without functional MagicGate remains usable as ordinary PS2 storage but fails the first real Kbit CardAuth transaction.
 
-Validated `fmcb13` signature:
+Validated signature:
 
 ```text
 pre=1/1
@@ -95,137 +101,100 @@ id=FF
 status=FF
 ```
 
-Expected user-facing classification:
+Expected user-facing result:
 
 ```text
 NOT SUPPORTED / NO CARD AUTH ACK
 ```
 
-This negative control is important. If a new backend suddenly reports `FUNCTIONAL` on every card, the probe may have become a false positive. If it fails the Sony positive controls with the same signature, suspect backend/session/port regression before blaming the cards.
+This negative control prevents false-positive regressions. A backend that suddenly returns `FUNCTIONAL` for every card is suspect; a build that makes the Sony controls fail with the same no-ACK signature is also suspect.
 
-## `ps2sdk14` hardware comparison plan
+## Historical regressions that must not return
 
-The PS2SDK 2.0 SECRMAN 1.4 comparison profile has compiled and linked successfully. Hardware equivalence is still pending.
+### Applying the 0x400 limit to every BIT entry
 
-Test it in this order:
+Wrong: reject any BIT entry larger than 0x400.
 
-### 1. Sony 8 MB positive control A
+Correct: every entry must fit inside the KELF, but only entries marked `flags & 2` are sent through the 0x400-byte SECRSIF block RPC.
 
-Expected ideal result:
+### Using installed `osdmain.elf` as raw input
 
-```text
-FUNCTIONAL
-Kbit=1
-Kc=1
-```
+Wrong: use an already card-bound installed KELF.
 
-If this fails, capture the complete GET_KBIT diagnostic line before changing code.
+Correct: use a raw user-supplied `FMCB.XLF` from USB.
 
-### 2. Sony 8 MB positive control B
+### Starting temporary MCSERV
 
-Confirms the result is not specific to the first card.
+Observed: temporary MCSERV could report successful residency and still wedge the following LOADFILE RPC.
 
-### 3. Third-party 64 MB negative control
+Correct release behavior: keep temporary MCMAN active, skip temporary MCSERV, emulate only the immediate EE-side libmc sanity call, then rebuild the real ROM X stack after the probe.
 
-Expected result should remain a clean first-command no-ACK or another clearly card-side rejection. A false `FUNCTIONAL` result here requires investigation.
+### Injecting an extra F3 before GET_KBIT
 
-### 4. Third-party 64 MB MagicGate-capable positive control
+Wrong: replay an F3 reset as a diagnostic prerequisite.
 
-Expected `FUNCTIONAL`.
+Correct: the real GET_KBIT CardAuth path begins after Mechacon preparation with `F2/50 -> 51 -> 52 -> 53`. Diagnostics must instrument that path in place.
 
-### 5. Post-probe filesystem regression
+### Forwarding logical libmc ports to CardAuth
 
-After each card/security test, verify the normal ROM stack and ordinary R/W path again.
-
-Only after all of those agree with the `fmcb13` baseline should `ps2sdk14` be considered hardware-validated.
-
-## Historical regression cases that must not return
-
-### Large plaintext BIT entry rejected as > 0x400
-
-Cause: the SECRSIF RPC block-size limit was incorrectly applied to every BIT entry.
-
-Correct behavior: validate every block against KELF bounds, but apply the `0x400` RPC payload limit only when `flags & 2` means the block is actually sent to `DownloadBlock`.
-
-### Installed `osdmain.elf` used as raw bind input
-
-Cause: confusion between a source KELF and an already card-bound installed KELF.
-
-Correct behavior: use a raw user-supplied `FMCB.XLF` from USB.
-
-### Temporary MCSERV wedges LOADFILE RPC
-
-Cause: isolated PS2SDK-v1 MCSERV could become resident yet interfere with the following module load.
-
-Correct behavior: skip temporary MCSERV during the isolated probe, keep MCMAN active, and emulate only the immediate EE-side libmc sanity query.
-
-### Extra F3 inserted before GET_KBIT
-
-Cause: independent diagnostic replay assumed authentication reset was part of the actual GET_KBIT sequence.
-
-Correct behavior: do not inject F3. The real card transform starts at `F2/50` after Mechacon preparation.
-
-### Logical libmc port forwarded to CardAuth
-
-Cause: EE logical `0/1` was passed directly to SECRMAN, which consumes physical SIO2 channels.
-
-Observed failure:
+Wrong:
 
 ```text
-0001D100 / FF / FF
+mc0 -> 0
+mc1 -> 1
 ```
 
-Correct behavior:
+at the SECRMAN boundary.
+
+Correct:
 
 ```text
-0 -> 2
-1 -> 3
+mc0 logical 0 -> SIO2 2
+mc1 logical 1 -> SIO2 3
 ```
 
-at the SECR RPC boundary only.
+only for SECR RPCs carrying a card port.
 
-## CI/build regression
+The incorrect mapping produced the repeated `0001D100 / FF / FF` signature on known-good cards.
 
-Every security profile must at least compile in CI before hardware testing.
+## CI regression
 
-The first `ps2sdk14` instrumentation attempt failed compilation because the diagnostic expansion left stock `scePreEncryptKbit()` unused and PS2SDK treats warnings as errors. That was a build-patcher bug, not a SECRMAN runtime failure.
+The release workflow must successfully:
 
-Corrected comparison build:
+- stage PS2SDK 2.0 SIO2/PAD/MCMAN modules;
+- check out the pinned PS2SDK source;
+- apply `tools/patch_secrman14_diag.py`;
+- build SECRMAN 1.4 and matching SECRSIF with PS2SDK's warning-as-error policy;
+- link `MC_INSPECTOR.ELF`;
+- package license/provenance files;
+- compute and publish SHA-256.
 
-```text
-workflow #109
-ELF SHA256 b5c1df1c4f51b756bf6c62e5d3fc1a9a414362eab77bf3ad13cd095fc7e4723c
-```
+The first 1.4 instrumentation attempt failed because expanding GET_KBIT left stock `scePreEncryptKbit()` unused under `-Werror`. The patcher now removes that helper and its forward declaration from the temporary source tree.
 
-Later documentation/banner/comment cleanup produces a different ELF hash even when the selected security stack is unchanged, so hardware results should always quote the exact tested artifact checksum.
+## FMCB preflight regression
 
-## FMCB preflight tests
+FMCB package scanning remains read-only. Verify:
 
-FMCB package scanning remains read-only.
+- package discovery on `mass:`, `mass0:` and `mass1:`;
+- required/optional file handling;
+- region-to-target-folder resolution;
+- no target-card writes during scan;
+- ordinary card functionality after USB backend reinitialization.
 
-Verify:
+## Future write-path validation
 
-- package root discovery on `mass:`, `mass0:` and `mass1:`;
-- required file detection;
-- optional file handling;
-- console-region target resolution;
-- no target card writes during scan;
-- ordinary card functionality after USB backend shutdown/reinitialization.
+A successful MagicGate capability test does not authorize a general FMCB install button.
 
-## Future installer write validation
-
-Do not jump directly from a successful MagicGate capability test to a general FMCB install button.
-
-The first write-capable experiment should use a disposable/fully backed-up target and must implement:
+The first write-capable experiment must use a disposable or fully backed-up target and implement:
 
 1. preflight and free-space check;
-2. backup of anything that would be replaced;
-3. bind KELF in RAM;
-4. write only the test target;
-5. close and reopen it through normal filesystem APIs;
-6. read back the entire file;
-7. verify exact expected bound contents/metadata;
-8. restore/rollback on any mismatch;
-9. power-cycle boot test only after on-card verification passes.
+2. backup of replaced files;
+3. KELF bind in RAM;
+4. write only the intended target;
+5. close/reopen through normal filesystem APIs;
+6. read back the entire result;
+7. verify exact expected contents/metadata;
+8. rollback on any mismatch;
+9. power-cycle boot testing only after on-card verification passes.
 
-Until this transaction is implemented and validated, the project remains a diagnostic/preflight utility rather than an FMCB installer.
+Until that transaction is implemented and validated, Inspector remains a diagnostic/preflight utility rather than an FMCB installer.
