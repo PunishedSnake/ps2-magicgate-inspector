@@ -17,6 +17,7 @@ EE_LDFLAGS = -Wl,--gc-sections \
 	-Wl,--wrap=sceSifCallRpc \
 	-Wl,--wrap=MagicGateResultText \
 	-Wl,--wrap=MagicGateStageText \
+	-Wl,--wrap=FmcbRecoveryProbe \
 	-Wl,--wrap=FmcbRecoveryBegin \
 	-Wl,--wrap=FmcbRecoveryRun \
 	-Wl,--wrap=FmcbRecoveryFinish
