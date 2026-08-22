@@ -1,14 +1,16 @@
 /*
- * PS2 Memory Card Inspector - MagicGate / KELF diagnostics
+ * PS2 Memory Card Inspector - RAM-only MagicGate / KELF probe
  *
- * Briscoe dev8 fixes two diagnostic mistakes from earlier Briscoe builds:
- * installed mc?:/B?EXEC-SYSTEM/osdmain.elf files are already card-bound KELFs
- * and are never used as bind input, and large plaintext BIT blocks are no
- * longer rejected merely because they exceed the 0x400-byte SECR RPC payload.
+ * This file owns the high-level SECRSIF transaction and raw-KELF parsing. A
+ * user-supplied FMCB.XLF is acquired under the known-good normal card stack,
+ * kept in EE RAM across the isolated security-session reboot, and discarded
+ * afterwards. Nothing in this probe writes the bound KELF back to a card.
  *
- * The probe accepts only a raw user-supplied FMCB.XLF from the optional mass:
- * package backend. It is read into EE RAM while the normal card stack is
- * active, survives the isolated SECR IOP reboot, and is never written back.
+ * Only BIT entries marked for security download are constrained by SECRSIF's
+ * 0x400-byte block RPC buffer; large plaintext payload entries merely advance
+ * the KELF offset. Logical libmc -> physical SIO2 port translation and detailed
+ * GET_KBIT failure classification are intentionally isolated in
+ * magicgate_diag.c so this core transaction stays backend-neutral.
  */
 
 #define NEWLIB_PORT_AWARE
@@ -38,7 +40,7 @@
 #define MG_RPC_TIMEOUT (-2100)
 #define MG_SHORT_READ (-2101)
 #define MG_INVALID_LAYOUT (-2102)
-#define MG_RAW_SOURCE_PORT 9 /* legacy display marker; not an mc port */
+#define MG_RAW_SOURCE_PORT 9 /* display marker for USB source, not an mc port */
 
 extern unsigned char secrsif_irx[];
 extern unsigned int size_secrsif_irx;
@@ -100,7 +102,7 @@ void MagicGateReleaseKelf(MagicGateKelfBuffer *buffer)
     MagicGateResetKelfBuffer(buffer);
 }
 
-/* SECRMAN is resident from the special IOPRP. This starts only SECRSIF. */
+/* SECRMAN is resident from the generated IOPRP; this starts only SECRSIF. */
 int MagicGateLoadIopModules(MagicGateIopStatus *status)
 {
     int rc;
@@ -515,11 +517,10 @@ int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
     for (i = 0; i < report->block_count; i++) {
         block_size = bit_table.blocks[i].size;
 
-        /* Every BIT entry must fit within the raw KELF, but only blocks marked
-         * for download are constrained by the 0x400-byte SECRSIF RPC payload.
-         * A normal large plaintext payload block may be many kilobytes long
-         * and must simply advance the offset. The dev7 guard incorrectly
-         * rejected such blocks before even looking at their flags. */
+        /* Every BIT entry must fit within the raw KELF, but only entries marked
+         * for security download are constrained by SECRSIF's 0x400-byte block
+         * RPC buffer. Large plaintext payload entries are valid and only move
+         * the source offset forward. */
         if (offset > (unsigned int)buffer->size ||
             block_size > (unsigned int)buffer->size - offset) {
             report->failed_block = i;
