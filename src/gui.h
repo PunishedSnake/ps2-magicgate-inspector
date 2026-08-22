@@ -45,6 +45,14 @@ void MciGuiRenderMessage(const char *title,
                          const char *footer,
                          MciGuiTone tone);
 
+/* Dedicated GS progress page with a real filled progress bar. */
+void MciGuiRenderProgress(const char *title,
+                          const char *action,
+                          const char *detail,
+                          int percent,
+                          const char *footer,
+                          MciGuiTone tone);
+
 void MciGuiRenderFatal(const char *title,
                        const char *body,
                        int code);
