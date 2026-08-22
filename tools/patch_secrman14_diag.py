@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
-"""Instrument PS2SDK 2.0 SECRMAN 1.4 without changing successful semantics.
+# SPDX-License-Identifier: MIT
+"""Instrument PS2SDK 2.0 SECRMAN 1.4 for Inspector diagnostics.
 
-The emitted failure record intentionally matches the compatibility SECRMAN
-record so both backends can be compared with one EE-side decoder.
+The production MagicGate backend remains PS2SDK 2.0 SECRMAN 1.4. This build-time
+patch changes only failed GET_KBIT observability: successful authentication and
+KELF-binding semantics stay on the upstream path.
 
 PS2SDK 2.0 normally routes GET_KBIT through the private scePreEncryptKbit()
-helper. The diagnostic build must distinguish the two Mechacon half-key calls,
-so it expands that helper inline inside SecrDownloadGetKbit(). The now-unused
-static helper and its forward declaration are removed from the temporary source
-tree to keep PS2SDK's -Werror build clean.
+helper. Inspector needs to distinguish the two Mechacon half-key calls from the
+two card_encrypt() calls, so the temporary source tree expands that helper
+inline inside SecrDownloadGetKbit(). The now-unused static helper and its
+forward declaration are removed so PS2SDK's -Werror build remains clean.
 
-This patch is applied to a pinned temporary PS2SDK checkout during CI. It does
-not vendor or permanently fork upstream SECRMAN source in this repository.
+CardAuth transfer state is captured in place for the real F2/50..53 command
+sequence. On failure only, a 16-byte record is returned through the otherwise
+unusable Kbit reply. No CardAuth command is replayed after failure.
+
+CI applies this patch to a pinned temporary PS2SDK checkout. Upstream source is
+not vendored; source provenance and the AFL-2.0 license are documented in
+THIRD_PARTY_NOTICES.md and the release package.
 """
 
 import pathlib
@@ -163,7 +170,7 @@ static void MgDiagEncodeFailure(void *kbit, unsigned char stage,
 }
 ''', 1)
 
-# Expanding the helper below makes the failed half observable. Remove the stock
+# Expanding the helper makes the failed half observable. Remove the stock
 # helper so PS2SDK 2.0's -Werror build does not reject it as unused.
 prototype = "static int scePreEncryptKbit(void *kbit);\n"
 if prototype not in secr:
