@@ -4,6 +4,7 @@ IOP_CFLAGS += -G0 -O2 -Wall -Wextra -I../..
 
 IOP_IMPORT_INCS += \
 	sio/sio2man \
+	system/loadcore \
 	system/sifcmd \
 	system/sifman \
 	system/sysclib \
