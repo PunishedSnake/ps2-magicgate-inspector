@@ -6,10 +6,11 @@
  * MagicGate architecture intact while replacing the libdebug text dashboard
  * with the native Graphics Synthesizer frontend in gui.c.
  *
- * 0.3.0-dev4 deliberately makes diagnostics target-centric instead of
- * button-centric: LEFT/RIGHT selects the card and CROSS runs the complete
- * filesystem -> MagicGate/CardAuth -> FMCB preflight sequence for that slot.
- * Other face buttons stay available for future write/install workflows.
+ * 0.3.0-dev5 keeps navigation and diagnostics orthogonal: UP/DOWN selects the
+ * physical memory-card slot, L1/R1 selects the previous/next result page, and
+ * CROSS runs only the diagnostic represented by the current page. Holding L2
+ * while pressing CROSS runs the complete read-only filesystem -> MagicGate ->
+ * FMCB preflight sequence for the selected slot.
  */
 
 #include <tamtypes.h>
@@ -268,10 +269,8 @@ static int RestoreNormalEnvironment(void)
     (void)fmcb_rc; /* mass: is optional; package page exposes availability. */
 
     MciProgressUpdate(MCI_PROGRESS_ENVIRONMENT, 92,
-                      "Re-checking both card slots after the IOP restore",
-                      "Running ordinary filesystem inspection again so the dashboard reflects the post-security-session card state.");
-    CardInspect(0, &Reports[0]);
-    CardInspect(1, &Reports[1]);
+                      "Restoring the dashboard without implicit card tests",
+                      "The normal card stack is ready. Existing filesystem results are preserved; no 4 KiB integrity test is run unless the user explicitly selects CARD and presses CROSS.");
 
     MciProgressUpdate(MCI_PROGRESS_ENVIRONMENT, 100,
                       "Normal environment restored",
@@ -327,17 +326,46 @@ static int RunMagicGateSession(int target_port)
     return report->result == MG_RESULT_PASS ? 0 : -1;
 }
 
-static void InspectAndInvalidateMagicGate(int port)
+static void ResetCardReport(int port)
 {
-    CardInspect(port, &Reports[port]);
-    MagicGateResetReport(&MgReports[port], port);
+    CardReport *report = &Reports[port];
+
+    memset(report, 0, sizeof(*report));
+    report->port = port;
+    report->info_rc = -999;
+    report->root_rc = -999;
+    report->rw_rc = -999;
+    report->cleanup_rc = 0;
+    report->rw_stage = RW_NOT_RUN;
+    report->health = CARD_UNKNOWN;
 }
 
-/*
- * CROSS is the one diagnostic action in 0.3.0-dev4. The selected slot is the
- * target; the current dashboard page only controls which results are visible.
- * This intentionally reserves SQUARE/CIRCLE/START for later installer actions.
- */
+static void ResetSlotReports(int port)
+{
+    ResetCardReport(port);
+    MagicGateResetReport(&MgReports[port], port);
+    FmcbResetPackageReport(&FmcbReports[port], port);
+}
+
+/* Run only the diagnostic represented by the currently visible result page. */
+static void RunSelectedPageTest(int target_port, MciGuiPage page)
+{
+    switch (page) {
+        case MCI_GUI_MAGICGATE:
+            (void)RunMagicGateSession(target_port);
+            break;
+        case MCI_GUI_FMCB:
+            (void)FmcbProbeMassPackage(target_port, &FmcbMassStatus,
+                                       &FmcbReports[target_port]);
+            break;
+        case MCI_GUI_CARD:
+        default:
+            CardInspect(target_port, &Reports[target_port]);
+            break;
+    }
+}
+
+/* L2+CROSS is the explicit convenience path for all read-only diagnostics. */
 static void RunSelectedFullScan(int target_port)
 {
     char detail[192];
@@ -417,7 +445,7 @@ int main(int argc, char *argv[])
     init_scr();
     if (MciGuiInit() < 0) {
         scr_clear();
-        scr_printf("PS2 Memory Card Inspector 0.3.0-dev4\n\n");
+        scr_printf("PS2 Memory Card Inspector 0.3.0-dev5\n\n");
         scr_printf("GS frontend initialization failed.\n");
         SleepThread();
     }
@@ -433,11 +461,9 @@ int main(int argc, char *argv[])
         SleepThread();
     }
 
-    /* Initial filesystem snapshot only; CROSS performs the complete scan. */
-    InspectAndInvalidateMagicGate(0);
-    InspectAndInvalidateMagicGate(1);
-    FmcbResetPackageReport(&FmcbReports[0], 0);
-    FmcbResetPackageReport(&FmcbReports[1], 1);
+    /* Start neutral: diagnostics run only when CROSS is explicitly pressed. */
+    ResetSlotReports(0);
+    ResetSlotReports(1);
 
     fmcb_rc = FmcbInitMassBackend(&FmcbMassStatus);
     (void)fmcb_rc;
@@ -466,19 +492,27 @@ int main(int argc, char *argv[])
                 dirty = 1;
             }
         } else {
-            if (pressed & (PAD_LEFT | PAD_RIGHT)) {
+            if (pressed & (PAD_UP | PAD_DOWN)) {
                 selected ^= 1;
                 last_format_rc = -999;
                 dirty = 1;
             }
 
-            if (pressed & PAD_R1) {
+            if (pressed & PAD_L1) {
+                page = page == MCI_GUI_CARD
+                           ? (MciGuiPage)(MCI_GUI_PAGE_COUNT - 1)
+                           : (MciGuiPage)((unsigned int)page - 1u);
+                dirty = 1;
+            } else if (pressed & PAD_R1) {
                 page = (MciGuiPage)(((unsigned int)page + 1u) % MCI_GUI_PAGE_COUNT);
                 dirty = 1;
             }
 
             if (pressed & PAD_CROSS) {
-                RunSelectedFullScan(selected);
+                if (held & PAD_L2)
+                    RunSelectedFullScan(selected);
+                else
+                    RunSelectedPageTest(selected, page);
                 dirty = 1;
             }
 
