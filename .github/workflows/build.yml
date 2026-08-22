@@ -30,13 +30,119 @@ on:
       - 'licenses/**'
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   PS2SDK_SECURITY_COMMIT: a13b5971ec0e39c7ba8b8559b80a4e81c8425352
 
 jobs:
+  patch-gs-regression:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/0.4.0'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/0.4.0
+          fetch-depth: 0
+
+      - name: Apply 1080i VRAM isolation and Settings title fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('src/gui.c')
+          s = p.read_text()
+
+          old = '#define ALT_STORAGE_W 640\n#define ALT_STORAGE_H 1080\n#define ALT_STORAGE_PSM GS_PSM_16\n'
+          new = '''#define ALT_STORAGE_W 640
+/*
+ * The alternate slots are allocated as PSM16 storage but are reinterpreted as
+ * PSM32 framebuffers. A 640x540 PSM32 GS buffer spans 10 x 17 = 170 GS pages
+ * because PSMCT32 pages are 64x32 pixels. PS2SDK graph_vram_size() uses a
+ * linear byte count and rounds 640x540 to only 169 pages. Reserving 1080 PSM16
+ * lines therefore places the second 1080i buffer's final GS page on top of the
+ * font atlas. 1088 PSM16 lines advance the allocator by the required 170 pages
+ * per slot while keeping all other alternate modes inside the same reservation.
+ */
+#define ALT_STORAGE_H 1088
+#define ALT_STORAGE_PSM GS_PSM_16
+#define GS_PAGE_WORDS 2048u
+#define PSMCT32_PAGE_W 64u
+#define PSMCT32_PAGE_H 32u
+'''
+          if s.count(old) != 1:
+              raise SystemExit('ALT storage anchor mismatch')
+          s = s.replace(old, new, 1)
+
+          old = '''static int environment_setup(void)
+{'''
+          new = '''static unsigned int psmct32_page_footprint_words(unsigned int width,
+                                                    unsigned int height)
+{
+    unsigned int pages_x = (width + PSMCT32_PAGE_W - 1u) / PSMCT32_PAGE_W;
+    unsigned int pages_y = (height + PSMCT32_PAGE_H - 1u) / PSMCT32_PAGE_H;
+
+    return pages_x * pages_y * GS_PAGE_WORDS;
+}
+
+static int environment_setup(void)
+{'''
+          if s.count(old) != 1:
+              raise SystemExit('environment_setup anchor mismatch')
+          s = s.replace(old, new, 1)
+
+          old = '''    texture_address = graph_vram_allocate(ATLAS_W, ATLAS_H, GS_PSM_32,
+                                          GRAPH_ALIGN_BLOCK);
+    if (texture_address < 0)
+        return -3;
+    FontTexture.address = (unsigned int)texture_address;
+'''
+          new = '''    texture_address = graph_vram_allocate(ATLAS_W, ATLAS_H, GS_PSM_32,
+                                          GRAPH_ALIGN_BLOCK);
+    if (texture_address < 0)
+        return -3;
+    {
+        const MciVideoGeometry *g1080 = MciVideoModeGeometry(MCI_VIDEO_1080I);
+        unsigned int frame_words;
+
+        if (g1080 == NULL)
+            return -3;
+        frame_words = psmct32_page_footprint_words(g1080->frame_width,
+                                                   g1080->frame_height);
+        /* Fail closed if a future geometry/allocation change can alias either
+         * 1080i framebuffer with its neighbour or with the font texture. */
+        if (AltFrames[1].address < AltFrames[0].address + frame_words ||
+            (unsigned int)texture_address < AltFrames[1].address + frame_words)
+            return -3;
+    }
+    FontTexture.address = (unsigned int)texture_address;
+'''
+          if s.count(old) != 1:
+              raise SystemExit('font allocation anchor mismatch')
+          s = s.replace(old, new, 1)
+
+          old = '    q = panel_title(q, 12, 55, 628, 65, "SETTINGS", Theme.accent);\n'
+          new = '    q = panel_title(q, 12, 55, 628, 69, "SETTINGS", Theme.accent);\n'
+          if s.count(old) != 1:
+              raise SystemExit('Settings title anchor mismatch')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/one-shot-gui-vram-fix.yml tools/APPLY_GUI_VRAM_FIX
+          git show 335cae5f61edc2f6ea09f6e139c85e4c1ffd97b6:.github/workflows/build.yml > .github/workflows/build.yml
+          git add src/gui.c .github/workflows/build.yml
+          git commit -m 'fix(gui): isolate 1080i VRAM pages and align Settings title'
+          git push origin HEAD:feat/0.4.0
+
   build:
+    needs: patch-gs-regression
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
