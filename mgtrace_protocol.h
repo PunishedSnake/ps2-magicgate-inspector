@@ -1,6 +1,7 @@
 #ifndef MCI_MGTRACE_PROTOCOL_H
 #define MCI_MGTRACE_PROTOCOL_H
 
+/* dev11 CI/hardware candidate */
 #define MGTRACE_RPC_ID 0x80000F50
 #define MGTRACE_RPC_FN_RUN 1
 #define MGTRACE_STAGE_COUNT 4
