@@ -90,7 +90,7 @@ PS2SDK 2.0 freesio2 / freepad / mcman
 
 Temporary MCSERV is intentionally not started because hardware testing showed that it can wedge the following LOADFILE RPC. CardAuth requires MCMAN's registered SECRMAN callbacks, so MCMAN remains active while the immediate EE-side libmc sanity query is emulated.
 
-After the probe, Inspector rebuilds the Sony ROM X stack before returning to normal operation. The restore does **not** silently re-run the 4 KiB filesystem integrity test; page-scoped diagnostics only run when explicitly requested.
+After the probe, Inspector rebuilds the Sony ROM X stack before returning to normal operation. The restore does **not** silently re-run the 4 KiB filesystem integrity test; page-scoped diagnostics only run when explicitly requested. Existing filesystem results remain visible until the user runs the Card test again or requests a full scan.
 
 See [Architecture](docs/ARCHITECTURE.md).
 
