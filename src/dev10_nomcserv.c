@@ -1,6 +1,6 @@
 /*
  * Briscoe dev10 diagnostic shim.
- * CI marker: hardware candidate 4.
+ * CI marker: hardware candidate 5.
  *
  * Real hardware shows the PS2SDK v1 MCSERV returning RESIDENT_END and the
  * next LOADFILE RPC never completing. For this one diagnostic build we skip
@@ -44,7 +44,6 @@ int __wrap_SifExecModuleBuffer(void *ptr, u32 size, u32 arg_len,
         Dev10IsolatedNoMcserv = 1;
         Dev10FakeMcInitDone = 0;
         Dev10FakeMcPending = 0;
-        /* Any non-negative value is a successful module ID to the caller. */
         return 0x7f;
     }
 
@@ -69,7 +68,6 @@ int __wrap_mcInit(int type)
     }
 
     if (Dev10IsolatedNoMcserv && Dev10FakeMcInitDone) {
-        /* The next mcInit is RestoreNormalEnvironment() after an IOP reset. */
         Dev10IsolatedNoMcserv = 0;
         Dev10FakeMcPending = 0;
         scr_printf("[DEV10] Restored ROM X stack: real mcInit resumes.\n");
