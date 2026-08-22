@@ -171,35 +171,77 @@ static qword_t *glyph(qword_t *q, float x, float y,
     return draw_rect_textured(q, UI_CONTEXT, &g);
 }
 
+/*
+ * Word-aware wrapping keeps status prose readable. Long tokens still fall back
+ * to character wrapping, but ordinary words move intact to the next line.
+ */
 static qword_t *text_box(qword_t *q, float x, float y,
                          float max_x, float max_y,
-                         const char *text, UiRgb rgb)
+                         const char *value, UiRgb rgb)
 {
+    const char *p = value;
     float cx = x;
     float cy = y;
     color_t color;
 
-    if (text == NULL)
+    if (p == NULL)
         return q;
     color_set(&color, rgb);
 
-    while (*text != '\0' && cy + GLYPH_H <= max_y) {
-        unsigned char ch = (unsigned char)*text++;
+    while (*p != '\0' && cy + GLYPH_H <= max_y) {
+        unsigned char ch = (unsigned char)*p;
 
-        if (ch == '\r')
+        if (ch == '\r') {
+            p++;
             continue;
+        }
         if (ch == '\n') {
+            p++;
             cx = x;
             cy += LINE_STEP;
             continue;
         }
+
+        if (ch != ' ' && ch != '\t') {
+            const char *scan = p;
+            int word_chars = 0;
+
+            while (*scan != '\0' && *scan != ' ' && *scan != '\t' &&
+                   *scan != '\r' && *scan != '\n') {
+                word_chars++;
+                scan++;
+            }
+
+            if (cx > x && cx + (float)(word_chars * GLYPH_W) > max_x) {
+                cx = x;
+                cy += LINE_STEP;
+                if (cy + GLYPH_H > max_y)
+                    break;
+            }
+
+            while (word_chars-- > 0 && cy + GLYPH_H <= max_y) {
+                if (cx + GLYPH_W > max_x) {
+                    cx = x;
+                    cy += LINE_STEP;
+                    if (cy + GLYPH_H > max_y)
+                        break;
+                }
+                q = glyph(q, cx, cy, (unsigned char)*p++, &color);
+                cx += GLYPH_W;
+            }
+            continue;
+        }
+
+        p++;
         if (cx + GLYPH_W > max_x) {
             cx = x;
             cy += LINE_STEP;
             if (cy + GLYPH_H > max_y)
                 break;
         }
-        q = glyph(q, cx, cy, ch, &color);
+        if (cx == x)
+            continue;
+        q = glyph(q, cx, cy, ' ', &color);
         cx += GLYPH_W;
     }
     return q;
@@ -434,6 +476,57 @@ static UiRgb package_color(FmcbPackageStatus status)
     }
 }
 
+static const char *card_short_status(CardHealth health)
+{
+    switch (health) {
+        case CARD_OK: return "PASS";
+        case CARD_FULL: return "FULL";
+        case CARD_UNFORMATTED: return "NO FORMAT";
+        case CARD_FILESYSTEM_BROKEN: return "FS BROKEN";
+        case CARD_IO_FAILURE: return "I/O FAIL";
+        case CARD_AUTH_FAILURE: return "AUTH FAIL";
+        case CARD_DETECT_FAILURE: return "DETECT FAIL";
+        case CARD_NO_CARD: return "NO CARD";
+        default: return "UNKNOWN";
+    }
+}
+
+static const char *mg_short_status(MagicGateResult result)
+{
+    const char *full = MagicGateResultText(result);
+
+    if (strcmp(full, "FUNCTIONAL") == 0)
+        return "FUNCTIONAL";
+    if (strncmp(full, "NOT SUPPORTED", 13) == 0)
+        return "NO MG ACK";
+    if (strncmp(full, "PROTOCOL ERROR", 14) == 0)
+        return "PROTOCOL";
+    if (strncmp(full, "TEST INDETERMINATE", 18) == 0)
+        return "INDETERM.";
+
+    switch (result) {
+        case MG_RESULT_NOT_RUN: return "NOT RUN";
+        case MG_RESULT_NO_TEST_KELF: return "NO KELF";
+        case MG_RESULT_TARGET_NOT_PS2: return "NOT PS2";
+        case MG_RESULT_KBIT_FAILED: return "KBIT FAIL";
+        case MG_RESULT_KC_FAILED: return "KC FAIL";
+        case MG_RESULT_RPC_UNAVAILABLE: return "RPC FAIL";
+        default: return "FAILED";
+    }
+}
+
+static const char *package_short_status(FmcbPackageStatus status)
+{
+    switch (status) {
+        case FMCB_PACKAGE_READY: return "READY";
+        case FMCB_PACKAGE_INCOMPLETE: return "MISSING";
+        case FMCB_PACKAGE_NOT_FOUND: return "NO PKG";
+        case FMCB_PACKAGE_SOURCE_UNAVAILABLE: return "NO SOURCE";
+        case FMCB_PACKAGE_UNSUPPORTED_CONSOLE: return "REGION ?";
+        default: return "NOT SCAN";
+    }
+}
+
 static qword_t *shell(qword_t *q, MciGuiPage page, int selected)
 {
     static const char *const tabs[MCI_GUI_PAGE_COUNT] = {
@@ -448,7 +541,7 @@ static qword_t *shell(qword_t *q, MciGuiPage page, int selected)
     q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
     q = rect_outline(q, 12, 8, 628, 31, Theme.border);
     q = text(q, 22, 14, "PS2 Memory Card Inspector", Theme.text);
-    snprintf(version, sizeof(version), "v0.3.0-dev2  mc%d", selected);
+    snprintf(version, sizeof(version), "v0.3.0-dev3  mc%d", selected);
     q = text_box(q, 470, 14, 618, 23, version, Theme.accent);
 
     for (i = 0; i < MCI_GUI_PAGE_COUNT; i++) {
@@ -488,16 +581,16 @@ static qword_t *slot_summary(qword_t *q, int selected,
         q = text_box(q, 30, y0 + 5, 137, y0 + 13, line, Theme.text);
 
         q = text(q, 30, y0 + 18, "FS", Theme.muted);
-        q = text_box(q, 54, y0 + 18, 137, y0 + 26,
-                     CardHealthText(cards[i].health),
+        q = text_box(q, 54, y0 + 18, 141, y0 + 26,
+                     card_short_status(cards[i].health),
                      card_health_color(cards[i].health));
         q = text(q, 30, y0 + 29, "MG", Theme.muted);
-        q = text_box(q, 54, y0 + 29, 137, y0 + 37,
-                     MagicGateResultText(magicgate[i].result),
+        q = text_box(q, 54, y0 + 29, 141, y0 + 37,
+                     mg_short_status(magicgate[i].result),
                      mg_color(magicgate[i].result));
         q = text(q, 30, y0 + 40, "PKG", Theme.muted);
-        snprintf(line, sizeof(line), "%s", FmcbPackageStatusText(packages[i].status));
-        q = text_box(q, 62, y0 + 40, 137, y0 + 48, line,
+        q = text_box(q, 62, y0 + 40, 141, y0 + 48,
+                     package_short_status(packages[i].status),
                      package_color(packages[i].status));
     }
     return q;
@@ -811,13 +904,75 @@ void MciGuiRenderMessage(const char *title,
     q = rect_fill(q, 0, 0, UI_W, 4, accent);
     q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
     q = rect_outline(q, 12, 8, 628, 31, Theme.border);
-    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.3.0-dev2", Theme.text);
+    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.3.0-dev3", Theme.text);
     q = text_box(q, 20, 39, 620, 48,
                  title != NULL ? title : "Status", accent);
     q = rect_fill(q, 16, 53, 624, body_bottom, Theme.panel);
     q = rect_outline(q, 16, 53, 624, body_bottom, Theme.border);
     q = text_box(q, 30, 64, 610, body_bottom - 8.0f,
                  body != NULL ? body : "", Theme.text);
+    if (footer_text != NULL && footer_text[0] != '\0') {
+        q = rect_fill(q, 0, 202, UI_W, UI_H, Theme.panel_alt);
+        q = text_box(q, 20, 211, 620, 220, footer_text, Theme.muted);
+    }
+    frame_end(packet, q);
+}
+
+void MciGuiRenderProgress(const char *title,
+                          const char *action,
+                          const char *detail,
+                          int percent,
+                          const char *footer_text,
+                          MciGuiTone tone)
+{
+    packet_t *packet;
+    qword_t *q;
+    UiRgb accent;
+    char pct[16];
+    float inner_x0 = 32.0f;
+    float inner_x1 = 608.0f;
+    float fill_x;
+
+    if (!RendererReady)
+        return;
+    if (percent < 0)
+        percent = 0;
+    if (percent > 100)
+        percent = 100;
+
+    accent = tone_color(tone);
+    fill_x = inner_x0 + (inner_x1 - inner_x0) * ((float)percent / 100.0f);
+    snprintf(pct, sizeof(pct), "%3d%%", percent);
+
+    q = frame_begin(&packet);
+    q = rect_fill(q, 0, 0, UI_W, UI_H, Theme.background);
+    q = rect_fill(q, 0, 0, UI_W, 4, accent);
+    q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
+    q = rect_outline(q, 12, 8, 628, 31, Theme.border);
+    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.3.0-dev3", Theme.text);
+
+    q = text_box(q, 20, 39, 620, 48,
+                 title != NULL ? title : "Working", accent);
+    q = rect_fill(q, 16, 53, 624, 196, Theme.panel);
+    q = rect_outline(q, 16, 53, 624, 196, Theme.border);
+
+    q = text_box(q, 30, 65, 610, 75,
+                 action != NULL ? action : "Working...", Theme.text);
+    q = text_box(q, 30, 84, 610, 121,
+                 detail != NULL ? detail : "", Theme.muted);
+
+    q = text(q, 30, 130, "PROGRESS", Theme.muted);
+    q = text_box(q, 566, 130, 610, 138, pct, accent);
+    q = rect_fill(q, 30, 145, 610, 164, Theme.panel_alt);
+    q = rect_outline(q, 30, 145, 610, 164, Theme.border);
+    if (percent > 0)
+        q = rect_fill(q, inner_x0, 148, fill_x, 161, accent);
+
+    q = text_box(q, 30, 176, 610, 187,
+                 percent >= 100 ? "Operation complete; returning to the dashboard."
+                                : "Working synchronously; controls resume when this step completes.",
+                 percent >= 100 ? Theme.success : Theme.muted);
+
     if (footer_text != NULL && footer_text[0] != '\0') {
         q = rect_fill(q, 0, 202, UI_W, UI_H, Theme.panel_alt);
         q = text_box(q, 20, 211, 620, 220, footer_text, Theme.muted);
