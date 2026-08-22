@@ -20,6 +20,7 @@
 #include <stdio.h>
 
 #include "fmcb_install.h"
+#include "progress.h"
 
 extern unsigned char iomanX_irx[];
 extern unsigned int size_iomanX_irx;
@@ -122,6 +123,9 @@ int FmcbInitMassBackend(FmcbMassBackendStatus *status)
     status->usbhdfsd_rc = -999;
     status->filexio_init_rc = -999;
 
+    MciProgressUpdate(MCI_PROGRESS_ENVIRONMENT, 8,
+                      "Preparing the USB package backend",
+                      "Initializing LOADFILE and the IOP heap before starting fileXio and USB modules.");
     rc = SifLoadFileInit();
     if (rc < 0)
         return rc;
@@ -129,21 +133,33 @@ int FmcbInitMassBackend(FmcbMassBackendStatus *status)
     SifInitIopHeap();
     sbv_patch_enable_lmb();
 
+    MciProgressUpdate(MCI_PROGRESS_ENVIRONMENT, 22,
+                      "Loading iomanX",
+                      "Starting the extended IOP I/O manager used by fileXio and mass:.");
     rc = ExecEmbedded(iomanX_irx, size_iomanX_irx, &start_rc);
     status->iomanx_rc = rc;
     if (rc < 0)
         goto out;
 
+    MciProgressUpdate(MCI_PROGRESS_ENVIRONMENT, 38,
+                      "Loading fileXio",
+                      "Starting the EE/IOP file service used for ROMVER and USB package access.");
     rc = ExecEmbedded(fileXio_irx, size_fileXio_irx, &start_rc);
     status->filexio_module_rc = rc;
     if (rc < 0)
         goto out;
 
+    MciProgressUpdate(MCI_PROGRESS_ENVIRONMENT, 54,
+                      "Loading the USB device stack",
+                      "Starting USBD before the mass-storage filesystem driver.");
     rc = ExecEmbedded(usbd_irx, size_usbd_irx, &start_rc);
     status->usbd_rc = rc;
     if (rc < 0)
         goto out;
 
+    MciProgressUpdate(MCI_PROGRESS_ENVIRONMENT, 70,
+                      "Loading the USB mass-storage driver",
+                      "Starting USBHDFSD so a user-supplied FMCB package can be read from mass:.");
     rc = ExecEmbedded(usbhdfsd_irx, size_usbhdfsd_irx, &start_rc);
     status->usbhdfsd_rc = rc;
 
@@ -154,12 +170,18 @@ out:
     if (rc < 0)
         return rc;
 
+    MciProgressUpdate(MCI_PROGRESS_ENVIRONMENT, 86,
+                      "Connecting the fileXio client",
+                      "Binding the EE fileXio RPC client and waiting briefly for USB enumeration.");
     status->filexio_init_rc = fileXioInit();
     if (status->filexio_init_rc < 0)
         return status->filexio_init_rc;
 
     DelayThread(250000);
     status->available = 1;
+    MciProgressUpdate(MCI_PROGRESS_ENVIRONMENT, 100,
+                      "USB package backend ready",
+                      "mass: access is available for read-only FMCB package discovery and preflight.");
     return 0;
 }
 
@@ -215,12 +237,21 @@ static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *repor
 {
     iox_stat_t stat;
     char full_path[FMCB_PATH_MAX + FMCB_SOURCE_ROOT_MAX + 4];
+    char detail[224];
     char region;
     char romver_region;
     int i;
     int rc;
+    int count;
 
+    MciProgressUpdate(MCI_PROGRESS_FMCB, 20,
+                      "Reading the console region",
+                      "Opening rom0:ROMVER to resolve the normal FMCB destination directory for this console.");
     region = DetectRegionLetter(&romver_region);
+
+    MciProgressUpdate(MCI_PROGRESS_FMCB, 26,
+                      "Building the install plan",
+                      "Resolving region-specific destinations and classifying required, optional and KELF files.");
     FmcbBuildInstallPlan(target_port, region, &report->plan);
     report->plan.romver_region = romver_region;
     report->entry_count = FmcbPackageEntryCount();
@@ -228,12 +259,17 @@ static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *repor
 
     if (region == '?') {
         report->status = FMCB_PACKAGE_UNSUPPORTED_CONSOLE;
+        MciProgressUpdate(MCI_PROGRESS_FMCB, 100,
+                          "Preflight cannot resolve this console region",
+                          "ROMVER did not map to a supported normal-install destination; no card writes were attempted.");
         return -1;
     }
 
-    for (i = 0; i < report->entry_count && i < FMCB_MAX_PACKAGE_ENTRIES; i++) {
+    count = report->entry_count;
+    for (i = 0; i < count && i < FMCB_MAX_PACKAGE_ENTRIES; i++) {
         const FmcbPackageEntry *entry = &NormalInstallManifest[i];
         FmcbPackageFileStatus *file = &report->files[i];
+        int percent = 30 + ((i * 60) / (count > 0 ? count : 1));
 
         memset(file, 0, sizeof(*file));
         file->flags = entry->flags;
@@ -242,6 +278,13 @@ static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *repor
                  entry->source_path);
         snprintf(full_path, sizeof(full_path), "%s/%s", root,
                  entry->source_path);
+
+        snprintf(detail, sizeof(detail),
+                 "Checking %s (%s).",
+                 entry->source_path,
+                 (entry->flags & FMCB_FILE_REQUIRED) ? "required" : "optional");
+        MciProgressUpdate(MCI_PROGRESS_FMCB, percent,
+                          "Scanning the package manifest", detail);
 
         memset(&stat, 0, sizeof(stat));
         rc = fileXioGetStat(full_path, &stat);
@@ -259,9 +302,20 @@ static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *repor
         }
     }
 
+    MciProgressUpdate(MCI_PROGRESS_FMCB, 94,
+                      "Summarizing package completeness",
+                      "Comparing the discovered files against the normal-install manifest and calculating payload size.");
     report->plan.package_complete = (report->missing_required == 0);
     report->status = report->plan.package_complete ? FMCB_PACKAGE_READY
                                                     : FMCB_PACKAGE_INCOMPLETE;
+
+    snprintf(detail, sizeof(detail),
+             "Found %d/%d required and %d/%d optional files; %d required file(s) missing.",
+             report->found_required, report->plan.required_files,
+             report->found_optional, report->plan.optional_files,
+             report->missing_required);
+    MciProgressUpdate(MCI_PROGRESS_FMCB, 100,
+                      "FMCB package preflight complete", detail);
     return report->plan.package_complete ? 0 : -1;
 }
 
@@ -269,18 +323,33 @@ int FmcbProbeMassPackage(int target_port, const FmcbMassBackendStatus *backend,
                          FmcbPackageReport *report)
 {
     iox_stat_t stat;
+    char detail[192];
     unsigned int i;
     int rc;
 
     FmcbResetPackageReport(report, target_port);
 
+    MciProgressUpdate(MCI_PROGRESS_FMCB, 3,
+                      "Checking the USB package backend",
+                      "Verifying that fileXio and mass: are available before touching the package manifest.");
     if (backend == NULL || !backend->available) {
         report->status = FMCB_PACKAGE_SOURCE_UNAVAILABLE;
         report->source_probe_rc = -1;
+        MciProgressUpdate(MCI_PROGRESS_FMCB, 100,
+                          "FMCB package source unavailable",
+                          "The USB mass-storage backend is not active; no package files could be inspected.");
         return -1;
     }
 
     for (i = 0; i < sizeof(MassRoots) / sizeof(MassRoots[0]); i++) {
+        int percent = 8 + (int)i * 4;
+
+        snprintf(detail, sizeof(detail),
+                 "Looking for the package root at %s without modifying the USB device.",
+                 MassRoots[i]);
+        MciProgressUpdate(MCI_PROGRESS_FMCB, percent,
+                          "Locating the FMCB package", detail);
+
         memset(&stat, 0, sizeof(stat));
         rc = fileXioGetStat(MassRoots[i], &stat);
         report->source_probe_rc = rc;
@@ -289,6 +358,9 @@ int FmcbProbeMassPackage(int target_port, const FmcbMassBackendStatus *backend,
     }
 
     report->status = FMCB_PACKAGE_NOT_FOUND;
+    MciProgressUpdate(MCI_PROGRESS_FMCB, 100,
+                      "FMCB package not found",
+                      "Checked mass:/FMCB, mass0:/FMCB and mass1:/FMCB; no readable package root was found.");
     return -1;
 }
 
