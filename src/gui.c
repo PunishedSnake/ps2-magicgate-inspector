@@ -62,6 +62,9 @@
 #define GS_PAGE_WORDS 2048u
 #define PSMCT32_PAGE_W 64u
 #define PSMCT32_PAGE_H 32u
+#define MARQUEE_STEP_MS 120u
+#define MARQUEE_GAP_CHARS 4u
+#define MARQUEE_HOLD_STEPS 6u
 
 #define VSYNC_TIMEOUT_MS 250u
 #define GIF_TIMEOUT_MS 250u
@@ -172,6 +175,8 @@ static int DrawStateDirty;
 static MciVideoMode CurrentVideoMode = MCI_VIDEO_NATIVE;
 static MciUiLayout Layout;
 static int FilteredPresentation = 1;
+static u64 MarqueeEpoch;
+static int MarqueeNeeded;
 
 static int wait_gif_idle(unsigned int timeout_ms)
 {
@@ -324,6 +329,36 @@ static qword_t *glyph(qword_t *q, float x, float y,
     return draw_rect_textured(q, UI_CONTEXT, &g);
 }
 
+static qword_t *text_marquee_box(qword_t *q, float x, float y,
+                                 float max_x, const char *value, UiRgb rgb)
+{
+    size_t length = strcspn(value, "\r\n");
+    unsigned int cells = max_x > x ? (unsigned int)((max_x - x) / GLYPH_W) : 0u;
+    unsigned int ring;
+    unsigned int step;
+    unsigned int phase;
+    unsigned int offset;
+    unsigned int i;
+    color_t color;
+
+    if (cells == 0u || length == 0u)
+        return q;
+    color_set(&color, rgb);
+    MarqueeNeeded = 1;
+    ring = (unsigned int)length + MARQUEE_GAP_CHARS;
+    step = (unsigned int)((GetTimerSystemTime() - MarqueeEpoch) /
+                          MSec2TimerBusClock(MARQUEE_STEP_MS));
+    phase = step % (MARQUEE_HOLD_STEPS + ring);
+    offset = phase < MARQUEE_HOLD_STEPS ? 0u : phase - MARQUEE_HOLD_STEPS;
+
+    for (i = 0; i < cells; i++) {
+        unsigned int pos = (offset + i) % ring;
+        unsigned char ch = pos < length ? (unsigned char)value[pos] : ' ';
+        q = glyph(q, x + (float)(i * GLYPH_W), y, ch, &color);
+    }
+    return q;
+}
+
 static qword_t *text_box(qword_t *q, float x, float y,
                          float max_x, float max_y,
                          const char *value, UiRgb rgb)
@@ -336,6 +371,12 @@ static qword_t *text_box(qword_t *q, float x, float y,
     if (p == NULL)
         return q;
     color_set(&color, rgb);
+    if (max_y - y <= GLYPH_H + 1.0f) {
+        size_t length = strcspn(value, "\r\n");
+        unsigned int cells = max_x > x ? (unsigned int)((max_x - x) / GLYPH_W) : 0u;
+        if (length > cells)
+            return text_marquee_box(q, x, y, max_x, value, rgb);
+    }
 
     while (*p != '\0' && cy + GLYPH_H <= max_y) {
         unsigned char ch = (unsigned char)*p;
@@ -834,6 +875,7 @@ static qword_t *frame_begin(packet_t **packet_out)
 {
     qword_t *q;
 
+    MarqueeNeeded = 0;
     if (wait_gif_idle(GIF_TIMEOUT_MS) < 0)
         reset_gif_path();
     packet_reset(RenderPacket);
@@ -1282,8 +1324,12 @@ static qword_t *render_settings(qword_t *q,
                      settings->preserve_existing_cnfs ? "YES" : "NO",
                      "Installer can keep an existing FREEMCB.CNF instead of replacing user configuration.");
     q = settings_row(q, 3, selected_row, "Install read-back verify",
-                     settings->verify_every_install_file ? "ENFORCED" : "DISABLED",
-                     "Every committed installer file should be reopened and compared before success.");
+                     MciInstallVerifyModeName(settings->install_verify_mode),
+                     settings->install_verify_mode == MCI_INSTALL_VERIFY_ENFORCED
+                         ? "Every selected installer file is reopened and byte-compared before commit."
+                         : settings->install_verify_mode == MCI_INSTALL_VERIFY_REQUIRED
+                               ? "Required files are reopened and compared; optional payloads skip the second read."
+                               : "Read-back comparison is disabled; durable USB rollback protection remains active.");
 
     q = rect_fill(q, 24, 190, 616, 202, Theme.panel_alt);
     q = rect_outline(q, 24, 190, 616, 202, Theme.border);
@@ -1334,6 +1380,8 @@ int MciGuiInit(void)
 
     DrawStateDirty = 0;
     CurrentVideoMode = MCI_VIDEO_NATIVE;
+    MarqueeEpoch = GetTimerSystemTime();
+    MarqueeNeeded = 0;
     RendererReady = 1;
     MciGuiRenderMessage("Starting 0.4.0",
                         "Graphics Synthesizer frontend ready.\n"
@@ -1345,6 +1393,11 @@ int MciGuiInit(void)
 int MciGuiReady(void)
 {
     return RendererReady;
+}
+
+int MciGuiNeedsAnimation(void)
+{
+    return MarqueeNeeded;
 }
 
 void MciGuiRenderDashboard(int selected,

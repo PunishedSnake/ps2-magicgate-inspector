@@ -446,7 +446,8 @@ int FmcbInstallNormalTransactional(int target_port,
 
     if (package == NULL || options == NULL || bind_kelf == NULL ||
         recovery == NULL || package->status != FMCB_PACKAGE_READY ||
-        !package->plan.package_complete || !options->verify_every_file ||
+        !package->plan.package_complete ||
+        (unsigned int)options->verify_mode >= MCI_INSTALL_VERIFY_MODE_COUNT ||
         package->plan.target_port != target_port) {
         report->result = FMCB_INSTALL_RESULT_REJECTED;
         return -1;
@@ -535,6 +536,7 @@ int FmcbInstallNormalTransactional(int target_port,
             file->backup_rc = 0;
             file->write_rc = 0;
             file->verify_rc = 0;
+            file->verify_skipped = 1;
             report->files_committed++;
             continue;
         }
@@ -611,23 +613,39 @@ int FmcbInstallNormalTransactional(int target_port,
             goto failure;
         }
 
-        report->stage = FMCB_INSTALL_VERIFY_TARGET;
-        TxProgress(base_percent + 6,
-                   "Reopening and verifying FMCB destination",
-                   "Reading the complete committed file back from the memory card and comparing every byte against the bound/source RAM image.");
-        rc = VerifyCardFile(target_port, file->destination, source, source_size);
-        file->verify_rc = rc;
-        free(source);
-        if (rc < 0) {
-            failure_result = FMCB_INSTALL_RESULT_VERIFY_FAILED;
-            goto failure;
+        if (options->verify_mode == MCI_INSTALL_VERIFY_ENFORCED ||
+            (options->verify_mode == MCI_INSTALL_VERIFY_REQUIRED &&
+             (file->flags & FMCB_FILE_REQUIRED))) {
+            report->stage = FMCB_INSTALL_VERIFY_TARGET;
+            TxProgress(base_percent + 6,
+                       "Reopening and verifying FMCB destination",
+                       "Reading the complete committed file back from the memory card and comparing every byte against the bound/source RAM image.");
+            rc = VerifyCardFile(target_port, file->destination, source, source_size);
+            file->verify_rc = rc;
+            file->verify_skipped = 0;
+            free(source);
+            if (rc < 0) {
+                failure_result = FMCB_INSTALL_RESULT_VERIFY_FAILED;
+                goto failure;
+            }
+        } else {
+            file->verify_rc = 0;
+            file->verify_skipped = 1;
+            free(source);
         }
         report->files_committed++;
     }
 
     report->stage = FMCB_INSTALL_RECOVERY_FINISH;
-    TxProgress(97, "Committing the verified transaction",
-               "All selected files passed read-back verification. Marking the USB journal committed before removing recovery backups.");
+    if (options->verify_mode == MCI_INSTALL_VERIFY_ENFORCED)
+        TxProgress(97, "Committing the verified transaction",
+                   "All selected files passed read-back verification. Marking the USB journal committed before removing recovery backups.");
+    else if (options->verify_mode == MCI_INSTALL_VERIFY_REQUIRED)
+        TxProgress(97, "Committing the required-file verified transaction",
+                   "All required files passed read-back verification; optional destinations were intentionally not reread. Committing the recovery journal.");
+    else
+        TxProgress(97, "Committing the unverified transaction",
+                   "Read-back comparison was disabled by the user. Durable rollback state remains authoritative until the journal is committed.");
     rc = FmcbRecoveryFinish(recovery);
     report->recovery_rc = rc;
     if (rc < 0) {
@@ -636,10 +654,22 @@ int FmcbInstallNormalTransactional(int target_port,
     }
 
     report->stage = FMCB_INSTALL_DONE;
-    report->result = FMCB_INSTALL_RESULT_PASS;
+    if (options->verify_mode == MCI_INSTALL_VERIFY_ENFORCED)
+        report->result = FMCB_INSTALL_RESULT_PASS;
+    else if (options->verify_mode == MCI_INSTALL_VERIFY_REQUIRED)
+        report->result = FMCB_INSTALL_RESULT_PASS_REQUIRED_VERIFY;
+    else
+        report->result = FMCB_INSTALL_RESULT_PASS_UNVERIFIED;
     report->current_file = -1;
-    TxProgress(100, "Verified FMCB normal install complete",
-               "Every selected target was written, reopened and compared successfully; the persistent recovery journal is clean.");
+    if (options->verify_mode == MCI_INSTALL_VERIFY_ENFORCED)
+        TxProgress(100, "Verified FMCB normal install complete",
+                   "Every selected target was written, reopened and compared successfully; the persistent recovery journal is clean.");
+    else if (options->verify_mode == MCI_INSTALL_VERIFY_REQUIRED)
+        TxProgress(100, "FMCB install complete / required files verified",
+                   "Required destinations were reopened and compared; optional files were committed without read-back comparison.");
+    else
+        TxProgress(100, "FMCB install complete / read-back disabled",
+                   "The transaction committed successfully, but destination contents were not reread after writing.");
     return 0;
 
 failure:
@@ -679,6 +709,8 @@ const char *FmcbInstallResultText(FmcbInstallResult result)
 {
     switch (result) {
         case FMCB_INSTALL_RESULT_PASS: return "PASS / VERIFIED";
+        case FMCB_INSTALL_RESULT_PASS_REQUIRED_VERIFY: return "PASS / REQUIRED FILES VERIFIED";
+        case FMCB_INSTALL_RESULT_PASS_UNVERIFIED: return "PASS / READ-BACK DISABLED";
         case FMCB_INSTALL_RESULT_REJECTED: return "REJECTED BY PRECONDITIONS";
         case FMCB_INSTALL_RESULT_NO_SPACE: return "INSUFFICIENT SAFE CARD SPACE";
         case FMCB_INSTALL_RESULT_RECOVERY_REQUIRED: return "INCOMPLETE RECOVERY JOURNAL EXISTS";

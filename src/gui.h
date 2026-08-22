@@ -28,6 +28,7 @@ typedef enum MciGuiTone {
  */
 int MciGuiInit(void);
 int MciGuiReady(void);
+int MciGuiNeedsAnimation(void);
 int MciGuiApplyVideoMode(MciVideoMode mode);
 MciVideoMode MciGuiCurrentVideoMode(void);
 

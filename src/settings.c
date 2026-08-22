@@ -7,7 +7,7 @@ void MciSettingsDefaults(MciSettings *settings)
     settings->video_mode = MCI_VIDEO_NATIVE;
     settings->fs_profile = MCI_FS_TEST_QUICK;
     settings->preserve_existing_cnfs = 1;
-    settings->verify_every_install_file = 1;
+    settings->install_verify_mode = MCI_INSTALL_VERIFY_ENFORCED;
 }
 
 const char *MciFsTestProfileName(MciFsTestProfile profile)
@@ -27,5 +27,15 @@ unsigned int MciFsTestProfileBytes(MciFsTestProfile profile)
         case MCI_FS_TEST_THOROUGH: return 256u * 1024u;
         case MCI_FS_TEST_QUICK:
         default: return 4u * 1024u;
+    }
+}
+
+const char *MciInstallVerifyModeName(MciInstallVerifyMode mode)
+{
+    switch (mode) {
+        case MCI_INSTALL_VERIFY_REQUIRED: return "REQUIRED ONLY";
+        case MCI_INSTALL_VERIFY_DISABLED: return "DISABLED";
+        case MCI_INSTALL_VERIFY_ENFORCED:
+        default: return "ENFORCED";
     }
 }

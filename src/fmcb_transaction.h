@@ -3,6 +3,7 @@
 
 #include "fmcb_install.h"
 #include "fmcb_recovery.h"
+#include "settings.h"
 
 #define FMCB_TX_MAX_FILES FMCB_MAX_PACKAGE_ENTRIES
 #define FMCB_MC_CLUSTER_BYTES 1024u
@@ -27,6 +28,8 @@ typedef enum FmcbInstallStage {
 typedef enum FmcbInstallResult {
     FMCB_INSTALL_RESULT_NOT_RUN = 0,
     FMCB_INSTALL_RESULT_PASS,
+    FMCB_INSTALL_RESULT_PASS_REQUIRED_VERIFY,
+    FMCB_INSTALL_RESULT_PASS_UNVERIFIED,
     FMCB_INSTALL_RESULT_REJECTED,
     FMCB_INSTALL_RESULT_NO_SPACE,
     FMCB_INSTALL_RESULT_RECOVERY_REQUIRED,
@@ -40,7 +43,7 @@ typedef enum FmcbInstallResult {
 
 typedef struct FmcbInstallOptions {
     int preserve_existing_cnfs;
-    int verify_every_file;
+    MciInstallVerifyMode verify_mode;
 } FmcbInstallOptions;
 
 typedef struct FmcbInstallFileReport {
@@ -58,6 +61,7 @@ typedef struct FmcbInstallFileReport {
     int bind_rc;
     int write_rc;
     int verify_rc;
+    int verify_skipped;
 } FmcbInstallFileReport;
 
 typedef struct FmcbInstallReport {

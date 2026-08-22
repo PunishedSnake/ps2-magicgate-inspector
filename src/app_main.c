@@ -17,6 +17,7 @@
 #include <ioprpgen.h>
 #include <loadfile.h>
 #include <delaythread.h>
+#include <timer.h>
 #include <libmc.h>
 #include <libpad.h>
 #include <libsecr.h>
@@ -467,22 +468,32 @@ static int RunVerifiedInstaller(int target_port)
     }
 
     options.preserve_existing_cnfs = Settings.preserve_existing_cnfs;
-    options.verify_every_file = 1;
+    options.verify_mode = Settings.install_verify_mode;
     rc = FmcbInstallNormalTransactional(target_port,
                                         &FmcbReports[target_port],
                                         &options,
                                         BindKelfForInstaller, NULL,
                                         &RecoveryStatus, report);
     if (rc == 0) {
-        char result[360];
+        char result[440];
+        const char *verify_summary;
+        MciGuiTone tone = MCI_GUI_TONE_SUCCESS;
+
+        if (Settings.install_verify_mode == MCI_INSTALL_VERIFY_ENFORCED)
+            verify_summary = "Every selected write passed full read-back comparison.";
+        else if (Settings.install_verify_mode == MCI_INSTALL_VERIFY_REQUIRED)
+            verify_summary = "Required files passed read-back comparison; optional payloads were committed without a second read.";
+        else {
+            verify_summary = "Read-back comparison was disabled by user policy; the transaction committed without post-write byte comparison.";
+            tone = MCI_GUI_TONE_WARNING;
+        }
         snprintf(result, sizeof(result),
-                 "Normal FMCB installation completed on mc%d. %d/%d selected entries committed or intentionally preserved. Every write passed full read-back comparison. Space check: free=%d, payload=%u, reclaimable=%u, reserve=%u clusters. Persistent recovery state was committed and removed.",
+                 "Normal FMCB installation completed on mc%d. %d/%d selected entries committed or intentionally preserved. %s Space check: free=%d, payload=%u, reclaimable=%u, reserve=%u clusters. Persistent recovery state was committed and removed.",
                  target_port, report->files_committed, report->files_total,
-                 report->free_clusters, report->payload_clusters,
+                 verify_summary, report->free_clusters, report->payload_clusters,
                  report->reclaimable_clusters, report->reserve_clusters);
-        MciGuiRenderMessage("FMCB install PASS / VERIFIED", result,
-                            "CROSS or CIRCLE returns to the dashboard.",
-                            MCI_GUI_TONE_SUCCESS);
+        MciGuiRenderMessage(FmcbInstallResultText(report->result), result,
+                            "CROSS or CIRCLE returns to the dashboard.", tone);
     } else {
         char result[420];
         snprintf(result, sizeof(result),
@@ -592,8 +603,12 @@ static void ChangeSetting(int row, int direction)
         Settings.fs_profile = (MciFsTestProfile)value;
     } else if (row == 2) {
         Settings.preserve_existing_cnfs ^= 1;
+    } else if (row == 3) {
+        int value = (int)Settings.install_verify_mode + direction;
+        if (value < 0) value = (int)MCI_INSTALL_VERIFY_MODE_COUNT - 1;
+        if (value >= (int)MCI_INSTALL_VERIFY_MODE_COUNT) value = 0;
+        Settings.install_verify_mode = (MciInstallVerifyMode)value;
     }
-    /* Per-file read-back verification is intentionally not user-disableable. */
 }
 
 int main(int argc, char *argv[])
@@ -610,6 +625,7 @@ int main(int argc, char *argv[])
     int init_rc;
     int fmcb_rc;
     int dirty = 1;
+    u64 last_marquee_tick = 0;
     u32 held;
     u32 pressed;
 
@@ -646,9 +662,14 @@ int main(int argc, char *argv[])
         page = MCI_GUI_FMCB;
 
     while (1) {
+        if (!dirty && !install_result_modal && !confirm_install &&
+            !confirm_recovery && MciGuiNeedsAnimation() &&
+            GetTimerSystemTime() - last_marquee_tick >= MSec2TimerBusClock(80u))
+            dirty = 1;
         if (dirty) {
             RenderDashboard(selected, page, settings_row, last_video_rc,
                             confirm_format, last_format_rc);
+            last_marquee_tick = GetTimerSystemTime();
             dirty = 0;
         }
 
@@ -794,14 +815,20 @@ int main(int argc, char *argv[])
                         compact = "Retail region policy: normal CEX manifest.";
 
                     snprintf(message, sizeof(message),
-                             "Install normal FreeMcBoot to mc%d:\n\nTarget: %s/%s\nROMVER: %04X%c  MechaCon: %u.%02u\nPolicy: %s\n%s\n\nThe card, MagicGate and package will be revalidated. Space is simulated before writes. Every replaced target is persisted and verified on USB, every card write is read back, and an interrupted transaction can be recovered on the marked target card.",
+                             "Install normal FreeMcBoot to mc%d:\n\nTarget: %s/%s\nROMVER: %04X%c  MechaCon: %u.%02u\nPolicy: %s\nVerify: %s\n%s\n\nThe card, MagicGate and package will be revalidated. Space is simulated before writes. Every replaced target is persisted and verified on USB. %s An interrupted transaction can be recovered on the marked target card.",
                              selected, plan->destination_system,
                              plan->destination_osd, plan->rom_version,
                              plan->romver_region,
                              plan->console.mecha_major,
                              plan->console.mecha_minor,
                              MciConsoleRegionPolicyText(&plan->console),
-                             compact);
+                             MciInstallVerifyModeName(Settings.install_verify_mode),
+                             compact,
+                             Settings.install_verify_mode == MCI_INSTALL_VERIFY_ENFORCED
+                                 ? "Every card write is also read back byte-for-byte."
+                                 : Settings.install_verify_mode == MCI_INSTALL_VERIFY_REQUIRED
+                                       ? "Required files are read back; optional files skip that second read."
+                                       : "WARNING: card destinations are not read back after writing.");
                     MciGuiRenderMessage("FMCB INSTALL CONFIRMATION", message,
                                         "Hold L1 + R1 and press SQUARE to install. CIRCLE cancels.",
                                         MCI_GUI_TONE_DANGER);
