@@ -16,7 +16,10 @@ EE_LDFLAGS = -Wl,--gc-sections \
 	-Wl,--wrap=sceSifBindRpc \
 	-Wl,--wrap=sceSifCallRpc \
 	-Wl,--wrap=MagicGateResultText \
-	-Wl,--wrap=MagicGateStageText
+	-Wl,--wrap=MagicGateStageText \
+	-Wl,--wrap=FmcbRecoveryBegin \
+	-Wl,--wrap=FmcbRecoveryRun \
+	-Wl,--wrap=FmcbRecoveryFinish
 
 # 0.4.x keeps the single hardware-validated production security backend from
 # Briscoe: PS2SDK 2.0 SECRMAN 1.4, matching SECRSIF and the matching PS2SDK 2.0
