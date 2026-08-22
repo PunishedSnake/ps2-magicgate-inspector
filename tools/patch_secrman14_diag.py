@@ -3,6 +3,12 @@
 
 The emitted failure record intentionally matches the SECRMAN 1.3 diagnostic
 record so the EE-side MagicGate classifier can compare both backends directly.
+
+SECRMAN 1.4 normally routes GET_KBIT through the private scePreEncryptKbit()
+helper. The diagnostic build must distinguish the two Mechacon half-key calls,
+so it expands that helper inline inside SecrDownloadGetKbit(). The now-unused
+static helper and its forward declaration are removed to keep PS2SDK's -Werror
+build clean.
 """
 
 import pathlib
@@ -66,7 +72,8 @@ include_marker = '#include "CardAuth.h"\n'
 if include_marker not in card:
     raise SystemExit("CardAuth include marker not found")
 card = card.replace(include_marker, include_marker + r'''
-/* Briscoe: exact in-path GET_KBIT diagnostics. */
+/* Briscoe: capture the real CardAuth transfer that belongs to GET_KBIT.
+ * No extra SIO2 commands are replayed after a failure. */
 extern volatile int mgdiag_command;
 extern volatile int mgdiag_transfer_rc;
 extern volatile unsigned int mgdiag_stat6c;
@@ -87,6 +94,8 @@ if insert_marker not in secr:
     raise SystemExit("SECRMAN export marker not found")
 secr = secr.replace(insert_marker, insert_marker + r'''
 
+/* Briscoe GET_KBIT failure record. Successful SECRMAN behavior is unchanged;
+ * these fields are only serialized into the 16-byte Kbit reply on failure. */
 volatile int mgdiag_command;
 volatile int mgdiag_transfer_rc;
 volatile unsigned int mgdiag_stat6c;
@@ -150,6 +159,14 @@ static void MgDiagEncodeFailure(void *kbit, unsigned char stage,
     d[15] = mecha1;
 }
 ''', 1)
+
+# Expanding the helper below makes the half that failed observable. Remove the
+# original private helper so PS2SDK 2.0's -Werror does not reject it as unused.
+prototype = "static int scePreEncryptKbit(void *kbit);\n"
+if prototype not in secr:
+    raise SystemExit("scePreEncryptKbit prototype not found")
+secr = secr.replace(prototype, "", 1)
+secr = replace_function(secr, "static int scePreEncryptKbit(", "")
 
 new_get_kbit = r'''int SecrDownloadGetKbit(int port, int slot, void *kbit)
 {
