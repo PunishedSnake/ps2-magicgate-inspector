@@ -1,16 +1,16 @@
 # Architecture
 
-PS2 Memory Card Inspector deliberately separates ordinary memory-card I/O from experimental/security-sensitive MagicGate work. That separation is a direct result of real-hardware regressions found during Briscoe development.
+PS2 Memory Card Inspector 0.2.0 "Briscoe" separates ordinary memory-card I/O from MagicGate/KELF work. That separation is a direct result of real-hardware testing: the normal filesystem path and the security path have different module requirements, and allowing one experimental IOP personality to own the entire application caused regressions.
 
-## Design goals
+## Design rules
 
-1. Keep the ordinary filesystem inspector on a known-good card stack.
-2. Treat MagicGate/KELF work as an isolated session that may fail without poisoning the rest of the application.
-3. Preserve the test KELF in EE RAM across the IOP reboot.
-4. Never write a bound KELF to a card during the capability probe.
-5. Make low-level failures observable without replaying extra authentication commands.
-6. Restore the normal ROM stack after every security-session attempt.
-7. Keep security backend versions reproducible and explicitly selectable.
+1. Ordinary card I/O stays on the Sony ROM X stack that passed hardware tests.
+2. MagicGate runs as an isolated session that may fail without poisoning the rest of the application.
+3. The raw test KELF is loaded into EE RAM before the security-session reboot.
+4. The capability probe never writes a bound KELF to the memory card.
+5. GET_KBIT failures are instrumented in place; authentication commands are never replayed for diagnosis.
+6. The normal ROM stack is rebuilt after every MagicGate attempt.
+7. The release uses one reproducible modern security backend: PS2SDK 2.0 SECRMAN 1.4 plus matching PS2SDK 2.0 modules.
 
 ## High-level flow
 
@@ -18,7 +18,7 @@ PS2 Memory Card Inspector deliberately separates ordinary memory-card I/O from e
 startup
   |
   v
-normal ROM X card personality
+normal Sony ROM X card personality
   |
   +--> filesystem inspection
   +--> temporary 4 KiB R/W test
@@ -29,15 +29,15 @@ normal ROM X card personality
          |
          +--> locate/read/validate raw FMCB.XLF into EE RAM
          +--> close normal pad/USB clients
-         +--> reboot IOP with selected SECRMAN
-         +--> load matching temporary SIO2/PAD/MCMAN stack
-         +--> skip temporary MCSERV
-         +--> load matching SECRSIF
+         +--> reboot IOP with source-built PS2SDK SECRMAN 1.4
+         +--> load PS2SDK 2.0 SIO2/PAD/MCMAN
+         +--> intentionally skip temporary MCSERV
+         +--> load PS2SDK 2.0 SECRSIF
          +--> run RAM-only KELF binding probe
          +--> discard RAM KELF
-         +--> reboot/rebuild normal ROM X card personality
+         +--> rebuild normal Sony ROM X card personality
          +--> reopen USB/pad clients
-         +--> re-inspect both memory-card slots
+         +--> re-inspect both card slots
          |
          v
        UI
@@ -45,7 +45,7 @@ normal ROM X card personality
 
 ## Normal application personality
 
-The normal personality uses modules from the console ROM:
+Ordinary filesystem operations use the console's ROM modules:
 
 ```text
 rom0:XSIO2MAN
@@ -54,96 +54,62 @@ rom0:XMCMAN
 rom0:XMCSERV
 ```
 
-followed by:
+followed by `mcInit(MC_TYPE_XMC)`.
 
-```c
-mcInit(MC_TYPE_XMC)
-```
+This path is intentionally independent from the embedded PS2SDK security stack. It passed create/write/flush/reopen/read/compare/delete tests on real PS2 hardware and is restored after every security-session attempt.
 
-This is the permanent application personality because it has passed real-hardware filesystem testing on the development console and cards.
+## Production MagicGate personality
 
-No experimental SECRMAN replacement remains resident after a MagicGate probe.
-
-## Why the MagicGate personality is isolated
-
-An earlier Briscoe experiment replaced the normal card personality globally with a security-oriented stack. Real hardware then returned memory-card authentication-reset failures before the actual KELF test even ran.
-
-The architectural fix was to isolate the security stack rather than hide the error.
-
-A security-session failure is therefore allowed to produce diagnostics, but the application must still reconstruct the normal ROM stack before returning to ordinary card operations.
-
-## Preparing the test KELF
-
-The raw KELF is located while the normal filesystem environment is still active:
-
-```text
-mass:/FMCB/SYSTEM/FMCB.XLF
-mass0:/FMCB/SYSTEM/FMCB.XLF
-mass1:/FMCB/SYSTEM/FMCB.XLF
-```
-
-The file is read into aligned EE memory and validated before any IOP reboot.
-
-An installed `mc?:/B?EXEC-SYSTEM/osdmain.elf` is deliberately not used as test input because it is already card-bound. The probe needs a raw, unbound source KELF.
-
-## Temporary IOPRP
-
-The Inspector generates a minimal IOPRP image in EE RAM with the selected SECRMAN embedded. It then uses `SifIopRebootBuffer()` to start the isolated security personality.
-
-The selected build profile determines which temporary security/card modules are embedded in the standalone ELF:
-
-### `fmcb13`
-
-```text
-SECRMAN compatibility source from pinned FreeMcBoot Installer revision
-matching SECRSIF compatibility bridge
-PS2SDK-v1-era freesio2/freepad/mcman
-```
-
-### `ps2sdk14`
+The 0.2.0 release uses the PS2SDK 2.0 generation exclusively:
 
 ```text
 PS2SDK 2.0 SECRMAN 1.4
 PS2SDK 2.0 SECRSIF
-PS2SDK 2.0 freesio2/freepad/mcman
+PS2SDK 2.0 freesio2
+PS2SDK 2.0 freepad
+PS2SDK 2.0 mcman
 ```
 
-See `SECURITY_BACKENDS.md` for exact revisions and hashes.
+CI pins PS2SDK source revision:
+
+```text
+a13b5971ec0e39c7ba8b8559b80a4e81c8425352
+```
+
+`tools/patch_secrman14_diag.py` is applied to a temporary checkout before SECRMAN is built. The patch adds failed-GET_KBIT observability but does not replace the successful upstream path. Exact provenance and licensing are recorded in `THIRD_PARTY_NOTICES.md`.
 
 ## Why temporary MCSERV is skipped
 
-Real-hardware testing showed that loading the temporary PS2SDK-v1 MCSERV could return resident successfully and still leave the following LOADFILE RPC stuck.
+Hardware testing showed that starting the temporary MCSERV can report success and still leave the following LOADFILE RPC wedged.
 
-The MagicGate probe itself needs MCMAN's SECRMAN callback registration, not ordinary EE file-service traffic during the isolated phase. Therefore:
+The security probe needs MCMAN's SECRMAN callbacks, not ordinary EE-side file-service traffic during the isolated phase. Therefore:
 
 - temporary MCMAN remains active;
-- temporary MCSERV is intercepted and skipped;
-- the immediate EE-side `mcInit/mcGetInfo/mcSync` sanity query is emulated;
-- all normal libmc behavior resumes after the ROM X environment is rebuilt.
+- temporary MCSERV is intercepted and not started;
+- the immediate EE-side `mcInit/mcGetInfo/mcSync` sanity sequence is emulated;
+- all normal libmc behavior resumes after the Sony ROM X environment is rebuilt.
 
-This behavior lives in `src/magicgate_session.c` and is shared by both security profiles so their behavior can be compared without changing session plumbing.
+This behavior is isolated in `src/magicgate_session.c`.
 
-## Logical vs physical card ports
+## Logical vs physical memory-card ports
 
-This is a non-obvious architectural requirement and must not be “simplified” away.
+This rule is easy to miss and must not be simplified away.
 
-libmc exposes memory cards as logical ports:
+libmc exposes logical ports:
 
 ```text
 mc0 -> 0
 mc1 -> 1
 ```
 
-SECRMAN CardAuth uses the supplied number directly as an SIO2 channel. The physical memory-card channels are:
+SECRMAN CardAuth consumes the supplied number as an SIO2 channel index. The physical memory-card channels are:
 
 ```text
 mc0 -> 2
 mc1 -> 3
 ```
 
-The reference FMCB installer expresses that convention as `2 + port` when entering SECRMAN.
-
-The Inspector keeps all normal libmc code on `0/1`, then translates only SECRSIF RPC requests containing a card port:
+The reference FreeMcBoot binding path enters SECRMAN with `2 + port`. Inspector therefore keeps ordinary libmc code on 0/1 and translates only SECRSIF requests that carry a card port:
 
 ```text
 DOWNLOAD_HEADER
@@ -151,61 +117,79 @@ GET_KBIT
 GET_KC
 ```
 
-The translation is implemented in `src/magicgate_diag.c` because that file already wraps the relevant SECRSIF RPC calls.
+That bridge is implemented in `src/magicgate_diag.c`.
+
+The original 0/1 bug was the root cause of repeated `stat6c=0001D100 id=FF st=FF` failures on otherwise working Sony cards: CardAuth was being sent to controller channels instead of memory-card channels.
 
 ## KELF probe stages
 
-`src/magicgate.c` performs the high-level security transaction:
+`src/magicgate.c` performs the high-level transaction:
 
 1. bind SECRSIF RPC clients;
 2. `DownloadHeader`;
 3. parse returned BIT metadata;
 4. send only BIT entries marked for security download (`flags & 2`);
-5. advance over large plaintext BIT entries without forcing them through the `0x400` SECRSIF block buffer;
+5. advance over large plaintext BIT entries without forcing them through the 0x400-byte SECRSIF block RPC;
 6. `DownloadGetKbit`;
 7. `DownloadGetKc`;
 8. fetch ICVPS2 when required;
-9. report `DONE`/`FUNCTIONAL` only after all required stages succeed.
+9. report `DONE` / `FUNCTIONAL` only after every required stage succeeds.
 
-The SECRSIF block-size limit applies to the block RPC payload, not to every KELF BIT entry.
+The 0x400-byte limit belongs to the block RPC payload; it is not a blanket size limit for every BIT entry.
 
-## Failure instrumentation
+## Failed-GET_KBIT diagnostic record
 
-A failed GET_KBIT needs enough detail to distinguish:
+The instrumented SECRMAN 1.4 emits a compact 16-byte record only when GET_KBIT fails. It distinguishes:
 
-- Mechacon/pre-encryption failure;
-- absent MCMAN callback;
-- SIO2 failure;
-- response ID/status failure;
-- checksum failure;
-- failure in first versus second Kbit half.
+- first or second Mechacon pre-encryption half;
+- first or second card-encryption half;
+- CardAuth command 0x50/0x51/0x52/0x53;
+- MCMAN callback result;
+- SIO2 `stat6c`;
+- card response ID/status;
+- checksum state.
 
-Instead of replaying authentication commands after the fact, the selected SECRMAN source is instrumented at build time. On GET_KBIT failure only, it serializes a compact record into the existing 16-byte Kbit reply buffer.
+The record is placed in the failed Kbit reply buffer, which is otherwise unusable. `src/magicgate_diag.c` decodes it on EE. No diagnostic data is emitted on successful GET_KBIT.
 
-`src/magicgate_diag.c` decodes and classifies that record on EE.
+## Result classification
 
-No diagnostic record is emitted on success, so successful SECRMAN behavior is kept as close to upstream as practical.
+Hardware validation established three important outcomes:
 
-## MagicGate capability classification
+```text
+FUNCTIONAL
+```
 
-The known negative-control signature is:
+The full RAM-only KELF path completed through Kbit and Kc.
+
+```text
+NOT SUPPORTED / NO CARD AUTH ACK
+```
+
+The known negative-control signature was observed on a card without functional MagicGate:
 
 ```text
 stage       card half 0
-command     F2/50
+command     0x50
 pre         1/1
 transfer    1
 stat6c      0001D100
 id/status   FF/FF
 ```
 
-With a backend already proven to pass other cards, that condition means the card did not provide a valid ACK to the first CardAuth command and is presented as:
+Because the same PS2SDK 2.0 backend passes known-good cards, this signature now means the card did not ACK the first CardAuth command rather than that Inspector selected the wrong SIO2 channel.
 
-```text
-NOT SUPPORTED / NO CARD AUTH ACK
-```
+Other CardAuth failures remain `PROTOCOL ERROR / CARD AUTH`; Mechacon or infrastructure failures remain indeterminate instead of being mislabeled as unsupported MagicGate.
 
-Other CardAuth failures remain protocol errors rather than being overgeneralized as “no MagicGate”.
+## Hardware validation matrix for 0.2.0
+
+| Card | Filesystem | MagicGate result |
+| --- | --- | --- |
+| Sony 8 MB #1 | PASS | FUNCTIONAL |
+| Sony 8 MB #2 | PASS | FUNCTIONAL |
+| Third-party 64 MB, MagicGate-capable | PASS | FUNCTIONAL |
+| Third-party 64 MB, no functional MagicGate | PASS | NOT SUPPORTED / NO CARD AUTH ACK |
+
+The same positive results were reproduced with the PS2SDK 2.0 SECRMAN 1.4 backend before release. This proves the probe is testing functional CardAuth/KELF capability rather than Sony branding or card capacity.
 
 ## Environment restoration
 
@@ -213,19 +197,19 @@ After every MagicGate attempt:
 
 1. the temporary KELF buffer is freed;
 2. the IOP is reset;
-3. normal ROM `XSIO2MAN/XPADMAN/XMCMAN/XMCSERV` are reloaded;
+3. Sony ROM `XSIO2MAN/XPADMAN/XMCMAN/XMCSERV` are reloaded;
 4. real `mcInit(MC_TYPE_XMC)` resumes;
 5. controller input is reopened;
-6. USB/FMCB package backend is reinitialized;
+6. the USB/FMCB package backend is reinitialized;
 7. both card slots are inspected again.
 
-A failure to restore the normal environment is treated as fatal and the application asks for a reset/power-cycle rather than continuing with uncertain card state.
+A failure to restore the normal environment is fatal; Inspector asks for a reset/power-cycle instead of continuing with uncertain card state.
 
 ## Installation boundary
 
-The current architecture intentionally stops before card installation writes.
+0.2.0 is not an FMCB installer. Package inspection is read-only and the MagicGate probe is RAM-only.
 
-A future installer path must be a separate transaction with:
+A future installation transaction must still add and validate:
 
 ```text
 preflight
@@ -238,4 +222,4 @@ preflight
   -> rollback on failure
 ```
 
-Passing the RAM-only MagicGate probe is a prerequisite, not permission to skip installation verification.
+Passing the MagicGate capability probe is a prerequisite for that work, not permission to skip write verification.
