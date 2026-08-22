@@ -1,6 +1,6 @@
 # User-supplied FreeMcBoot package
 
-Briscoe does **not** ship FreeMcBoot payloads. The Inspector understands a baseline package layout supplied by the user and currently performs a strictly **read-only preflight**.
+Briscoe does **not** ship FreeMcBoot payloads. The Inspector understands a baseline package layout supplied by the user and performs a strictly **read-only preflight** in v0.2.0.
 
 ## USB layout
 
@@ -62,9 +62,7 @@ Press **Circle** to scan the package. The Inspector reports:
 
 ## Current safety boundary
 
-There is no enabled FMCB installation transaction in Briscoe. The package scanner performs source-side discovery/stat operations and never creates FMCB directories or writes package payloads to a memory card.
-
-The UI deliberately reports that installation is disabled.
+There is no enabled FMCB installation transaction in 0.2.0. The package scanner performs source-side discovery/stat operations and never creates FMCB directories or writes package payloads to a memory card.
 
 Before a write path is allowed, these areas must be independently validated:
 
@@ -78,7 +76,7 @@ Before a write path is allowed, these areas must be independently validated:
 8. target write;
 9. close/reopen and full read-back verification.
 
-The MagicGate bind primitive is now hardware-validated with the `fmcb13` security backend, including positive and negative card controls. That does **not** remove the need to validate the on-card write transaction separately.
+The RAM-only MagicGate bind primitive is hardware-validated with the production PS2SDK 2.0 SECRMAN 1.4 backend, including both positive and negative card controls. That does **not** remove the need to validate the on-card write transaction separately.
 
 ## Planned first write-capable milestone
 
@@ -99,8 +97,8 @@ Only after this behaves safely on backed-up hardware should the wider FMCB file 
 
 ## Early Japanese models
 
-Early Japanese boot-ROM update cases require explicit model/ROM handling and are intentionally outside the first normal-install transaction. They must not be inferred solely from the generic region folder mapping.
+Early Japanese boot-ROM update cases require explicit model/ROM handling and are intentionally outside the first normal-install transaction. They must not be inferred solely from generic region-folder mapping.
 
 ## Redistribution
 
-FreeMcBoot files are user-supplied and retain the terms of their upstream project. PS2 Memory Card Inspector does not relicense those payloads. See the repository's `THIRD_PARTY_NOTICES.md` for project build dependencies and provenance.
+FreeMcBoot files are user-supplied and retain the terms of their upstream project. PS2 Memory Card Inspector does not relicense those payloads. See `THIRD_PARTY_NOTICES.md` for project build dependencies and provenance.
