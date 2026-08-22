@@ -4,7 +4,8 @@ EE_BIN = MC_INSPECTOR.ELF
 EE_OBJS = src/main.o src/card.o src/magicgate.o src/fmcb_install.o \
 	src/magicgate_session.o src/magicgate_diag.o
 EE_LIBS = -ldebug -lpad -lmc -lfileXio -lioprpgen -liopreboot -lpatches -lkernel
-EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections
+EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections \
+	-DMG_SECR_PROFILE_PS2SDK14=1
 EE_LDFLAGS = -Wl,--gc-sections \
 	-Wl,--wrap=SifExecModuleBuffer \
 	-Wl,--wrap=mcInit \
@@ -15,62 +16,28 @@ EE_LDFLAGS = -Wl,--gc-sections \
 	-Wl,--wrap=MagicGateResultText \
 	-Wl,--wrap=MagicGateStageText
 
-# Isolated MagicGate backend profiles.
-#
-# The profile changes only the temporary security/card personality used by the
-# RAM-only KELF probe. Ordinary filesystem I/O always returns to the Sony ROM X
-# stack. Both profiles share the EE-side logical 0/1 -> physical SIO2 2/3 card
-# port correction and the same failed-GET_KBIT diagnostic record format.
-#
-# fmcb13: hardware-validated regression baseline built from a pinned FreeMcBoot
-# compatibility SECRMAN/SECRSIF revision and the matching PS2SDK-v1-era card
-# stack. See THIRD_PARTY_NOTICES.md before redistributing this profile.
-#
-# ps2sdk14: maintained comparison backend built from PS2SDK 2.0 SECRMAN 1.4,
-# matching SECRSIF and the matching PS2SDK 2.0 card stack. CI build validated;
-# real-hardware comparison is pending.
-SECR_PROFILE ?= fmcb13
+# v0.2.0 uses one production MagicGate backend: PS2SDK 2.0 SECRMAN 1.4,
+# matching SECRSIF and the matching PS2SDK 2.0 SIO2/PAD/MCMAN generation.
+# The files below are staged by CI from the pinned PS2SDK source revision.
+# Ordinary memory-card I/O does not use these modules; it stays on the Sony ROM
+# X stack and the temporary MagicGate personality is rebuilt only for a probe.
+MG_CARD_DIR ?= .build/ps2sdk2-mg
+MG_SECR_DIR ?= .build/ps2sdk2-secr14
+MG_SECRMAN ?= $(MG_SECR_DIR)/secrman.irx
+MG_SECRSIF ?= $(MG_SECR_DIR)/secrsif.irx
 
 MG_CARD_IRX_FILES = freesio2.irx freepad.irx mcman.irx mcserv.irx
 MG_CARD_OBJS = $(addprefix fmcb_,$(MG_CARD_IRX_FILES:.irx=_irx.o))
-
-ifeq ($(SECR_PROFILE),fmcb13)
-MG_CARD_DIR ?= .build/fmcb-ps2sdk-v1
-MG_SECRMAN ?= .build/fmcb-secr-1.3-diag/secrman.irx
-MG_SECRSIF_DIR = .build/fmcb-secr-1.3
-MG_SECRSIF = $(MG_SECRSIF_DIR)/secrsif.irx
-EE_CFLAGS += -DMG_SECR_PROFILE_FMCB13=1
-
-FMCB_SECR_COMMIT = ac53a47a5c6eae675cc2611c7bebe62f56c7845c
-FMCB_SECR_BASE = https://raw.githubusercontent.com/israpps/FreeMcBoot-Installer/$(FMCB_SECR_COMMIT)/installer/irx/compiled
-
-$(MG_SECRSIF_DIR):
-	mkdir -p $@
-
-$(MG_SECRSIF): | $(MG_SECRSIF_DIR)
-	@echo "Fetching pinned FMCB SECRSIF compatibility bridge..."
-	wget -q -O $@ $(FMCB_SECR_BASE)/secrsif.irx
-	@test "$$(wc -c < $@)" -eq 4685 || { echo "Unexpected secrsif.irx size"; rm -f $@; exit 1; }
-	@sha256sum $@
-
-else ifeq ($(SECR_PROFILE),ps2sdk14)
-MG_CARD_DIR ?= .build/ps2sdk2-mg
-MG_SECRMAN ?= .build/ps2sdk2-secr14/secrman.irx
-MG_SECRSIF ?= .build/ps2sdk2-secr14/secrsif.irx
-EE_CFLAGS += -DMG_SECR_PROFILE_PS2SDK14=1
-
-$(MG_SECRSIF):
-	@test -f $@ || { echo "Missing PS2SDK 2.0 SECRSIF: $@"; echo "Stage the ps2sdk14 profile before building."; exit 1; }
-
-else
-$(error Unknown SECR_PROFILE '$(SECR_PROFILE)'; use fmcb13 or ps2sdk14)
-endif
-
-$(MG_SECRMAN):
-	@test -f $@ || { echo "Missing SECRMAN for profile $(SECR_PROFILE): $@"; echo "Stage the selected MagicGate profile before building."; exit 1; }
-
 PS2SDK_IRX_FILES = iomanX.irx fileXio.irx usbd.irx usbhdfsd.irx
+
 EE_OBJS += secrman_irx.o secrsif_irx.o $(MG_CARD_OBJS) $(PS2SDK_IRX_FILES:.irx=_irx.o)
+
+$(MG_SECRMAN) $(MG_SECRSIF):
+	@test -f $@ || { \
+		echo "Missing staged PS2SDK 2.0 security module: $@"; \
+		echo "Run the CI staging step or stage the pinned PS2SDK 2.0 modules locally."; \
+		exit 1; \
+	}
 
 secrman_irx.c: $(MG_SECRMAN)
 	$(PS2SDK)/bin/bin2c $< $@ secrman_irx
@@ -78,10 +45,10 @@ secrman_irx.c: $(MG_SECRMAN)
 secrsif_irx.c: $(MG_SECRSIF)
 	$(PS2SDK)/bin/bin2c $< $@ secrsif_irx
 
-# Historical variable names are retained for the generated C symbols so the
-# runtime code does not care which profile supplied the matching card modules.
+# The fmcb_* generated symbol prefix is retained for source compatibility with
+# the Briscoe runtime. The embedded files are PS2SDK 2.0 modules in v0.2.0.
 fmcb_%_irx.c: $(MG_CARD_DIR)/%.irx
-	@test -f $< || { echo "Missing MagicGate card-stack IRX: $<"; echo "Stage profile $(SECR_PROFILE) before building."; exit 1; }
+	@test -f $< || { echo "Missing staged MagicGate card-stack IRX: $<"; exit 1; }
 	$(PS2SDK)/bin/bin2c $< $@ fmcb_$*_irx
 
 %_irx.c:
