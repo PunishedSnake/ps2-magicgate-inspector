@@ -1,122 +1,228 @@
-# Testing
+# Hardware and regression testing
 
-## Current confidence level
+PS2 Memory Card Inspector is developed against real PlayStation 2 hardware. Emulator-only success is not considered sufficient for memory-card, SIO2 or MagicGate changes.
 
-The current Columbo/Briscoe development line is **PS2DEV 2.0.0 build-verified and has passed complete real-hardware filesystem tests**.
+This document defines the current regression matrix and records which conclusions have real-hardware evidence behind them.
 
-The corrected ROM X-module stack initializes successfully on real hardware, both tested memory-card slots are detected, and the full filesystem integrity path can complete with `PASS`.
+## General test rule
 
-A green CI build still proves only that the source compiles and links into a valid PS2 ELF. Real-hardware evidence remains a separate quality signal.
+When reporting a result, record at minimum:
 
-## Startup validation
+```text
+application revision / commit
+SECR_PROFILE
+selected slot
+card description
+filesystem result
+MagicGate result
+Kbit/Kc values or failure stage
+stat6c / id / status when a CardAuth failure is shown
+normal-stack restore result
+```
 
-The normal application personality should pass, in order:
+A MagicGate screenshot without the security profile is incomplete regression data.
 
-1. SIF RPC initialization;
-2. IOP reset using `SifIopReset(NULL, 0)`;
-3. IOP synchronization;
-4. `rom0:XSIO2MAN`;
-5. `rom0:XPADMAN`;
-6. `rom0:XMCMAN`;
-7. `rom0:XMCSERV`;
-8. `mcInit(MC_TYPE_XMC)`;
-9. `padInit()` and `padPortOpen()`;
-10. initial inspection of both card slots.
+## Known card matrix
 
-The original v0.1.0 hardware build reached `mcserv.irx OK` and then stalled because ordinary MCMAN/MCSERV had been paired with the XMC client protocol. That exact configuration is no longer used.
+The Briscoe investigation currently has four useful physical cards:
 
-## Confirmed real-hardware filesystem result
-
-A real PS2 test completed successfully on both populated slots.
-
-One tested official Sony 8 MB card is specifically useful as a regression case because the FreeMcBoot installer refuses to install to it despite otherwise normal card operation. Inspector reported for that card:
-
-- `mcGetInfo rc: 0`;
-- reported type: `2 (PS2)`;
-- formatted flag: `1`;
-- free clusters: `7998`;
-- root-directory rc: `0`;
-- R/W stage: `DONE`;
-- 4 KiB write/read/compare/delete rc: `0`;
-- cleanup rc: `0`;
-- final health: `PASS`.
-
-The second populated official Sony card, which already contains a working FMCB installation, also completes ordinary filesystem testing with `PASS`.
-
-This proves that the FMCB-rejected card can be detected as a PS2 memory card, traverse its filesystem, create a file, write and flush data, close/reopen it, read the data back byte-for-byte, and delete the temporary file successfully.
-
-## Briscoe MagicGate history
-
-### dev3
-Rejected. The always-on experimental security/card stack caused `sceMcResFailResetAuth (-11)` during ordinary card access.
-
-### dev4
-Normal card access was restored by isolating the experimental SECR personality. The isolated session still produced `sceMcResFailResetAuth (-11)` before reaching KELF RPC.
-
-### dev5
-Switching from PS2SDK SECRMAN/SECRSIF 1.4 to the classic FreeMcBoot Installer 1.3 pair changed the isolated-session card result from `-11` to `sceMcResChangedCard (-1)` while returning valid PS2 metadata.
-
-### dev6
-`CHANGED CARD` was treated as a transient post-reboot notification. Both official Sony cards advanced to `DOWNLOAD HEADER` and both returned `HEADER BIND FAILED`.
-
-This does **not** distinguish the cards. dev4-dev6 incorrectly used the already-installed `mc1:/BIEXEC-SYSTEM/osdmain.elf` as input to a second bind. An installed `osdmain.elf` is already a card-bound KELF. The FreeMcBoot Installer instead takes the raw package source `SYSTEM/FMCB.XLF`, binds it for the target card, and only then writes the result as `B?EXEC-SYSTEM/osdmain.elf`.
-
-Therefore the dev6 `HEADER BIND FAILED` result is not a valid MagicGate verdict on either card.
-
-### dev7
-MagicGate/KELF probing accepts only a raw user-supplied FMCB package KELF:
-
-- `mass:/FMCB/SYSTEM/FMCB.XLF`
-- `mass0:/FMCB/SYSTEM/FMCB.XLF`
-- `mass1:/FMCB/SYSTEM/FMCB.XLF`
-
-Installed memory-card KELFs are no longer valid probe inputs. If no raw `FMCB.XLF` is present, the probe must stop before the isolated SECR session and report `RAW FMCB.XLF REQUIRED`.
-
-The dev7 A/B hardware test must use the exact same raw `FMCB.XLF` against both target cards. Only then is a difference in `DOWNLOAD HEADER`, block transfer, Kbit, Kc or ICVPS2 meaningful.
-
-## MechaPWN / DEX note
-
-Console security mode can matter independently of the card. FreeMcBoot Installer documents that a CEX SECRMAN cannot authenticate cards correctly on a DEX and uses a custom security module with DEX-aware handling. MechaPWN can place supported consoles into a DEX-like configuration, so this remains a legitimate variable to record during MagicGate testing.
-
-It is **not** yet proven to be the cause of the observed dev6 header failures because dev6 used an invalid already-bound KELF input.
-
-## First card-validation matrix
-
-| Case | Expected result | Formatting offered? | Status |
+| Card | Role | Filesystem | `fmcb13` MagicGate |
 | --- | --- | --- | --- |
-| No card inserted | `NO CARD` | No | Pending |
-| Known-good PS2 card | `PASS` | No | **Confirmed** |
-| FMCB-rejected but otherwise readable PS2 card | filesystem `PASS`; MG separately classified | No | **Filesystem/RW confirmed** |
-| Known-good third-party PS2-compatible card | `PASS` or useful raw failure | No unless genuinely unformatted | Pending |
-| Fresh/unformatted PS2 card | `UNFORMATTED / FRESH` | Yes | Pending |
-| Full formatted card | `FULL - R/W TEST COULD NOT RUN` | No | Pending |
-| PS1 card | Report PS1 type | No | Pending |
-| Card with filesystem corruption / `sceMcResNoFormat` | Filesystem failure | Yes, only if reported as PS2 type | Pending |
-| Authentication failure | `CARD AUTHENTICATION FAILURE` | No | Pending |
-| Detection failure / electrically unstable card | `CARD DETECTION FAILURE` | No | Pending |
+| Official Sony 8 MB A | positive control | PASS | FUNCTIONAL |
+| Official Sony 8 MB B | positive control | PASS | FUNCTIONAL |
+| Third-party 64 MB, no functional MagicGate | negative control | PASS | `NOT SUPPORTED / NO CARD AUTH ACK` |
+| Third-party 64 MB, MagicGate-capable | third-party positive control | PASS | FUNCTIONAL |
 
-## Safe test procedure
+The last two cards are particularly useful because they prove that capacity and manufacturer branding are not proxies for actual CardAuth behavior.
 
-1. Boot the current development `MC_INSPECTOR.ELF` with a known-good card first.
-2. Confirm normal filesystem inspection still reaches `PASS`.
-3. For MagicGate dev7, place a raw FMCB package at `mass:/FMCB/` (or mass0/mass1) and ensure `SYSTEM/FMCB.XLF` exists.
-4. Use the same USB package for every target card comparison.
-5. Press **Square** to run the RAM-only MagicGate probe.
-6. Record the raw source path, session `mcGetInfo`, SECR RPC result, header result, block counts, Kbit and Kc.
-7. After the session, confirm normal card inspection still works.
-8. Do not test formatting on a card containing data you care about.
+## Filesystem regression test
 
-## Safety
+The ordinary card path must continue to use the normal ROM X stack.
 
-The MagicGate probe is RAM-only. Bound output is not written to either memory card. FMCB support remains read-only preflight only; installation writes are disabled.
+Expected sequence:
 
-## CI expectations
+1. `mcGetInfo()` succeeds or returns a state the UI correctly classifies;
+2. root directory can be queried for a healthy formatted PS2 card;
+3. temporary 4 KiB file is created;
+4. deterministic data is written and flushed;
+5. file is reopened and read;
+6. all bytes compare;
+7. file is deleted;
+8. deletion/cleanup is verified.
 
-Every active development branch should compile `MC_INSPECTOR.ELF` in CI. CI should:
+Known hardware baseline: both official Sony cards completed the full create/write/flush/reopen/read/compare/delete path.
 
-- compile and link with PS2DEV 2.0.0;
-- use the current EE compiler supplied by that environment;
-- verify the artifact is a 32-bit MIPS PS2 ELF;
-- calculate SHA-256;
-- upload the ELF as an artifact;
-- fail rather than silently publishing a missing output.
+Any change to the isolated security stack that breaks this ordinary path **after restoration** is a regression even if MagicGate itself passes.
+
+## MagicGate positive-control test
+
+For each positive-control card:
+
+1. place a raw `FMCB.XLF` at `mass:/FMCB/SYSTEM/FMCB.XLF` or an accepted numbered `mass` path;
+2. run the MagicGate probe;
+3. confirm session setup succeeds;
+4. confirm `DownloadHeader = 1`;
+5. confirm the expected encrypted BIT block count completes;
+6. confirm `Kbit = 1`;
+7. confirm `Kc = 1`;
+8. confirm final result is `FUNCTIONAL`;
+9. after returning to the UI, rerun ordinary filesystem inspection to verify the ROM X stack was restored correctly.
+
+For the currently used FMCB.XLF test input the observed BIT summary has been:
+
+```text
+BIT blocks: 2
+encrypted: 1
+completed: 1
+```
+
+Do not hardcode those values as a universal KELF rule; they describe the current test file.
+
+## MagicGate negative-control test
+
+The known third-party 64 MB card without functional MagicGate is expected to remain filesystem-readable but fail the first real Kbit CardAuth transaction.
+
+Validated `fmcb13` signature:
+
+```text
+pre=1/1
+half=0
+command=0x50
+tr=1
+stat6c=0001D100
+id=FF
+status=FF
+```
+
+Expected user-facing classification:
+
+```text
+NOT SUPPORTED / NO CARD AUTH ACK
+```
+
+This negative control is important. If a new backend suddenly reports `FUNCTIONAL` on every card, the probe may have become a false positive. If it fails the Sony positive controls with the same signature, suspect backend/session/port regression before blaming the cards.
+
+## `ps2sdk14` hardware comparison plan
+
+The PS2SDK 2.0 SECRMAN 1.4 comparison profile has compiled and linked successfully. Hardware equivalence is still pending.
+
+Test it in this order:
+
+### 1. Sony 8 MB positive control A
+
+Expected ideal result:
+
+```text
+FUNCTIONAL
+Kbit=1
+Kc=1
+```
+
+If this fails, capture the complete GET_KBIT diagnostic line before changing code.
+
+### 2. Sony 8 MB positive control B
+
+Confirms the result is not specific to the first card.
+
+### 3. Third-party 64 MB negative control
+
+Expected result should remain a clean first-command no-ACK or another clearly card-side rejection. A false `FUNCTIONAL` result here requires investigation.
+
+### 4. Third-party 64 MB MagicGate-capable positive control
+
+Expected `FUNCTIONAL`.
+
+### 5. Post-probe filesystem regression
+
+After each card/security test, verify the normal ROM stack and ordinary R/W path again.
+
+Only after all of those agree with the `fmcb13` baseline should `ps2sdk14` be considered hardware-validated.
+
+## Historical regression cases that must not return
+
+### Large plaintext BIT entry rejected as > 0x400
+
+Cause: the SECRSIF RPC block-size limit was incorrectly applied to every BIT entry.
+
+Correct behavior: validate every block against KELF bounds, but apply the `0x400` RPC payload limit only when `flags & 2` means the block is actually sent to `DownloadBlock`.
+
+### Installed `osdmain.elf` used as raw bind input
+
+Cause: confusion between a source KELF and an already card-bound installed KELF.
+
+Correct behavior: use a raw user-supplied `FMCB.XLF` from USB.
+
+### Temporary MCSERV wedges LOADFILE RPC
+
+Cause: isolated PS2SDK-v1 MCSERV could become resident yet interfere with the following module load.
+
+Correct behavior: skip temporary MCSERV during the isolated probe, keep MCMAN active, and emulate only the immediate EE-side libmc sanity query.
+
+### Extra F3 inserted before GET_KBIT
+
+Cause: independent diagnostic replay assumed authentication reset was part of the actual GET_KBIT sequence.
+
+Correct behavior: do not inject F3. The real card transform starts at `F2/50` after Mechacon preparation.
+
+### Logical libmc port forwarded to CardAuth
+
+Cause: EE logical `0/1` was passed directly to SECRMAN, which consumes physical SIO2 channels.
+
+Observed failure:
+
+```text
+0001D100 / FF / FF
+```
+
+Correct behavior:
+
+```text
+0 -> 2
+1 -> 3
+```
+
+at the SECR RPC boundary only.
+
+## CI/build regression
+
+Every security profile must at least compile in CI before hardware testing.
+
+The first `ps2sdk14` instrumentation attempt failed compilation because the diagnostic expansion left stock `scePreEncryptKbit()` unused and PS2SDK treats warnings as errors. That was a build-patcher bug, not a SECRMAN runtime failure.
+
+Corrected comparison build:
+
+```text
+workflow #109
+ELF SHA256 b5c1df1c4f51b756bf6c62e5d3fc1a9a414362eab77bf3ad13cd095fc7e4723c
+```
+
+## FMCB preflight tests
+
+FMCB package scanning remains read-only.
+
+Verify:
+
+- package root discovery on `mass:`, `mass0:` and `mass1:`;
+- required file detection;
+- optional file handling;
+- console-region target resolution;
+- no target card writes during scan;
+- ordinary card functionality after USB backend shutdown/reinitialization.
+
+## Future installer write validation
+
+Do not jump directly from a successful MagicGate capability test to a general FMCB install button.
+
+The first write-capable experiment should use a disposable/fully backed-up target and must implement:
+
+1. preflight and free-space check;
+2. backup of anything that would be replaced;
+3. bind KELF in RAM;
+4. write only the test target;
+5. close and reopen it through normal filesystem APIs;
+6. read back the entire file;
+7. verify exact expected bound contents/metadata;
+8. restore/rollback on any mismatch;
+9. power-cycle boot test only after on-card verification passes.
+
+Until this transaction is implemented and validated, the project remains a diagnostic/preflight utility rather than an FMCB installer.
