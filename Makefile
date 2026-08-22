@@ -2,8 +2,8 @@
 
 EE_BIN = MC_INSPECTOR.ELF
 EE_OBJS = src/app_main.o src/gui.o src/progress.o src/card.o src/magicgate.o src/fmcb_install.o \
-	src/magicgate_session.o src/magicgate_diag.o
-EE_LIBS = -ldebug -ldraw -lgraph -lpacket -ldma -lpad -lmc -lfileXio \
+	src/magicgate_session.o src/magicgate_diag.o src/video_mode.o src/ui_layout.o src/settings.o
+EE_LIBS = -ldebug -ldraw -lgraph -lpacket -ldma -lpad -lmc -lfileXio -lsecr \
 	-lioprpgen -liopreboot -lpatches -lkernel
 EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections \
 	-DMG_SECR_PROFILE_PS2SDK14=1
@@ -17,9 +17,10 @@ EE_LDFLAGS = -Wl,--gc-sections \
 	-Wl,--wrap=MagicGateResultText \
 	-Wl,--wrap=MagicGateStageText
 
-# 0.3.x keeps the single hardware-validated production security backend from
+# 0.4.x keeps the single hardware-validated production security backend from
 # Briscoe: PS2SDK 2.0 SECRMAN 1.4, matching SECRSIF and the matching PS2SDK 2.0
-# SIO2/PAD/MCMAN generation. The new GS frontend does not change this boundary.
+# SIO2/PAD/MCMAN generation. Display/settings and installer work do not weaken
+# the separation between ordinary ROM X filesystem I/O and the SECR session.
 MG_CARD_DIR ?= .build/ps2sdk2-mg
 MG_SECR_DIR ?= .build/ps2sdk2-secr14
 MG_SECRMAN ?= $(MG_SECR_DIR)/secrman.irx
