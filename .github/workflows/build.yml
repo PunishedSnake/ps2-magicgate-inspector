@@ -19,7 +19,9 @@ on:
       - 'Makefile'
       - '.github/workflows/build.yml'
   push:
-    branches: [ main ]
+    branches:
+      - main
+      - feat/0.2.0-briscoe
     paths:
       - 'src/**'
       - 'tools/**'
@@ -29,9 +31,8 @@ on:
 permissions:
   contents: read
 
-# PR CI is temporarily pointed at ps2sdk14 so the experimental backend can be
-# validated on hardware before deciding which security profile should become
-# Briscoe's default. workflow_dispatch still allows either profile explicitly.
+# The Briscoe feature branch intentionally builds ps2sdk14 on push while the
+# backend comparison is in progress. Manual runs can still select either stack.
 env:
   SECR_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.secr_profile || 'ps2sdk14' }}
 
