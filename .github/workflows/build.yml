@@ -31,6 +31,19 @@ jobs:
         shell: bash
         run: docker --version
 
+      - name: Stage FMCB-compatible PS2SDK v1 IOP modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .build/fmcb-ps2sdk-v1
+          docker pull ps2dev/ps2dev:v1.0
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            ps2dev/ps2dev:v1.0 \
+            sh -c 'set -eu; for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/fmcb-ps2sdk-v1/$f"; done'
+          ls -lh .build/fmcb-ps2sdk-v1
+          sha256sum .build/fmcb-ps2sdk-v1/*.irx
+
       - name: Build standalone ELF in PS2DEV v2.0.0
         shell: bash
         run: |
