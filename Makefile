@@ -16,7 +16,7 @@ EE_LDFLAGS = -Wl,--gc-sections
 # CI stages the v1.0 IOP modules into FMCB_COMPAT_DIR before invoking this
 # Makefile. This avoids mixing the current PS2SDK v2 MCMAN (secrman import 1.4)
 # with the classic FMCB security library (secrman 1.3).
-# CI marker: dev9 FMCB-v1 IOP compatibility candidate 2.
+# CI marker: dev9 FMCB-v1 IOP compatibility candidate 3.
 FMCB_SECR_COMMIT = ac53a47a5c6eae675cc2611c7bebe62f56c7845c
 FMCB_SECR_BASE = https://raw.githubusercontent.com/israpps/FreeMcBoot-Installer/$(FMCB_SECR_COMMIT)/installer/irx/compiled
 FMCB_SECR_DIR = .build/fmcb-secr-1.3
