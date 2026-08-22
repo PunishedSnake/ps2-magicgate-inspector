@@ -1,9 +1,10 @@
 /*
  * PS2 Memory Card Inspector
  * -------------------------
- * Briscoe dev4 keeps the hardware-validated ordinary memory-card stack as the
+ * Briscoe dev9 keeps the hardware-validated ordinary memory-card stack as the
  * permanent application personality. MagicGate/KELF work runs in an isolated
- * IOP session and the normal stack is always restored before returning to UI.
+ * IOP session using the same PS2SDK v1-era card stack expected by the classic
+ * FMCB SECRMAN 1.3 modules, then the normal ROM X stack is restored.
  */
 
 #include <tamtypes.h>
@@ -28,7 +29,7 @@
 #include "magicgate.h"
 #include "fmcb_install.h"
 
-#define APP_VERSION "0.2.0-dev4"
+#define APP_VERSION "0.2.0-dev9"
 #define APP_CODENAME "Briscoe"
 #define SLOT_COUNT 2
 #define VIEW_CARD 0
@@ -38,6 +39,14 @@
 
 extern unsigned char secrman_irx[];
 extern unsigned int size_secrman_irx;
+extern unsigned char fmcb_freesio2_irx[];
+extern unsigned int size_fmcb_freesio2_irx;
+extern unsigned char fmcb_freepad_irx[];
+extern unsigned int size_fmcb_freepad_irx;
+extern unsigned char fmcb_mcman_irx[];
+extern unsigned int size_fmcb_mcman_irx;
+extern unsigned char fmcb_mcserv_irx[];
+extern unsigned int size_fmcb_mcserv_irx;
 
 static unsigned char PadBuffer[256] __attribute__((aligned(64)));
 static CardReport Reports[SLOT_COUNT];
@@ -57,6 +66,20 @@ static int LoadRomModule(const char *path, const char *name)
         scr_printf("[IOP] %s FAILED: rc=%d\n", name, rc);
     else
         scr_printf("[IOP] %s OK: id=%d\n", name, rc);
+    return rc;
+}
+
+static int LoadEmbeddedModule(void *data, unsigned int size, const char *name)
+{
+    int start_rc = -999;
+    int rc;
+
+    scr_printf("[IOP] Loading %s (%u bytes)...\n", name, size);
+    rc = SifExecModuleBuffer(data, size, 0, NULL, &start_rc);
+    if (rc < 0)
+        scr_printf("[IOP] %s FAILED: rc=%d start=%d\n", name, rc, start_rc);
+    else
+        scr_printf("[IOP] %s OK: id=%d start=%d\n", name, rc, start_rc);
     return rc;
 }
 
@@ -167,10 +190,14 @@ static int RebootIopWithSecrman(void)
 }
 
 /*
- * Isolated experimental personality. Unlike dev3 it uses the ROM X SIO2/MC
- * modules instead of PS2SDK freesio2/XMCMAN. If this personality cannot see a
- * card, the failure is recorded as MG-session evidence and normal operation is
- * restored immediately afterwards.
+ * Isolated FMCB-compatible security personality.
+ *
+ * Real hardware reached DownloadHeader/DownloadBlock with ROM XMCMAN but then
+ * failed at Kbit on both official Sony cards. Kbit is the first path that calls
+ * SECRMAN's card_encrypt(), which requires MCMAN to have registered the
+ * mcCommand and device-ID callbacks. FreeMcBoot Installer builds its card
+ * modules in ps2dev/ps2dev:v1.0, whose MCMAN imports secrman 1.3. dev9 mirrors
+ * that exact generation only inside this temporary session.
  */
 static int InitMagicGateSession(MagicGateReport *report)
 {
@@ -191,11 +218,17 @@ static int InitMagicGateSession(MagicGateReport *report)
     SifInitIopHeap();
     sbv_patch_enable_lmb();
 
-    rc = LoadRomModule("rom0:XSIO2MAN", "MG/XSIO2MAN");
+    rc = LoadEmbeddedModule(fmcb_freesio2_irx, size_fmcb_freesio2_irx,
+                            "MG/FMCB SIO2MAN v1");
     if (rc < 0) goto out;
-    rc = LoadRomModule("rom0:XMCMAN", "MG/XMCMAN");
+    rc = LoadEmbeddedModule(fmcb_freepad_irx, size_fmcb_freepad_irx,
+                            "MG/FMCB PADMAN v1");
     if (rc < 0) goto out;
-    rc = LoadRomModule("rom0:XMCSERV", "MG/XMCSERV");
+    rc = LoadEmbeddedModule(fmcb_mcman_irx, size_fmcb_mcman_irx,
+                            "MG/FMCB MCMAN v1");
+    if (rc < 0) goto out;
+    rc = LoadEmbeddedModule(fmcb_mcserv_irx, size_fmcb_mcserv_irx,
+                            "MG/FMCB MCSERV v1");
     if (rc < 0) goto out;
 
     mg_rc = MagicGateLoadIopModules(&MgIopStatus);
@@ -203,6 +236,8 @@ static int InitMagicGateSession(MagicGateReport *report)
         rc = mg_rc;
         goto out;
     }
+
+    rc = 0;
 
 out:
     SifExitIopHeap();
@@ -248,10 +283,10 @@ static int RunMagicGateSession(int target_port)
         return rc;
 
     scr_clear();
-    scr_printf("PS2 Memory Card Inspector - isolated MagicGate session\n\n");
-    scr_printf("KELF prepared from mc%d:%s (%d bytes)\n",
-               kelf.source_port, kelf.source_path, kelf.size);
-    scr_printf("Switching away from normal card stack...\n");
+    scr_printf("PS2 Memory Card Inspector - Briscoe dev9 MagicGate session\n\n");
+    scr_printf("KELF prepared from %s (%d bytes)\n",
+               kelf.source_path, kelf.size);
+    scr_printf("Switching to FMCB-compatible PS2SDK v1 IOP stack...\n");
 
     ShutdownNormalClients();
 
@@ -293,7 +328,7 @@ static void RenderHeader(int selected, int view)
         page = "FMCB PREFLIGHT";
 
     scr_printf("PS2 Memory Card Inspector v%s - %s\n", APP_VERSION, APP_CODENAME);
-    scr_printf("PS2DEV 2.0 / normal ROM X stack + isolated SECR / %s\n\n", page);
+    scr_printf("PS2DEV 2.0 EE / ROM normal + FMCB-v1 MG / %s\n\n", page);
     scr_printf("< LEFT/RIGHT > slot   X filesystem   SQUARE MagicGate\n");
     scr_printf("CIRCLE FMCB scan   R1 next page   START test both   SELECT exit\n\n");
     scr_printf("Selected: SLOT %d (mc%d:)\n", selected + 1, selected);
@@ -351,9 +386,13 @@ static void RenderMagicGateView(int selected)
     scr_printf("MagicGate result:  %s\n", MagicGateResultText(mg->result));
     scr_printf("MG stage:          %s\n\n", MagicGateStageText(mg->stage));
 
-    if (mg->source_port >= 0) {
-        scr_printf("KELF: mc%d:%s (%d bytes)\n",
-                   mg->source_port, mg->source_path, mg->source_size);
+    if (mg->source_path[0] != '\0') {
+        if (mg->source_port >= 0 && mg->source_port < 2)
+            scr_printf("KELF: mc%d:%s (%d bytes)\n",
+                       mg->source_port, mg->source_path, mg->source_size);
+        else
+            scr_printf("KELF: %s (%d bytes)\n",
+                       mg->source_path, mg->source_size);
     } else {
         scr_printf("KELF: none found\n");
     }
@@ -427,7 +466,7 @@ static void RenderFmcbView(int selected)
     }
 
     scr_printf("\nCIRCLE: rescan user package\n");
-    scr_printf("INSTALL: DISABLED IN DEV4 (preflight is read-only)\n");
+    scr_printf("INSTALL: DISABLED IN DEV9 (preflight is read-only)\n");
 }
 
 static void Render(int selected, int view, int confirm_format, int last_format_rc)
@@ -482,7 +521,7 @@ int main(int argc, char *argv[])
 
     init_scr();
     scr_clear();
-    scr_printf("PS2 Memory Card Inspector - Briscoe dev4\n");
+    scr_printf("PS2 Memory Card Inspector - Briscoe dev9\n");
     scr_printf("Initializing hardware-validated normal ROM X stack...\n");
 
     init_rc = InitNormalCardStack();
