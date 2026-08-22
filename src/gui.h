@@ -4,11 +4,13 @@
 #include "card.h"
 #include "magicgate.h"
 #include "fmcb_install.h"
+#include "settings.h"
 
 typedef enum MciGuiPage {
     MCI_GUI_CARD = 0,
     MCI_GUI_MAGICGATE,
     MCI_GUI_FMCB,
+    MCI_GUI_SETTINGS,
     MCI_GUI_PAGE_COUNT
 } MciGuiPage;
 
@@ -20,15 +22,14 @@ typedef enum MciGuiTone {
 } MciGuiTone;
 
 /*
- * Native 640x224 GS frontend.
- *
- * The renderer deliberately follows the hardware-validated 0.4.0
- * fhdb-bootstrap-manager frontend: libdebug establishes the CRT/read-circuit
- * state once through init_scr(), then all application pixels are submitted
- * through libdraw/GIF DMA. 0.3.0 intentionally has no video-mode selector.
+ * 0.4 keeps a 640x224 logical UI but can map it onto the hardware-tested
+ * display surfaces from fhdb-bootstrap-manager 0.4.3. Native is always the
+ * recovery mode; progressive/HD modes are runtime-selectable from Settings.
  */
 int MciGuiInit(void);
 int MciGuiReady(void);
+int MciGuiApplyVideoMode(MciVideoMode mode);
+MciVideoMode MciGuiCurrentVideoMode(void);
 
 void MciGuiRenderDashboard(int selected,
                            MciGuiPage page,
@@ -37,6 +38,9 @@ void MciGuiRenderDashboard(int selected,
                            const MagicGateIopStatus *mg_iop,
                            const FmcbMassBackendStatus *mass,
                            const FmcbPackageReport packages[2],
+                           const MciSettings *settings,
+                           int settings_row,
+                           int last_video_rc,
                            int confirm_format,
                            int last_format_rc);
 
@@ -45,7 +49,6 @@ void MciGuiRenderMessage(const char *title,
                          const char *footer,
                          MciGuiTone tone);
 
-/* Dedicated GS progress page with a real filled progress bar. */
 void MciGuiRenderProgress(const char *title,
                           const char *action,
                           const char *detail,
