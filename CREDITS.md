@@ -2,40 +2,38 @@
 
 ## PS2 Memory Card Inspector
 
-**Hifu Himejima / PunishedSnake**
+**Hifu Himejima / PunishedSnake** — project author and maintainer; feature design; real-hardware testing; filesystem, MagicGate and FreeMcBoot preflight investigation; Briscoe release validation.
 
-Project author, maintainer, hardware testing, feature design and Briscoe MagicGate investigation.
+## PS2DEV / PS2SDK contributors
 
-## PS2 homebrew foundations
+For the maintained PlayStation 2 toolchain, SDK, EE/IOP libraries, memory-card and SIO2 support, SECRMAN/SECRSIF implementation, documentation and build environment that make this project possible.
 
-This project exists because of the work done by the wider PlayStation 2 homebrew community over many years.
+PS2 Memory Card Inspector 0.2.0 uses PS2SDK 2.0 SECRMAN 1.4 with matching PS2SDK 2.0 components. Exact source provenance is recorded in `THIRD_PARTY_NOTICES.md`.
 
-### PS2DEV / PS2SDK contributors
+## FreeMcBoot / FreeHdBoot developers
 
-For the PS2 toolchain, SDK, EE/IOP libraries, memory-card stack, SIO2 support, security modules, documentation and the maintained PS2SDK development environment used to build this project.
+For the FreeMcBoot ecosystem, installer design, KELF-binding work and years of practical PS2 memory-card research that provided the reference behavior needed to understand the CardAuth path.
 
-The modern `ps2sdk14` backend is based on PS2SDK 2.0's SECRMAN 1.4 / SECRSIF implementation and matching memory-card modules.
+**SP193** is specifically credited for the FreeMcBoot installer source lineage and for making the relevant implementation available to later homebrew work.
 
-### FreeMcBoot / FreeHdBoot developers
+## israpps / FreeMcBoot-Installer maintainers
 
-For the original FreeMcBoot ecosystem, installer design and the practical KELF-binding work that made later investigation possible.
+For preserving and maintaining accessible FreeMcBoot Installer source that was used as a historical comparison during the Briscoe investigation. That compatibility backend helped expose the critical `2 + port` SECRMAN calling convention before the project moved to the PS2SDK 2.0 production stack.
 
-**SP193** is specifically credited for the FreeMcBoot installer source lineage and the work preserved by later maintainers.
-
-### israpps / FreeMcBoot-Installer maintainers
-
-For keeping the FreeMcBoot Installer source and compatibility builds available. The `fmcb13` regression profile pins a revision of that repository so the hardware-validated compatibility behavior can be reproduced.
+No FreeMcBoot payload is included in this project or release package.
 
 ## Hardware validation
 
-Briscoe's MagicGate work was validated on real PlayStation 2 hardware with multiple memory cards, including:
+Briscoe's MagicGate capability test was validated on real PlayStation 2 hardware with multiple physical cards:
 
-- two official Sony 8 MB cards;
-- a third-party 64 MB card without functional MagicGate/CardAuth support;
-- a separate third-party 64 MB card that successfully completes the MagicGate/KELF probe.
+- two official Sony 8 MB cards — `FUNCTIONAL`;
+- a third-party 64 MB card with functional MagicGate/CardAuth — `FUNCTIONAL`;
+- a third-party 64 MB card without functional MagicGate/CardAuth — ordinary filesystem PASS, security result `NOT SUPPORTED / NO CARD AUTH ACK`.
 
-Those positive and negative controls were essential to distinguishing actual card capability from filesystem compatibility and from an Inspector-side SIO2 port-numbering bug.
+The positive and negative controls were essential for separating actual card capability from branding, capacity and Inspector-side SIO2 mistakes.
 
-## Trademarks
+## Trademarks and project names
 
-PlayStation, MagicGate, FreeMcBoot and other names belong to their respective owners or projects. Their appearance here is descriptive and does not imply endorsement or affiliation.
+PlayStation and MagicGate are trademarks of their respective owners. FreeMcBoot, FreeHdBoot, PS2SDK and other project names are used descriptively and remain associated with their respective projects and contributors.
+
+PS2 Memory Card Inspector is an independent homebrew project. No trademark or project name listed here implies endorsement or affiliation.
