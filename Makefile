@@ -10,19 +10,11 @@ EE_LDFLAGS = -Wl,--gc-sections \
 	-Wl,--wrap=mcGetInfo \
 	-Wl,--wrap=mcSync
 
-# Briscoe dev10 keeps the hardware-validated Sony ROM X stack for ordinary
-# Inspector work. The isolated MagicGate session still uses PS2SDK v1-era
-# freesio2/freepad/mcman plus the pinned FMCB SECRMAN/SECRSIF export-1.3 pair,
-# but deliberately skips the temporary MCSERV v1 RPC server.
-#
-# Real hardware showed MCSERV v1 returning RESIDENT_END and the immediately
-# following LOADFILE RPC never returning. dev10 therefore isolates the IOP-side
-# MCMAN -> SECRMAN card-command callback path from the old EE libmc/MCSERV path.
-# A tiny linker-wrap shim fakes only the isolated mcInit/mcGetInfo check; normal
-# pre-probe and restored ROM X operation still use the real libmc implementation.
-#
-# CI stages the v1.0 IOP modules before invoking this Makefile. The EE program
-# itself remains built with PS2DEV v2.0.
+# Briscoe dev11 keeps the hardware-validated Sony ROM X stack for ordinary
+# Inspector work and the dev10 no-MCSERV isolated MagicGate personality.
+# A tiny project-owned mgtrace IRX is additionally loaded only for diagnostics:
+# after Kbit fails it directly exercises the card-side F2/50..53 transform path
+# so we can distinguish Mechacon/key-fetch trouble from card/SIO2 trouble.
 FMCB_SECR_COMMIT = ac53a47a5c6eae675cc2611c7bebe62f56c7845c
 FMCB_SECR_BASE = https://raw.githubusercontent.com/israpps/FreeMcBoot-Installer/$(FMCB_SECR_COMMIT)/installer/irx/compiled
 FMCB_SECR_DIR = .build/fmcb-secr-1.3
@@ -33,8 +25,10 @@ FMCB_COMPAT_DIR ?= .build/fmcb-ps2sdk-v1
 FMCB_COMPAT_IRX_FILES = freesio2.irx freepad.irx mcman.irx mcserv.irx
 FMCB_COMPAT_OBJS = $(addprefix fmcb_,$(FMCB_COMPAT_IRX_FILES:.irx=_irx.o))
 
+MGTRACE_IRX ?= .build/mgtrace/mgtrace.irx
+
 PS2SDK_IRX_FILES = iomanX.irx fileXio.irx usbd.irx usbhdfsd.irx
-EE_OBJS += secrman_irx.o secrsif_irx.o $(FMCB_COMPAT_OBJS) $(PS2SDK_IRX_FILES:.irx=_irx.o)
+EE_OBJS += secrman_irx.o secrsif_irx.o mgtrace_irx.o $(FMCB_COMPAT_OBJS) $(PS2SDK_IRX_FILES:.irx=_irx.o)
 
 $(FMCB_SECR_DIR):
 	mkdir -p $@
@@ -56,6 +50,10 @@ secrman_irx.c: $(FMCB_SECRMAN)
 
 secrsif_irx.c: $(FMCB_SECRSIF)
 	$(PS2SDK)/bin/bin2c $< $@ secrsif_irx
+
+mgtrace_irx.c: $(MGTRACE_IRX)
+	@test -f $< || { echo "Missing mgtrace IRX: $<"; exit 1; }
+	$(PS2SDK)/bin/bin2c $< $@ mgtrace_irx
 
 fmcb_%_irx.c: $(FMCB_COMPAT_DIR)/%.irx
 	@test -f $< || { echo "Missing FMCB compatibility IRX: $<"; echo "Stage PS2DEV v1.0 IOP modules before building."; exit 1; }
