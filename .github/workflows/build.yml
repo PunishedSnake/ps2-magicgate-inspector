@@ -29,8 +29,11 @@ on:
 permissions:
   contents: read
 
+# PR CI is temporarily pointed at ps2sdk14 so the experimental backend can be
+# validated on hardware before deciding which security profile should become
+# Briscoe's default. workflow_dispatch still allows either profile explicitly.
 env:
-  SECR_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.secr_profile || 'fmcb13' }}
+  SECR_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.secr_profile || 'ps2sdk14' }}
 
 jobs:
   build:
