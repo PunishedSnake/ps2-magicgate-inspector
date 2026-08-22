@@ -1,111 +1,44 @@
-name: Build PS2 Memory Card Inspector
+name: Apply 0.4 settings and marquee patch
 
 on:
-  workflow_dispatch:
   pull_request:
     branches: [ main ]
     paths:
-      - 'src/**'
-      - 'tools/**'
-      - 'docs/**'
-      - 'Makefile'
+      - 'tools/apply_settings_marquee.py'
       - '.github/workflows/build.yml'
-      - 'LICENSE'
-      - 'CREDITS.md'
-      - 'THIRD_PARTY_NOTICES.md'
-      - 'licenses/**'
-  push:
-    branches:
-      - main
-      - feat/0.4.0
-    paths:
-      - 'src/**'
-      - 'tools/**'
-      - 'docs/**'
-      - 'Makefile'
-      - '.github/workflows/build.yml'
-      - 'LICENSE'
-      - 'CREDITS.md'
-      - 'THIRD_PARTY_NOTICES.md'
-      - 'licenses/**'
+      - 'tools/APPLY_SETTINGS_MARQUEE'
+      - '.github/workflows/one-shot-settings-marquee.yml'
 
 permissions:
-  contents: read
-
-env:
-  PS2SDK_SECURITY_COMMIT: a13b5971ec0e39c7ba8b8559b80a4e81c8425352
+  contents: write
 
 jobs:
-  build:
+  patch:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/0.4.0'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
     steps:
-      - name: Checkout repository
+      - name: Checkout feature branch
         uses: actions/checkout@v4
-
-      - name: Verify host Docker
-        shell: bash
-        run: docker --version
-
-      - name: Stage PS2SDK 2.0 MagicGate stack
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p .build/ps2sdk2-mg .build/ps2sdk2-secr14
-          docker pull ps2dev/ps2dev:v2.0.0
-          docker run --rm \
-            -v "$GITHUB_WORKSPACE:/work" \
-            -w /work \
-            -e PS2SDK_SECURITY_COMMIT="$PS2SDK_SECURITY_COMMIT" \
-            ps2dev/ps2dev:v2.0.0 \
-            sh -c 'set -eu; apk add --no-cache git python3 build-base >/dev/null; for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/ps2sdk2-mg/$f"; done; git init -q /tmp/ps2sdk-src; git -C /tmp/ps2sdk-src remote add origin https://github.com/ps2dev/ps2sdk.git; git -C /tmp/ps2sdk-src fetch -q --depth 1 origin "$PS2SDK_SECURITY_COMMIT"; git -C /tmp/ps2sdk-src checkout -q FETCH_HEAD; python3 /work/tools/patch_secrman14_diag.py /tmp/ps2sdk-src/iop/security/secrman; PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrman clean all; PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrsif clean all; cp /tmp/ps2sdk-src/iop/security/secrman/irx/secrman.irx /work/.build/ps2sdk2-secr14/secrman.irx; cp /tmp/ps2sdk-src/iop/security/secrsif/irx/secrsif.irx /work/.build/ps2sdk2-secr14/secrsif.irx'
-          sha256sum .build/ps2sdk2-mg/*.irx .build/ps2sdk2-secr14/*.irx
-
-      - name: Build standalone ELF in PS2DEV v2.0.0
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker pull ps2dev/ps2dev:v2.0.0
-          docker run --rm \
-            -v "$GITHUB_WORKSPACE:/work" \
-            -w /work \
-            ps2dev/ps2dev:v2.0.0 \
-            sh -c 'set -eu; apk add --no-cache build-base >/dev/null; mips64r5900el-ps2-elf-gcc --version; make'
-
-      - name: Assemble development artifact
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts/licenses
-          cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR.ELF
-          cp LICENSE artifacts/LICENSE
-          cp CREDITS.md artifacts/CREDITS.md
-          cp THIRD_PARTY_NOTICES.md artifacts/THIRD_PARTY_NOTICES.md
-          cp README.md artifacts/README.md
-          cp licenses/PS2SDK-AFL-2.0.txt artifacts/licenses/PS2SDK-AFL-2.0.txt
-          {
-            echo "PS2 Memory Card Inspector 0.4.0 development"
-            echo "Project revision: $GITHUB_SHA"
-            echo "Frontend: configurable Native / 480p / 576p / 720p / 1080i GS dashboard"
-            echo "Installer: verified normal-install transaction with space simulation, persistent USB recovery journal and card identity marker"
-            echo "Region policy: ROMVER + read-only MechaCon/MechaPwn profiling; unsafe Deckard CEX one-region installs are blocked"
-            echo "PS2SDK security source: https://github.com/ps2dev/ps2sdk/commit/$PS2SDK_SECURITY_COMMIT"
-            echo "SECRMAN: PS2SDK 2.0 module version 1.4, instrumented by tools/patch_secrman14_diag.py"
-          } > artifacts/SOURCE_PROVENANCE.txt
-
-      - name: Verify output
-        shell: bash
-        run: |
-          set -euo pipefail
-          file artifacts/MC_INSPECTOR.ELF
-          ls -lh artifacts/MC_INSPECTOR.ELF
-          sha256sum artifacts/MC_INSPECTOR.ELF | tee artifacts/SHA256SUMS.txt
-
-      - name: Upload development build
-        uses: actions/upload-artifact@v4
         with:
-          name: PS2-Memory-Card-Inspector-0.4.0-dev-${{ github.sha }}
-          path: artifacts/
-          if-no-files-found: error
-          retention-days: 30
+          ref: feat/0.4.0
+          fetch-depth: 0
+
+      - name: Apply patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/apply_settings_marquee.py
+          git diff --check
+          git diff --stat
+
+      - name: Commit patch and restore normal CI
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git show HEAD^:.github/workflows/build.yml > .github/workflows/build.yml
+          git rm -f tools/apply_settings_marquee.py tools/APPLY_SETTINGS_MARQUEE .github/workflows/one-shot-settings-marquee.yml
+          git add src/settings.h src/settings.c src/fmcb_transaction.h src/fmcb_transaction.c src/gui.h src/gui.c src/app_main.c .github/workflows/build.yml
+          git commit -m 'feat(ui): add verify policies and marquee overflow text'
+          git push origin HEAD:feat/0.4.0
