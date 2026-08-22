@@ -1,16 +1,15 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * PS2 Memory Card Inspector 0.3.0 development controller.
+ * PS2 Memory Card Inspector 0.4.0 development controller.
  *
- * 0.2.0 established the hardware behavior. This controller keeps that IOP /
- * MagicGate architecture intact while replacing the libdebug text dashboard
- * with the native Graphics Synthesizer frontend in gui.c.
+ * The 0.3 line established the tested navigation and diagnostic boundaries.
+ * 0.4 retains them while adding a Settings page, selectable filesystem stress
+ * depth and runtime display modes adapted from fhdb-bootstrap-manager 0.4.3.
  *
- * 0.3.0-dev5 keeps navigation and diagnostics orthogonal: UP/DOWN selects the
- * physical memory-card slot, L1/R1 selects the previous/next result page, and
- * CROSS runs only the diagnostic represented by the current page. Holding L2
- * while pressing CROSS runs the complete read-only filesystem -> MagicGate ->
- * FMCB preflight sequence for the selected slot.
+ * Navigation remains orthogonal to I/O: UP/DOWN selects a card on diagnostic
+ * pages, L1/R1 selects a page, CROSS runs only that page's diagnostic, and
+ * L2+CROSS runs the complete read-only diagnostic sequence. Settings consumes
+ * UP/DOWN/LEFT/RIGHT locally and never starts card I/O merely by being edited.
  */
 
 #include <tamtypes.h>
@@ -36,8 +35,10 @@
 #include "fmcb_install.h"
 #include "gui.h"
 #include "progress.h"
+#include "settings.h"
 
 #define SLOT_COUNT 2
+#define SETTINGS_ROW_COUNT 4
 
 extern unsigned char secrman_irx[];
 extern unsigned int size_secrman_irx;
@@ -56,6 +57,7 @@ static MagicGateReport MgReports[SLOT_COUNT];
 static MagicGateIopStatus MgIopStatus;
 static FmcbMassBackendStatus FmcbMassStatus;
 static FmcbPackageReport FmcbReports[SLOT_COUNT];
+static MciSettings Settings;
 static int PadActive;
 
 static int LoadRomModule(const char *path)
@@ -69,11 +71,6 @@ static int LoadEmbeddedModule(void *data, unsigned int size)
     return SifExecModuleBuffer(data, size, 0, NULL, &start_rc);
 }
 
-/*
- * Normal application personality: the Sony ROM X stack remains the only stack
- * used for ordinary filesystem work. This is unchanged from the hardware-
- * validated 0.2.0 release.
- */
 static int InitNormalCardStack(void)
 {
     int rc;
@@ -125,7 +122,6 @@ static void ShutdownNormalClients(void)
     }
 }
 
-/* Generate the minimal IOPRP used by the isolated SECRMAN 1.4 session. */
 static int RebootIopWithSecrman(void)
 {
     struct ioprpgen_ctx ctx;
@@ -177,11 +173,6 @@ static int RebootIopWithSecrman(void)
     return 0;
 }
 
-/*
- * Security personality: PS2SDK 2.0 SECRMAN 1.4 + matching SIO2/PAD/MCMAN.
- * MCSERV is deliberately passed through the existing wrapper, which skips its
- * actual start while keeping MCMAN resident for CardAuth callbacks.
- */
 static int InitMagicGateSession(MagicGateReport *report)
 {
     int rc;
@@ -266,12 +257,11 @@ static int RestoreNormalEnvironment(void)
                       "Normal memory-card services are back",
                       "Real libmc and controller clients are active again. Reconnecting the optional USB package backend.");
     fmcb_rc = FmcbInitMassBackend(&FmcbMassStatus);
-    (void)fmcb_rc; /* mass: is optional; package page exposes availability. */
+    (void)fmcb_rc;
 
     MciProgressUpdate(MCI_PROGRESS_ENVIRONMENT, 92,
                       "Restoring the dashboard without implicit card tests",
-                      "The normal card stack is ready. Existing filesystem results are preserved; no 4 KiB integrity test is run unless the user explicitly selects CARD and presses CROSS.");
-
+                      "The normal card stack is ready. Existing filesystem results are preserved; no integrity test is run unless the user explicitly requests it.");
     MciProgressUpdate(MCI_PROGRESS_ENVIRONMENT, 100,
                       "Normal environment restored",
                       "Sony ROM X card services, controller input and optional mass: access have been rebuilt successfully.");
@@ -297,18 +287,16 @@ static int RunMagicGateSession(int target_port)
     ShutdownNormalClients();
 
     rc = InitMagicGateSession(report);
-    if (rc < 0) {
+    if (rc < 0)
         report->result = MG_RESULT_SESSION_SETUP_FAILED;
-    } else {
+    else
         MagicGateProbePrepared(target_port, &kelf, report);
-    }
 
     snprintf(detail, sizeof(detail),
              "Security result so far: %s. Releasing the RAM KELF and restoring the normal Sony ROM X environment.",
              MagicGateResultText(report->result));
     MciProgressUpdate(MCI_PROGRESS_MAGICGATE, 93,
                       "Security transaction finished", detail);
-
     MagicGateReleaseKelf(&kelf);
 
     restore_rc = RestoreNormalEnvironment();
@@ -347,7 +335,11 @@ static void ResetSlotReports(int port)
     FmcbResetPackageReport(&FmcbReports[port], port);
 }
 
-/* Run only the diagnostic represented by the currently visible result page. */
+static unsigned int CurrentFsTestBytes(void)
+{
+    return MciFsTestProfileBytes(Settings.fs_profile);
+}
+
 static void RunSelectedPageTest(int target_port, MciGuiPage page)
 {
     switch (page) {
@@ -358,27 +350,28 @@ static void RunSelectedPageTest(int target_port, MciGuiPage page)
             (void)FmcbProbeMassPackage(target_port, &FmcbMassStatus,
                                        &FmcbReports[target_port]);
             break;
+        case MCI_GUI_SETTINGS:
+            break;
         case MCI_GUI_CARD:
         default:
-            CardInspect(target_port, &Reports[target_port]);
+            CardInspectSized(target_port, &Reports[target_port],
+                             CurrentFsTestBytes());
             break;
     }
 }
 
-/* L2+CROSS is the explicit convenience path for all read-only diagnostics. */
 static void RunSelectedFullScan(int target_port)
 {
     char detail[192];
 
     snprintf(detail, sizeof(detail),
-             "Running the complete read-only diagnostic sequence for mc%d: filesystem integrity, MagicGate/CardAuth and FMCB package preflight.",
-             target_port);
+             "Running the complete read-only diagnostic sequence for mc%d using the %s filesystem profile, then MagicGate/CardAuth and FMCB package preflight.",
+             target_port, MciFsTestProfileName(Settings.fs_profile));
     MciGuiRenderMessage("Full card scan", detail, NULL, MCI_GUI_TONE_INFO);
 
     MagicGateResetReport(&MgReports[target_port], target_port);
     FmcbResetPackageReport(&FmcbReports[target_port], target_port);
-
-    CardInspect(target_port, &Reports[target_port]);
+    CardInspectSized(target_port, &Reports[target_port], CurrentFsTestBytes());
 
     if (Reports[target_port].type == MC_TYPE_PS2) {
         (void)RunMagicGateSession(target_port);
@@ -419,17 +412,44 @@ static u32 ReadPadPressed(u32 *held)
 }
 
 static void RenderDashboard(int selected, MciGuiPage page,
+                            int settings_row, int last_video_rc,
                             int confirm_format, int last_format_rc)
 {
     MciGuiRenderDashboard(selected, page, Reports, MgReports, &MgIopStatus,
-                          &FmcbMassStatus, FmcbReports,
+                          &FmcbMassStatus, FmcbReports, &Settings,
+                          settings_row, last_video_rc,
                           confirm_format, last_format_rc);
+}
+
+static void ChangeSetting(int row, int direction)
+{
+    if (row == 0) {
+        int value = (int)Settings.video_mode + direction;
+        if (value < 0)
+            value = (int)MCI_VIDEO_MODE_COUNT - 1;
+        if ((unsigned int)value >= MCI_VIDEO_MODE_COUNT)
+            value = 0;
+        Settings.video_mode = (MciVideoMode)value;
+    } else if (row == 1) {
+        int value = (int)Settings.fs_profile + direction;
+        if (value < 0)
+            value = (int)MCI_FS_TEST_PROFILE_COUNT - 1;
+        if (value >= (int)MCI_FS_TEST_PROFILE_COUNT)
+            value = 0;
+        Settings.fs_profile = (MciFsTestProfile)value;
+    } else if (row == 2) {
+        Settings.preserve_existing_cnfs ^= 1;
+    }
+    /* Row 3 is intentionally not toggleable. Full installer verification is
+     * a safety invariant, not an attractive checkbox for impatient humans. */
 }
 
 int main(int argc, char *argv[])
 {
     int selected = 0;
     MciGuiPage page = MCI_GUI_CARD;
+    int settings_row = 0;
+    int last_video_rc = -999;
     int confirm_format = 0;
     int last_format_rc = -999;
     int init_rc;
@@ -441,11 +461,12 @@ int main(int argc, char *argv[])
     (void)argc;
     (void)argv;
 
-    /* Keep the same CRT bootstrap that proved reliable in the HDD manager. */
+    MciSettingsDefaults(&Settings);
+
     init_scr();
     if (MciGuiInit() < 0) {
         scr_clear();
-        scr_printf("PS2 Memory Card Inspector 0.3.0-dev5\n\n");
+        scr_printf("PS2 Memory Card Inspector 0.4.0-dev1\n\n");
         scr_printf("GS frontend initialization failed.\n");
         SleepThread();
     }
@@ -461,21 +482,19 @@ int main(int argc, char *argv[])
         SleepThread();
     }
 
-    /* Start neutral: diagnostics run only when CROSS is explicitly pressed. */
     ResetSlotReports(0);
     ResetSlotReports(1);
-
     fmcb_rc = FmcbInitMassBackend(&FmcbMassStatus);
     (void)fmcb_rc;
 
     while (1) {
         if (dirty) {
-            RenderDashboard(selected, page, confirm_format, last_format_rc);
+            RenderDashboard(selected, page, settings_row, last_video_rc,
+                            confirm_format, last_format_rc);
             dirty = 0;
         }
 
         pressed = ReadPadPressed(&held);
-
         if (pressed & PAD_SELECT)
             break;
 
@@ -492,7 +511,24 @@ int main(int argc, char *argv[])
                 dirty = 1;
             }
         } else {
-            if (pressed & (PAD_UP | PAD_DOWN)) {
+            if (page == MCI_GUI_SETTINGS) {
+                if (pressed & PAD_UP) {
+                    settings_row = settings_row == 0
+                                       ? SETTINGS_ROW_COUNT - 1
+                                       : settings_row - 1;
+                    dirty = 1;
+                } else if (pressed & PAD_DOWN) {
+                    settings_row = (settings_row + 1) % SETTINGS_ROW_COUNT;
+                    dirty = 1;
+                }
+                if (pressed & PAD_LEFT) {
+                    ChangeSetting(settings_row, -1);
+                    dirty = 1;
+                } else if (pressed & PAD_RIGHT) {
+                    ChangeSetting(settings_row, 1);
+                    dirty = 1;
+                }
+            } else if (pressed & (PAD_UP | PAD_DOWN)) {
                 selected ^= 1;
                 last_format_rc = -999;
                 dirty = 1;
@@ -509,14 +545,22 @@ int main(int argc, char *argv[])
             }
 
             if (pressed & PAD_CROSS) {
-                if (held & PAD_L2)
+                if (page == MCI_GUI_SETTINGS) {
+                    if (settings_row == 0) {
+                        last_video_rc = MciGuiApplyVideoMode(Settings.video_mode);
+                        if (last_video_rc < 0)
+                            Settings.video_mode = MciGuiCurrentVideoMode();
+                    }
+                } else if (held & PAD_L2) {
                     RunSelectedFullScan(selected);
-                else
+                } else {
                     RunSelectedPageTest(selected, page);
+                }
                 dirty = 1;
             }
 
-            if ((pressed & PAD_TRIANGLE) && Reports[selected].format_allowed) {
+            if ((pressed & PAD_TRIANGLE) &&
+                page != MCI_GUI_SETTINGS && Reports[selected].format_allowed) {
                 confirm_format = 1;
                 page = MCI_GUI_CARD;
                 dirty = 1;
