@@ -12,6 +12,7 @@
 
 #include <tamtypes.h>
 #include <sifrpc.h>
+#include <libsecr-common.h>
 #include <secrsif.h>
 #include <delaythread.h>
 #include <stdio.h>
@@ -182,7 +183,7 @@ int __wrap_sceSifBindRpc(SifRpcClientData_t *cd, int sid, int mode)
 {
     int rc = __real_sceSifBindRpc(cd, sid, mode);
 
-    if (sid == SECRSIF_DOWNLOAD_GET_KBIT && rc >= 0 && cd->server != NULL) {
+    if ((unsigned int)sid == SECRSIF_DOWNLOAD_GET_KBIT && rc >= 0 && cd->server != NULL) {
         KbitClient = cd;
         ResetTraceState();
     }
