@@ -8,6 +8,11 @@
  * target before any FMCB destination is modified. The matching token is also
  * stored beside the USB journal. Recovery from a later boot must prove both
  * copies match before restoring anything.
+ *
+ * The three lifecycle wrappers at the bottom keep marker ordering attached to
+ * the journal API itself: begin -> arm card, successful finish -> clear marker,
+ * successful rollback -> clear marker. This is the same linker-wrapper pattern
+ * already used by the MagicGate session and keeps the transaction core boring.
  */
 
 #define NEWLIB_PORT_AWARE
@@ -275,4 +280,62 @@ int FmcbRecoveryClearCardMarker(const FmcbRecoveryStatus *status,
     (void)fileXioRemove(token_path);
     (void)fileXioRmdir(status->recovery_root);
     return 0;
+}
+
+/* Journal lifecycle wrappers. The core recovery implementation deliberately
+ * knows nothing about the card marker; linking these wrappers makes the safety
+ * invariant unavoidable for all current installer callers. */
+int __real_FmcbRecoveryBegin(const FmcbPackageReport *package,
+                             FmcbRecoveryStatus *status);
+int __real_FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc);
+int __real_FmcbRecoveryFinish(FmcbRecoveryStatus *status);
+
+int __wrap_FmcbRecoveryBegin(const FmcbPackageReport *package,
+                             FmcbRecoveryStatus *status)
+{
+    FmcbRecoveryStatus saved;
+    int rollback_rc = 0;
+    int rc;
+
+    rc = __real_FmcbRecoveryBegin(package, status);
+    if (rc < 0)
+        return rc;
+    saved = *status;
+    rc = FmcbRecoveryArmCard(status, status->target_port);
+    if (rc < 0) {
+        /* No FMCB destination has been touched yet. Remove the empty journal
+         * and any partially-created marker artifacts so the failure is clean. */
+        (void)__real_FmcbRecoveryRun(status, &rollback_rc);
+        (void)FmcbRecoveryClearCardMarker(&saved, saved.target_port);
+        return rc;
+    }
+    return 0;
+}
+
+int __wrap_FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc)
+{
+    FmcbRecoveryStatus saved;
+    int rc;
+
+    if (status == NULL)
+        return -1;
+    saved = *status;
+    rc = __real_FmcbRecoveryRun(status, rollback_rc);
+    if (rc == 0)
+        (void)FmcbRecoveryClearCardMarker(&saved, saved.target_port);
+    return rc;
+}
+
+int __wrap_FmcbRecoveryFinish(FmcbRecoveryStatus *status)
+{
+    FmcbRecoveryStatus saved;
+    int rc;
+
+    if (status == NULL)
+        return -1;
+    saved = *status;
+    rc = __real_FmcbRecoveryFinish(status);
+    if (rc == 0)
+        (void)FmcbRecoveryClearCardMarker(&saved, saved.target_port);
+    return rc;
 }
