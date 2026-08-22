@@ -1,20 +1,21 @@
 name: Apply one-shot GS regression fix
 
 on:
-  push:
-    branches:
-      - feat/0.4.0
+  pull_request:
+    branches: [ main ]
     paths:
       - 'tools/APPLY_GUI_VRAM_FIX'
+      - '.github/workflows/one-shot-gui-vram-fix.yml'
 
 permissions:
   contents: write
 
 jobs:
   patch:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/0.4.0'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout branch
+      - name: Checkout feature branch
         uses: actions/checkout@v4
         with:
           ref: feat/0.4.0
