@@ -1,14 +1,18 @@
 .DEFAULT_GOAL := MC_INSPECTOR.ELF
 
 EE_BIN = MC_INSPECTOR.ELF
-EE_OBJS = src/main.o src/card.o src/magicgate.o src/fmcb_install.o src/dev10_nomcserv.o
+EE_OBJS = src/main.o src/card.o src/magicgate.o src/fmcb_install.o src/dev10_nomcserv.o src/dev11_trace.o
 EE_LIBS = -ldebug -lpad -lmc -lfileXio -lioprpgen -liopreboot -lpatches -lkernel
 EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections
 EE_LDFLAGS = -Wl,--gc-sections \
 	-Wl,--wrap=SifExecModuleBuffer \
 	-Wl,--wrap=mcInit \
 	-Wl,--wrap=mcGetInfo \
-	-Wl,--wrap=mcSync
+	-Wl,--wrap=mcSync \
+	-Wl,--wrap=sceSifBindRpc \
+	-Wl,--wrap=sceSifCallRpc \
+	-Wl,--wrap=MagicGateResultText \
+	-Wl,--wrap=MagicGateStageText
 
 # Briscoe dev11 keeps the hardware-validated Sony ROM X stack for ordinary
 # Inspector work and the dev10 no-MCSERV isolated MagicGate personality.
