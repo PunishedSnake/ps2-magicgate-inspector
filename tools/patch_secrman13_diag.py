@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Instrument the pinned FMCB SECRMAN 1.3 GET_KBIT path.
+"""Instrument the pinned FreeMcBoot compatibility SECRMAN GET_KBIT path.
 
-Successful behavior is unchanged. On GET_KBIT failure only, the 16-byte Kbit
-reply is replaced by the compact diagnostic record consumed by
+The patch is applied to a temporary upstream checkout at build time; no copy of
+that upstream SECRMAN source is vendored in this repository. Successful
+SecrDownloadGetKbit() behavior is unchanged. On failure only, the returned
+16-byte Kbit buffer becomes the compact diagnostic record consumed by
 src/magicgate_diag.c.
+
+The record format intentionally matches tools/patch_secrman14_diag.py so the
+hardware-validated compatibility backend and PS2SDK 2.0 SECRMAN 1.4 can be
+compared with the same EE-side decoder.
 """
 
 import pathlib
@@ -67,7 +73,8 @@ include_marker = '#include "CardAuth.h"\n'
 if include_marker not in card:
     raise SystemExit("CardAuth include marker not found")
 card = card.replace(include_marker, include_marker + r'''
-/* Briscoe: exact in-path GET_KBIT diagnostics. */
+/* PS2 Memory Card Inspector build-time diagnostics. Capture only the transfer
+ * that belongs to the real GET_KBIT path; no CardAuth command is replayed. */
 extern volatile int mgdiag_command;
 extern volatile int mgdiag_transfer_rc;
 extern volatile unsigned int mgdiag_stat6c;
@@ -88,6 +95,8 @@ if insert_marker not in secr:
     raise SystemExit("SECRMAN globals marker not found")
 secr = secr.replace(insert_marker, insert_marker + r'''
 
+/* Failed-GET_KBIT diagnostic state. Successful SECRMAN behavior is unchanged;
+ * this state is serialized into the otherwise unusable Kbit reply on failure. */
 volatile int mgdiag_command;
 volatile int mgdiag_transfer_rc;
 volatile unsigned int mgdiag_stat6c;
@@ -133,7 +142,7 @@ static void MgDiagEncodeFailure(void *kbit, unsigned char stage,
     unsigned int s=mgdiag_stat6c;
     d[0]=0xD2;
     d[1]=0x12;
-    d[2]=stage;
+    d[2]=stage; /* 1/2 = Mechacon half 0/1, 3/4 = CardAuth half 0/1 */
     d[3]=(mgdiag_command<0)?0xFF:(unsigned char)mgdiag_command;
     d[4]=(stage>=3)?MgDiagCardReason():0;
     d[5]=(unsigned char)mgdiag_transfer_rc;
@@ -186,4 +195,4 @@ new_get_kbit = r'''int SecrDownloadGetKbit(int port, int slot, void *kbit){
 secr = replace_function(secr, "int SecrDownloadGetKbit(", new_get_kbit)
 secrman_path.write_text(secr)
 
-print("SECRMAN 1.3 MagicGate instrumentation applied")
+print("FMCB compatibility SECRMAN MagicGate instrumentation applied")
