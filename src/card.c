@@ -1,26 +1,28 @@
 /*
- * PS2 Memory Card Inspector - ordinary memory-card diagnostics
+ * PS2 Memory Card Inspector - ordinary filesystem diagnostics
  *
- * This module owns the XMCMAN/filesystem side of the Inspector.  MagicGate is
- * intentionally separate: a card may be a perfectly healthy PS2 memory card
- * while still behaving differently during SECR/KELF binding.
+ * This module intentionally knows nothing about the isolated SECR/MagicGate
+ * personality. It runs against the normal Sony ROM X memory-card stack and
+ * answers a separate question: is the card usable as a PS2 filesystem and can
+ * a small temporary file survive create/write/flush/reopen/read/delete?
+ *
+ * MagicGate capability is reported independently so a healthy third-party card
+ * without CardAuth support is not mislabeled as a broken filesystem.
  */
 
 #define NEWLIB_PORT_AWARE
 
 #include <tamtypes.h>
 #include <libmc.h>
-#include <io_common.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "card.h"
 
-#define TEST_SIZE 4096
+#define CARD_RW_SIZE 4096
 
-static unsigned char WriteBuffer[TEST_SIZE] __attribute__((aligned(64)));
-static unsigned char ReadBuffer[TEST_SIZE] __attribute__((aligned(64)));
-static sceMcTblGetDir DirEntry __attribute__((aligned(64)));
+static unsigned char WriteBuffer[CARD_RW_SIZE] __attribute__((aligned(64)));
+static unsigned char ReadBuffer[CARD_RW_SIZE] __attribute__((aligned(64)));
 
 static int McSyncResult(void)
 {
@@ -29,302 +31,271 @@ static int McSyncResult(void)
     return result;
 }
 
-static void FillPattern(void)
-{
-    unsigned int i;
-    unsigned int state = 0x4D43494Eu; /* "MCIN" */
-
-    for (i = 0; i < sizeof(WriteBuffer); i++) {
-        state = state * 1664525u + 1013904223u;
-        WriteBuffer[i] = (unsigned char)((state >> 24) ^ i ^ (i >> 4));
-    }
-}
-
-static int CloseFile(int fd)
-{
-    mcClose(fd);
-    return McSyncResult();
-}
-
-static int DeleteFile(int port, const char *name)
-{
-    mcDelete(port, 0, name);
-    return McSyncResult();
-}
-
-static int FindUnusedTempName(int port, char *name)
+static void FillPattern(unsigned char *buffer, int size, int port)
 {
     int i;
-    int rc;
+    unsigned int x = 0x4D434900u ^ (unsigned int)port;
 
-    for (i = 0; i < 100; i++) {
-        sprintf(name, "/__MCI%02d.TMP", i);
-        memset(&DirEntry, 0, sizeof(DirEntry));
-        mcGetDir(port, 0, name, 0, 1, &DirEntry);
-        rc = McSyncResult();
-
-        if (rc == 0 || rc == sceMcResNoEntry)
-            return 0;
-        if (rc < 0)
-            return rc;
+    for (i = 0; i < size; i++) {
+        x = x * 1664525u + 1013904223u;
+        buffer[i] = (unsigned char)((x >> 24) ^ i ^ (port * 0x5A));
     }
-
-    return -1000;
 }
 
-static int VerifySameCard(int port)
+static int OpenRoot(int port)
 {
-    int type = 0;
-    int free_clusters = 0;
-    int formatted = 0;
-
-    mcGetInfo(port, 0, &type, &free_clusters, &formatted);
-    return McSyncResult();
-}
-
-static int RunReadWriteTest(int port, int *cleanup_rc, RwStage *stage)
-{
-    char path[24];
+    char path[16];
     int fd;
     int rc;
 
-    *cleanup_rc = 0;
-    *stage = RW_FIND_NAME;
-    FillPattern();
-    memset(ReadBuffer, 0, sizeof(ReadBuffer));
-
-    rc = FindUnusedTempName(port, path);
+    snprintf(path, sizeof(path), "mc%d:/", port);
+    mcOpen(port, 0, path + 4, O_RDONLY);
+    rc = McSyncResult();
     if (rc < 0)
         return rc;
 
-    *stage = RW_VERIFY_CARD;
-    rc = VerifySameCard(port);
-    if (rc != sceMcResSucceed)
-        return rc;
+    fd = rc;
+    mcClose(fd);
+    rc = McSyncResult();
+    return rc < 0 ? rc : 0;
+}
 
-    /* libmc passes IOP open flags directly to XMCMAN: always use FIO_O_*. */
-    *stage = RW_OPEN_WRITE;
-    mcOpen(port, 0, path, FIO_O_WRONLY | FIO_O_CREAT);
-    fd = McSyncResult();
-    if (fd < 0)
-        return fd;
+static int DeleteIfPresent(int port, const char *name)
+{
+    int rc;
 
-    *stage = RW_WRITE;
+    mcDelete(port, 0, name);
+    rc = McSyncResult();
+    if (rc == sceMcResNoEntry)
+        return 0;
+    return rc;
+}
+
+static int RunRwTest(int port, CardReport *report)
+{
+    char name[32];
+    int fd = -1;
+    int rc;
+    int i;
+
+    snprintf(name, sizeof(name), "/__MCI%d.TMP", port);
+    report->rw_stage = CARD_RW_CREATE;
+    report->cleanup_rc = DeleteIfPresent(port, name);
+    if (report->cleanup_rc < 0)
+        return report->cleanup_rc;
+
+    FillPattern(WriteBuffer, sizeof(WriteBuffer), port);
+    memset(ReadBuffer, 0, sizeof(ReadBuffer));
+
+    mcOpen(port, 0, name, O_CREAT | O_TRUNC | O_RDWR);
+    rc = McSyncResult();
+    if (rc < 0)
+        goto cleanup;
+    fd = rc;
+
+    report->rw_stage = CARD_RW_WRITE;
     mcWrite(fd, WriteBuffer, sizeof(WriteBuffer));
     rc = McSyncResult();
     if (rc != (int)sizeof(WriteBuffer)) {
-        CloseFile(fd);
-        *cleanup_rc = DeleteFile(port, path);
-        return (rc < 0) ? rc : -1001;
+        if (rc >= 0)
+            rc = -1001;
+        goto cleanup;
     }
 
-    *stage = RW_FLUSH;
+    report->rw_stage = CARD_RW_FLUSH;
     mcFlush(fd);
     rc = McSyncResult();
-    if (rc < 0) {
-        CloseFile(fd);
-        *cleanup_rc = DeleteFile(port, path);
-        return rc;
-    }
+    if (rc < 0)
+        goto cleanup;
 
-    *stage = RW_CLOSE_WRITE;
-    rc = CloseFile(fd);
-    if (rc < 0) {
-        *cleanup_rc = DeleteFile(port, path);
-        return rc;
-    }
+    mcClose(fd);
+    rc = McSyncResult();
+    fd = -1;
+    if (rc < 0)
+        goto cleanup;
 
-    *stage = RW_OPEN_READ;
-    mcOpen(port, 0, path, FIO_O_RDONLY);
-    fd = McSyncResult();
-    if (fd < 0) {
-        *cleanup_rc = DeleteFile(port, path);
-        return fd;
-    }
+    report->rw_stage = CARD_RW_REOPEN;
+    mcOpen(port, 0, name, O_RDONLY);
+    rc = McSyncResult();
+    if (rc < 0)
+        goto cleanup;
+    fd = rc;
 
-    *stage = RW_READ;
+    report->rw_stage = CARD_RW_READ;
     mcRead(fd, ReadBuffer, sizeof(ReadBuffer));
     rc = McSyncResult();
     if (rc != (int)sizeof(ReadBuffer)) {
-        CloseFile(fd);
-        *cleanup_rc = DeleteFile(port, path);
-        return (rc < 0) ? rc : -1002;
+        if (rc >= 0)
+            rc = -1002;
+        goto cleanup;
     }
 
-    *stage = RW_CLOSE_READ;
-    rc = CloseFile(fd);
-    if (rc < 0) {
-        *cleanup_rc = DeleteFile(port, path);
-        return rc;
-    }
-
-    *stage = RW_COMPARE;
-    if (memcmp(WriteBuffer, ReadBuffer, sizeof(WriteBuffer)) != 0) {
-        *cleanup_rc = DeleteFile(port, path);
-        return -1003;
-    }
-
-    *stage = RW_DELETE;
-    *cleanup_rc = DeleteFile(port, path);
-    if (*cleanup_rc < 0)
-        return -1004;
-
-    *stage = RW_VERIFY_DELETE;
-    memset(&DirEntry, 0, sizeof(DirEntry));
-    mcGetDir(port, 0, path, 0, 1, &DirEntry);
+    mcClose(fd);
     rc = McSyncResult();
-    if (rc != 0 && rc != sceMcResNoEntry)
-        return -1005;
+    fd = -1;
+    if (rc < 0)
+        goto cleanup;
 
-    *stage = RW_DONE;
+    report->rw_stage = CARD_RW_COMPARE;
+    for (i = 0; i < (int)sizeof(WriteBuffer); i++) {
+        if (WriteBuffer[i] != ReadBuffer[i]) {
+            rc = -1003;
+            goto cleanup;
+        }
+    }
+
+    report->rw_stage = CARD_RW_DELETE;
+    mcDelete(port, 0, name);
+    rc = McSyncResult();
+    if (rc < 0)
+        goto cleanup;
+
+    report->rw_stage = CARD_RW_VERIFY_DELETE;
+    mcOpen(port, 0, name, O_RDONLY);
+    rc = McSyncResult();
+    if (rc != sceMcResNoEntry) {
+        if (rc >= 0) {
+            fd = rc;
+            rc = -1004;
+        }
+        goto cleanup;
+    }
+
+    report->cleanup_rc = 0;
+    report->rw_stage = CARD_RW_DONE;
     return 0;
+
+cleanup:
+    if (fd >= 0) {
+        mcClose(fd);
+        McSyncResult();
+    }
+    report->cleanup_rc = DeleteIfPresent(port, name);
+    return rc;
 }
 
-void CardInspect(int port, CardReport *r)
+void CardInspect(int port, CardReport *report)
 {
-    memset(r, 0, sizeof(*r));
-    r->port = port;
-    r->root_rc = -999;
-    r->rw_rc = -999;
-    r->cleanup_rc = 0;
-    r->rw_stage = RW_NOT_RUN;
-    r->health = CARD_UNKNOWN;
+    int rc;
 
-    mcGetInfo(port, 0, &r->type, &r->free_clusters, &r->formatted);
-    r->info_rc = McSyncResult();
+    memset(report, 0, sizeof(*report));
+    report->port = port;
+    report->info_rc = -999;
+    report->root_rc = -999;
+    report->rw_rc = -999;
+    report->cleanup_rc = -999;
+    report->rw_stage = CARD_RW_NOT_RUN;
+    report->health = CARD_HEALTH_UNKNOWN;
 
-    if (r->info_rc == sceMcResFailAuth) {
-        r->health = CARD_AUTH_FAILURE;
-        return;
-    }
-    if (r->info_rc <= sceMcResFailDetect) {
-        r->health = CARD_DETECT_FAILURE;
-        return;
-    }
-    if (r->type == MC_TYPE_NONE) {
-        r->health = CARD_NO_CARD;
-        return;
-    }
-    if (r->info_rc == sceMcResNoFormat || !r->formatted) {
-        r->health = CARD_UNFORMATTED;
-        r->format_allowed = (r->type == MC_TYPE_PS2);
+    mcGetInfo(port, 0, &report->type, &report->free_clusters,
+              &report->formatted);
+    report->info_rc = McSyncResult();
+
+    if (report->info_rc == sceMcResNoEntry || report->type == MC_TYPE_NONE) {
+        report->health = CARD_HEALTH_NO_CARD;
         return;
     }
 
-    memset(&DirEntry, 0, sizeof(DirEntry));
-    mcGetDir(port, 0, "/*", 0, 1, &DirEntry);
-    r->root_rc = McSyncResult();
-
-    if (r->root_rc == sceMcResNoFormat) {
-        r->health = CARD_FILESYSTEM_BROKEN;
-        r->format_allowed = (r->type == MC_TYPE_PS2);
-        return;
-    }
-    if (r->root_rc == sceMcResFailAuth) {
-        r->health = CARD_AUTH_FAILURE;
-        return;
-    }
-    if (r->root_rc <= sceMcResFailDetect) {
-        r->health = CARD_DETECT_FAILURE;
-        return;
-    }
-    if (r->root_rc < 0 && r->root_rc != sceMcResNoEntry) {
-        r->health = CARD_IO_FAILURE;
+    if (report->info_rc < 0 && report->info_rc != sceMcResNoFormat) {
+        report->health = CARD_HEALTH_FILESYSTEM_ERROR;
         return;
     }
 
-    r->rw_rc = RunReadWriteTest(port, &r->cleanup_rc, &r->rw_stage);
-
-    if (r->rw_rc == 0) {
-        r->health = CARD_OK;
-    } else if (r->rw_rc == sceMcResFullDevice) {
-        r->health = CARD_FULL;
-    } else if (r->rw_rc == sceMcResNoFormat) {
-        r->health = CARD_FILESYSTEM_BROKEN;
-        r->format_allowed = (r->type == MC_TYPE_PS2);
-    } else if (r->rw_rc == sceMcResFailAuth) {
-        r->health = CARD_AUTH_FAILURE;
-    } else if (r->rw_rc <= sceMcResFailDetect) {
-        r->health = CARD_DETECT_FAILURE;
-    } else {
-        r->health = CARD_IO_FAILURE;
+    if (report->type != MC_TYPE_PS2) {
+        report->health = CARD_HEALTH_NOT_PS2;
+        return;
     }
+
+    if (report->info_rc == sceMcResNoFormat || !report->formatted) {
+        report->health = CARD_HEALTH_UNFORMATTED;
+        report->format_allowed = 1;
+        return;
+    }
+
+    report->root_rc = OpenRoot(port);
+    if (report->root_rc < 0) {
+        report->health = CARD_HEALTH_FILESYSTEM_ERROR;
+        return;
+    }
+
+    rc = RunRwTest(port, report);
+    report->rw_rc = rc;
+    if (rc < 0) {
+        report->health = CARD_HEALTH_RW_ERROR;
+        return;
+    }
+
+    report->health = CARD_HEALTH_HEALTHY;
 }
 
 int CardFormat(int port, CardReport *report)
 {
     int rc;
 
+    if (report == NULL || !report->format_allowed ||
+        report->type != MC_TYPE_PS2)
+        return -2001;
+
     mcFormat(port, 0);
     rc = McSyncResult();
-    if (rc == 0)
-        CardInspect(port, report);
+    CardInspect(port, report);
     return rc;
 }
 
-const char *CardRwStageText(RwStage stage)
+const char *CardResultText(int result)
 {
-    switch (stage) {
-        case RW_FIND_NAME: return "FIND TEMP NAME";
-        case RW_VERIFY_CARD: return "VERIFY SAME CARD";
-        case RW_OPEN_WRITE: return "OPEN-WRITE";
-        case RW_WRITE: return "WRITE";
-        case RW_FLUSH: return "FLUSH";
-        case RW_CLOSE_WRITE: return "CLOSE-WRITE";
-        case RW_OPEN_READ: return "OPEN-READ";
-        case RW_READ: return "READ";
-        case RW_CLOSE_READ: return "CLOSE-READ";
-        case RW_COMPARE: return "COMPARE";
-        case RW_DELETE: return "DELETE";
-        case RW_VERIFY_DELETE: return "VERIFY DELETE";
-        case RW_DONE: return "DONE";
-        default: return "NOT RUN";
-    }
-}
-
-const char *CardResultText(int rc)
-{
-    switch (rc) {
+    switch (result) {
         case sceMcResSucceed: return "OK";
-        case sceMcResChangedCard: return "CARD CHANGED";
+        case sceMcResChangedCard: return "CHANGED CARD";
         case sceMcResNoFormat: return "NO FORMAT";
-        case sceMcResFullDevice: return "FULL DEVICE";
-        case sceMcResNoEntry: return "NO ENTRY";
-        case sceMcResDeniedPermit: return "DENIED PERMIT";
-        case sceMcResNotEmpty: return "NOT EMPTY";
-        case sceMcResUpLimitHandle: return "HANDLE LIMIT";
-        case sceMcResFailReplace: return "REPLACE FAILED";
-        case sceMcResFailResetAuth: return "AUTH RESET FAILED";
-        case sceMcResFailDetect: return "DETECT FAILED";
-        case sceMcResFailDetect2: return "DETECT FAILED 2";
-        case sceMcResDeniedPS1Permit: return "PS1 PERMISSION DENIED";
-        case sceMcResFailAuth: return "AUTH FAILED";
-        default: return "OTHER";
-    }
-}
-
-const char *CardHealthText(CardHealth health)
-{
-    switch (health) {
-        case CARD_OK: return "PASS";
-        case CARD_FULL: return "FULL - R/W TEST COULD NOT RUN";
-        case CARD_UNFORMATTED: return "UNFORMATTED / FRESH";
-        case CARD_FILESYSTEM_BROKEN: return "FILESYSTEM BROKEN / NO FORMAT";
-        case CARD_IO_FAILURE: return "I/O FAILURE";
-        case CARD_AUTH_FAILURE: return "CARD AUTHENTICATION FAILURE";
-        case CARD_DETECT_FAILURE: return "CARD DETECTION FAILURE";
-        case CARD_NO_CARD: return "NO CARD";
-        default: return "UNKNOWN";
+        case sceMcResFullDevice: return "FULL";
+        case sceMcResNoEntry: return "NO ENTRY/CARD";
+        case sceMcResDeniedPermit: return "DENIED";
+        case -1001: return "SHORT WRITE";
+        case -1002: return "SHORT READ";
+        case -1003: return "DATA MISMATCH";
+        case -1004: return "DELETE VERIFY FAILED";
+        case -2001: return "FORMAT LOCKED";
+        default: return "ERROR/UNKNOWN";
     }
 }
 
 const char *CardTypeText(int type)
 {
     switch (type) {
-        case MC_TYPE_NONE: return "none";
-        case MC_TYPE_PSX: return "PS1";
+        case MC_TYPE_NONE: return "NONE";
+        case MC_TYPE_PS1: return "PS1";
         case MC_TYPE_PS2: return "PS2";
-        case MC_TYPE_POCKET: return "PocketStation/PDA";
-        default: return "non-standard/unknown";
+        case MC_TYPE_PDA: return "PDA";
+        default: return "UNKNOWN";
+    }
+}
+
+const char *CardHealthText(CardHealth health)
+{
+    switch (health) {
+        case CARD_HEALTH_NO_CARD: return "NO CARD";
+        case CARD_HEALTH_NOT_PS2: return "NOT PS2 CARD";
+        case CARD_HEALTH_UNFORMATTED: return "UNFORMATTED";
+        case CARD_HEALTH_FILESYSTEM_ERROR: return "FILESYSTEM ERROR";
+        case CARD_HEALTH_RW_ERROR: return "R/W TEST FAILED";
+        case CARD_HEALTH_HEALTHY: return "PASS";
+        default: return "NOT TESTED";
+    }
+}
+
+const char *CardRwStageText(CardRwStage stage)
+{
+    switch (stage) {
+        case CARD_RW_CREATE: return "CREATE";
+        case CARD_RW_WRITE: return "WRITE";
+        case CARD_RW_FLUSH: return "FLUSH";
+        case CARD_RW_REOPEN: return "REOPEN";
+        case CARD_RW_READ: return "READ";
+        case CARD_RW_COMPARE: return "COMPARE";
+        case CARD_RW_DELETE: return "DELETE";
+        case CARD_RW_VERIFY_DELETE: return "VERIFY DELETE";
+        case CARD_RW_DONE: return "DONE";
+        default: return "NOT RUN";
     }
 }
