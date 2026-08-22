@@ -60,12 +60,13 @@ int FmcbRecoveryRecordDirectories(FmcbRecoveryStatus *status,
                                   int created_sysconf_dir);
 
 /* Restore every prepared destination in reverse order from persistent USB
- * backups. The UI validates the card marker before replaying a journal from a
- * previous boot; in-process rollback is already pinned to the same card slot. */
+ * backups. The linked public entry point validates the USB/card identity token
+ * before the real rollback function can perform its first card modification. */
 int FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc);
 
-/* Publish COMMITTED and remove backup/journal metadata. The caller then removes
- * the card marker using a saved copy of the pre-finish recovery status. */
+/* Publish COMMITTED and remove backup/journal metadata. The linked public entry
+ * point verifies the target card first and clears the matching marker only
+ * after the journal has crossed the committed boundary. */
 int FmcbRecoveryFinish(FmcbRecoveryStatus *status);
 
 const char *FmcbRecoveryStateText(FmcbRecoveryState state);
