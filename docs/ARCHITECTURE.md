@@ -96,7 +96,7 @@ The selected build profile determines which temporary security/card modules are 
 
 ```text
 SECRMAN compatibility source from pinned FreeMcBoot Installer revision
-matching SECRSIF 1.3 compatibility bridge
+matching SECRSIF compatibility bridge
 PS2SDK-v1-era freesio2/freepad/mcman
 ```
 
@@ -121,7 +121,7 @@ The MagicGate probe itself needs MCMAN's SECRMAN callback registration, not ordi
 - the immediate EE-side `mcInit/mcGetInfo/mcSync` sanity query is emulated;
 - all normal libmc behavior resumes after the ROM X environment is rebuilt.
 
-This behavior lives in `src/magicgate_session.c`.
+This behavior lives in `src/magicgate_session.c` and is shared by both security profiles so their behavior can be compared without changing session plumbing.
 
 ## Logical vs physical card ports
 
