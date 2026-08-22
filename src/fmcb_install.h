@@ -1,15 +1,8 @@
 #ifndef MCI_FMCB_INSTALL_H
 #define MCI_FMCB_INSTALL_H
 
-/*
- * FreeMcBoot package planning and read-only USB preflight.
- *
- * The data model intentionally describes both source files and their eventual
- * destination classes so the future installer can reuse the same validated
- * manifest. Nothing declared here performs a memory-card installation write;
- * Briscoe stops at package discovery/planning until a separate transactional
- * bind -> write -> reopen -> read-back -> verify -> rollback path is validated.
- */
+/* FreeMcBoot package discovery plus the destination model shared by preflight
+ * and the 0.4 verified normal-install transaction. */
 
 #define FMCB_MAX_PACKAGE_ENTRIES 16
 #define FMCB_PATH_MAX 96
@@ -56,8 +49,10 @@ typedef struct FmcbPackageFileStatus {
 typedef struct FmcbInstallPlan {
     int target_port;
     char romver_region;
+    unsigned int rom_version;
     char region_letter;
     char destination_system[32];
+    char destination_osd[32];
     int required_files;
     int optional_files;
     int kelf_files;
@@ -83,7 +78,9 @@ typedef struct FmcbPackageReport {
 int FmcbPackageEntryCount(void);
 const FmcbPackageEntry *FmcbPackageEntryAt(int index);
 void FmcbBuildInstallPlan(int target_port, char region_letter,
-                          FmcbInstallPlan *plan);
+                          unsigned int rom_version, FmcbInstallPlan *plan);
+int FmcbResolveDestination(const FmcbInstallPlan *plan, int entry_index,
+                           char *path, unsigned int path_size);
 
 int FmcbInitMassBackend(FmcbMassBackendStatus *status);
 void FmcbShutdownMassBackend(FmcbMassBackendStatus *status);
