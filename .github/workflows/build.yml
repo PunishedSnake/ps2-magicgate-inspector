@@ -58,7 +58,7 @@ jobs:
             -v "$GITHUB_WORKSPACE:/work" \
             -w /work \
             ps2dev/ps2dev:v2.0.0 \
-            sh -c 'set -eu; apk add --no-cache build-base >/dev/null; mips64r5900el-ps2-elf-gcc --version; PS2SDKSRC="$PS2SDK" make -C iop/mgtrace clean all; cp iop/mgtrace/irx/mgtrace.irx .build/mgtrace/mgtrace.irx; make'
+            sh -c 'set -eu; apk add --no-cache build-base git >/dev/null; mips64r5900el-ps2-elf-gcc --version; git clone -q --depth 1 --branch v2.0.0 https://github.com/ps2dev/ps2sdk.git /tmp/ps2sdk-src; PS2SDKSRC=/tmp/ps2sdk-src make -C iop/mgtrace clean all; cp iop/mgtrace/irx/mgtrace.irx .build/mgtrace/mgtrace.irx; make'
           ls -lh .build/mgtrace/mgtrace.irx
           sha256sum .build/mgtrace/mgtrace.irx
           cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR.ELF
