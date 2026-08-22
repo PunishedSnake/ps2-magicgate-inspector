@@ -46,11 +46,17 @@ typedef struct CardReport {
     int rw_rc;
     int cleanup_rc;
     int format_allowed;
+    unsigned int test_bytes;
     CardHealth health;
     RwStage rw_stage;
 } CardReport;
 
+/* Historical 4 KiB test retained as a convenience wrapper. */
 void CardInspect(int port, CardReport *report);
+/* 0.4 can exercise more media without allocating a matching EE buffer. The
+ * implementation streams deterministic 4 KiB chunks and verifies each chunk
+ * after a flush/close/reopen boundary. */
+void CardInspectSized(int port, CardReport *report, unsigned int test_bytes);
 int CardFormat(int port, CardReport *report);
 
 const char *CardHealthText(CardHealth health);
