@@ -1,15 +1,16 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * Isolated MagicGate session shim.
  *
- * The selected build profile embeds a matching SIO2/PAD/MCMAN/MCSERV set, but
- * the temporary MCSERV is intentionally not started. Real hardware showed that
- * starting it in the isolated security personality can wedge the next LOADFILE
+ * v0.2.0 embeds a matching PS2SDK 2.0 SIO2/PAD/MCMAN/MCSERV set, but the
+ * temporary MCSERV is intentionally not started. Real hardware showed that
+ * starting it in this isolated security personality can wedge the next LOADFILE
  * RPC even though the module itself reports a successful resident result.
  *
  * CardAuth needs MCMAN's registered SECRMAN callbacks, not EE file-service I/O,
  * so MCMAN stays active while this shim emulates only the immediate EE-side
  * libmc sanity query used by the RAM-only probe. After the security transaction
- * the application rebuilds the normal Sony ROM X card stack; all later libmc
+ * the application rebuilds the normal Sony ROM X card stack; subsequent libmc
  * calls are real again.
  */
 
