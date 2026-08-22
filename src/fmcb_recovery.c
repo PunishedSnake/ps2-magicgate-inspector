@@ -30,6 +30,7 @@
 
 #define JOURNAL_STATE_ACTIVE 1u
 #define JOURNAL_STATE_ROLLING_BACK 2u
+#define JOURNAL_STATE_COMMITTED 3u
 
 typedef struct RecoveryEntry {
     u32 manifest_index;
@@ -124,6 +125,7 @@ static void BestEffortMassSync(const char *source_root)
 static int ReadExactFile(const char *path, void *buffer, unsigned int size)
 {
     unsigned char *p = (unsigned char *)buffer;
+    unsigned char trailing;
     unsigned int done = 0;
     int fd;
     int rc;
@@ -139,7 +141,7 @@ static int ReadExactFile(const char *path, void *buffer, unsigned int size)
         }
         done += (unsigned int)rc;
     }
-    rc = fileXioRead(fd, p, 1);
+    rc = fileXioRead(fd, &trailing, 1);
     fileXioClose(fd);
     return rc == 0 ? 0 : (rc < 0 ? rc : -5101);
 }
@@ -175,9 +177,12 @@ static int JournalValid(const RecoveryJournal *journal)
 {
     if (journal->magic != RECOVERY_MAGIC ||
         journal->version != RECOVERY_VERSION ||
-        journal->struct_size != sizeof(*journal) ||
+        journal->struct_size != (u32)sizeof(*journal) ||
         journal->entry_count > FMCB_MAX_PACKAGE_ENTRIES ||
-        journal->target_port < 0 || journal->target_port > 1)
+        journal->target_port < 0 || journal->target_port > 1 ||
+        (journal->state != JOURNAL_STATE_ACTIVE &&
+         journal->state != JOURNAL_STATE_ROLLING_BACK &&
+         journal->state != JOURNAL_STATE_COMMITTED))
         return 0;
     return journal->checksum == JournalChecksum(journal);
 }
@@ -440,6 +445,7 @@ static int RestoreMassBackupToCard(int port, const char *mass_path,
                                    const RecoveryEntry *entry)
 {
     unsigned char buffer[RECOVERY_CHUNK] __attribute__((aligned(64)));
+    unsigned char card_buffer[RECOVERY_CHUNK] __attribute__((aligned(64)));
     unsigned int total = 0;
     u32 hash = 2166136261u;
     int mass_fd;
@@ -463,7 +469,6 @@ static int RestoreMassBackupToCard(int port, const char *mass_path,
         return mass_fd;
     }
 
-    total = 0;
     while (total < entry->backup_size) {
         unsigned int chunk = entry->backup_size - total;
         if (chunk > sizeof(buffer))
@@ -506,7 +511,6 @@ static int RestoreMassBackupToCard(int port, const char *mass_path,
     }
     total = 0;
     while (total < entry->backup_size) {
-        unsigned char card_buffer[RECOVERY_CHUNK] __attribute__((aligned(64)));
         unsigned int chunk = entry->backup_size - total;
         if (chunk > sizeof(buffer))
             chunk = sizeof(buffer);
@@ -548,6 +552,31 @@ static void FillStatus(FmcbRecoveryStatus *status, const char *source_root,
              recovery_root);
 }
 
+static int RemoveRecoveryFiles(const FmcbRecoveryStatus *status,
+                               const RecoveryJournal *journal)
+{
+    char path[FMCB_RECOVERY_PATH_MAX + 32];
+    unsigned int i;
+
+    for (i = 0; i < journal->entry_count; i++) {
+        if (journal->entries[i].backup_name[0] != '\0') {
+            BuildPath(path, sizeof(path), status->recovery_root,
+                      journal->entries[i].backup_name);
+            (void)fileXioRemove(path);
+        }
+        snprintf(path, sizeof(path), "%s/b%02u.tmp", status->recovery_root,
+                 journal->entries[i].manifest_index);
+        (void)fileXioRemove(path);
+    }
+    BuildPath(path, sizeof(path), status->recovery_root, "journal0.bin");
+    (void)fileXioRemove(path);
+    BuildPath(path, sizeof(path), status->recovery_root, "journal1.bin");
+    (void)fileXioRemove(path);
+    BestEffortMassSync(status->source_root);
+    (void)fileXioRmdir(status->recovery_root);
+    return 0;
+}
+
 int FmcbRecoveryProbe(const FmcbMassBackendStatus *backend,
                       FmcbRecoveryStatus *status)
 {
@@ -566,6 +595,7 @@ int FmcbRecoveryProbe(const FmcbMassBackendStatus *backend,
 
     for (i = 0; i < sizeof(KnownRoots) / sizeof(KnownRoots[0]); i++) {
         RecoveryJournal journal;
+        FmcbRecoveryStatus found;
         char root[FMCB_RECOVERY_PATH_MAX];
         int valid_slots = 0;
         int present_slots = 0;
@@ -575,7 +605,15 @@ int FmcbRecoveryProbe(const FmcbMassBackendStatus *backend,
         memset(&journal, 0, sizeof(journal));
         rc = LoadLatestJournal(root, &journal, &valid_slots, &present_slots);
         if (rc == 0) {
-            FillStatus(status, KnownRoots[i], root, &journal);
+            FillStatus(&found, KnownRoots[i], root, &journal);
+            if (journal.state == JOURNAL_STATE_COMMITTED) {
+                /* All card writes were already verified before this state was
+                 * published. A power cut during cleanup must not turn a good
+                 * installation into an apparent rollback request. */
+                RemoveRecoveryFiles(&found, &journal);
+                continue;
+            }
+            *status = found;
             status->probe_rc = 0;
             return 0;
         }
@@ -652,8 +690,8 @@ int FmcbRecoveryCaptureTarget(FmcbRecoveryStatus *status,
         manifest_index >= FMCB_MAX_PACKAGE_ENTRIES)
         return -1;
     rc = LoadLatestJournal(status->recovery_root, &journal, NULL, NULL);
-    if (rc < 0)
-        return rc;
+    if (rc < 0 || journal.state != JOURNAL_STATE_ACTIVE)
+        return rc < 0 ? rc : -5142;
     if (journal.entry_count >= FMCB_MAX_PACKAGE_ENTRIES)
         return -5141;
 
@@ -677,8 +715,9 @@ int FmcbRecoveryCaptureTarget(FmcbRecoveryStatus *status,
                sizeof(entry->backup_name));
 
     if (entry->existed && entry->backup_size > 0u) {
-        TxProgress(0, "Persisting destination recovery backup",
-                   "Copying the original target to USB and verifying it before the card can be modified.");
+        MciProgressUpdate(MCI_PROGRESS_FMCB, 0,
+                          "Persisting destination recovery backup",
+                          "Copying the original target to USB and verifying it before the card can be modified.");
         rc = CaptureCardFileToMass(target_port, destination, temp_path,
                                    final_path, status->source_root,
                                    entry->backup_size, &checksum);
@@ -715,8 +754,8 @@ int FmcbRecoveryRecordDirectories(FmcbRecoveryStatus *status,
     if (status == NULL || !status->valid)
         return -1;
     rc = LoadLatestJournal(status->recovery_root, &journal, NULL, NULL);
-    if (rc < 0)
-        return rc;
+    if (rc < 0 || journal.state != JOURNAL_STATE_ACTIVE)
+        return rc < 0 ? rc : -5142;
     journal.created_system_dir = created_system_dir ? 1u : 0u;
     journal.created_sysconf_dir = created_sysconf_dir ? 1u : 0u;
     if (system_dir != NULL)
@@ -726,31 +765,6 @@ int FmcbRecoveryRecordDirectories(FmcbRecoveryStatus *status,
     if (rc == 0)
         status->sequence = journal.sequence;
     return rc;
-}
-
-static int RemoveRecoveryFiles(const FmcbRecoveryStatus *status,
-                               const RecoveryJournal *journal)
-{
-    char path[FMCB_RECOVERY_PATH_MAX + 32];
-    unsigned int i;
-
-    for (i = 0; i < journal->entry_count; i++) {
-        if (journal->entries[i].backup_name[0] != '\0') {
-            BuildPath(path, sizeof(path), status->recovery_root,
-                      journal->entries[i].backup_name);
-            (void)fileXioRemove(path);
-        }
-        snprintf(path, sizeof(path), "%s/b%02u.tmp", status->recovery_root,
-                 journal->entries[i].manifest_index);
-        (void)fileXioRemove(path);
-    }
-    BuildPath(path, sizeof(path), status->recovery_root, "journal0.bin");
-    (void)fileXioRemove(path);
-    BuildPath(path, sizeof(path), status->recovery_root, "journal1.bin");
-    (void)fileXioRemove(path);
-    BestEffortMassSync(status->source_root);
-    (void)fileXioRmdir(status->recovery_root);
-    return 0;
 }
 
 int FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc)
@@ -768,6 +782,13 @@ int FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc)
     rc = LoadLatestJournal(status->recovery_root, &journal, NULL, NULL);
     if (rc < 0)
         return rc;
+    if (journal.state == JOURNAL_STATE_COMMITTED) {
+        RemoveRecoveryFiles(status, &journal);
+        memset(status, 0, sizeof(*status));
+        status->target_port = -1;
+        status->state = FMCB_RECOVERY_NONE;
+        return 0;
+    }
     journal.state = JOURNAL_STATE_ROLLING_BACK;
     rc = SaveJournal(status->recovery_root, status->source_root, &journal);
     if (rc < 0)
@@ -788,7 +809,8 @@ int FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc)
 
         if (!entry->prepared)
             continue;
-        snprintf(detail, sizeof(detail), "Restoring mc%d:%s from transaction backup state.",
+        snprintf(detail, sizeof(detail),
+                 "Restoring mc%d:%s from transaction backup state.",
                  status->target_port, entry->destination);
         MciProgressUpdate(MCI_PROGRESS_FMCB, percent,
                           "Restoring original destination", detail);
@@ -798,11 +820,11 @@ int FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc)
         } else if (entry->backup_size == 0u) {
             rc = DeleteCardTarget(status->target_port, entry->destination);
             if (rc >= 0) {
+                int fd;
                 mcOpen(status->target_port, 0, entry->destination,
                        FIO_O_WRONLY | FIO_O_CREAT);
-                rc = McResult();
-                if (rc >= 0)
-                    rc = CloseCardFile(rc);
+                fd = McResult();
+                rc = fd < 0 ? fd : CloseCardFile(fd);
             }
         } else {
             BuildPath(backup_path, sizeof(backup_path), status->recovery_root,
@@ -856,6 +878,15 @@ int FmcbRecoveryFinish(FmcbRecoveryStatus *status)
     rc = LoadLatestJournal(status->recovery_root, &journal, NULL, NULL);
     if (rc < 0)
         return rc;
+
+    /* Publish COMMITTED before deleting anything. If power disappears during
+     * cleanup, the next probe knows the card already passed every read-back
+     * comparison and can finish USB cleanup without rolling the install back. */
+    journal.state = JOURNAL_STATE_COMMITTED;
+    rc = SaveJournal(status->recovery_root, status->source_root, &journal);
+    if (rc < 0)
+        return rc;
+
     RemoveRecoveryFiles(status, &journal);
     memset(status, 0, sizeof(*status));
     status->target_port = -1;
