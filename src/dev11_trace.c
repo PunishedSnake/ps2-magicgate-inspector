@@ -1,6 +1,6 @@
 /*
  * Briscoe dev11 Kbit diagnostic overlay.
- * CI/hardware candidate 1.
+ * CI/hardware candidate 2.
  *
  * This deliberately avoids changing the normal Inspector or core KELF probe.
  * Linker wrapping remembers which SIF client is bound to GET_KBIT, inspects the
