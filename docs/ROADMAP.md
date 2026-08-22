@@ -1,105 +1,116 @@
 # Roadmap
 
-This roadmap describes intended feature boundaries, not promises of exact release dates. Hardware findings may reorder milestones.
-
-## v0.1.0 — Columbo
-
-**Theme:** establish the standalone Inspector.
-
-- self-contained PS2 ELF;
-- `mc0:` / `mc1:` selection;
-- `mcGetInfo()` and raw MCMAN diagnostics;
-- root-directory probe;
-- deterministic 4 KiB write/read/compare/delete test;
-- conservative health classification;
-- manually confirmed format path for fresh or explicitly unformatted PS2 cards;
-- PS2DEV CI build and artifact generation.
-
-Status: **hardware-validated for the baseline filesystem pipeline on real PS2 hardware**.
+The roadmap is intentionally staged around hardware evidence. PS2 Memory Card Inspector should not turn a working diagnostic primitive into a destructive installer faster than it can verify and roll back its writes.
 
 ## v0.2.0 — Briscoe
 
-**Theme:** separate filesystem health, MagicGate capability and installation readiness.
+### Completed / hardware-validated
 
-In active development:
+- Normal Sony ROM X memory-card personality retained for ordinary filesystem work.
+- Non-destructive 4 KiB filesystem read/write/compare/delete test.
+- Raw `FMCB.XLF` acquisition from USB into EE RAM.
+- Isolated MagicGate/KELF security session with normal-stack restoration afterward.
+- Correct BIT semantics: large plaintext blocks no longer inherit the SECRSIF `0x400` RPC limit.
+- Source-level GET_KBIT failure instrumentation without post-failure CardAuth replay.
+- Correct logical libmc `0/1` -> physical SECR/SIO2 `2/3` card-port mapping.
+- Full MagicGate/KELF probe PASS on two official Sony 8 MB cards using the `fmcb13` baseline.
+- Full PASS on a third-party 64 MB MagicGate-capable card.
+- Clean first-command no-ACK failure on a third-party 64 MB non-MagicGate card while its filesystem remains usable.
+- User-facing capability classification that separates `FUNCTIONAL`, unsupported/no-ACK, protocol errors and indeterminate infrastructure failures.
+- Read-only FMCB package preflight.
 
-- decode and document more XMCMAN return codes;
-- preserve per-stage result data;
-- structured card / MagicGate / FMCB preflight views;
-- coherent PS2SDK 2.0 XMCMAN + special SECRMAN stack;
-- non-destructive staged MagicGate/KELF bind probe;
-- report `DownloadHeader`, encrypted blocks, Kbit, Kc and ICVPS2 separately;
-- optional `mass:` backend using PS2SDK iomanX/fileXio/USBD/USBHDFSD;
-- read-only discovery and validation of a user-supplied `mass:/FMCB` package;
-- console-region detection and installation-plan generation;
-- keep FreeMcBoot payloads out of Inspector builds and releases.
+### Completed / build-validated, hardware pending
 
-Planned before enabling FMCB writes:
+- Selectable `ps2sdk14` profile using PS2SDK 2.0 SECRMAN 1.4, matching SECRSIF and matching PS2SDK 2.0 memory-card stack.
+- Equivalent GET_KBIT failure record format for direct comparison with `fmcb13`.
+- Reproducible CI build of the instrumented 1.4 profile.
 
-- required-space calculation;
-- model/ROM handling, especially early Japanese consoles;
-- destination collision inventory and backup plan;
-- transactional copy/bind/write/read-back verification;
-- explicit rollback/recovery reporting;
-- hardware validation of the SECR stack and package source backend.
+### Next: validate PS2SDK SECRMAN 1.4 on hardware
 
-The FMCB commit path remains disabled until those prerequisites are proven on hardware.
+Run `ps2sdk14` against the same four-card matrix:
 
-## v0.3.0 — Poirot
+1. official Sony 8 MB positive control A;
+2. official Sony 8 MB positive control B;
+3. third-party 64 MB negative control;
+4. third-party 64 MB MagicGate-capable positive control.
 
-**Theme:** identify what kind of card we are actually dealing with.
+The modern backend should not become the default until it reproduces both the positive and negative behavior of the validated compatibility baseline and restores the normal ROM card stack correctly after every probe.
 
-Planned research and implementation:
+### Next: controlled bind/write/read-back experiment
 
-- richer card capability fingerprinting instead of relying only on the reported type;
-- compare official, licensed and third-party cards;
-- persist fingerprints from known hardware test cases;
-- distinguish unusual-but-working cards from cards that fail a specific MagicGate stage;
-- expand compatibility heuristics only when backed by captured hardware evidence.
+Once a default security backend is selected, add a deliberately narrow write experiment rather than a full installer.
 
-## v0.4.0 — Kojak
+Required transaction:
 
-**Theme:** controlled recovery.
+```text
+preflight
+  -> backup/rollback state
+  -> bind raw KELF in RAM
+  -> write one controlled target
+  -> close/reopen
+  -> full read-back
+  -> verify
+  -> rollback on any failure
+```
 
-Potential scope after enough real-card testing:
+This stage should be tested only with a fully backed-up/disposable card until failure recovery is proven.
 
-- more precise filesystem-damage classification;
-- post-format verification pass;
-- format result audit and re-query;
-- warnings for suspicious capacity/type combinations;
-- optional recovery-oriented diagnostics that remain separate from destructive repair.
+### Next: FMCB installation transaction
 
-The Inspector should never turn generic I/O failures into an automatic "format it" recommendation.
+Only after the single-file write path is hardware-validated:
 
-## v0.5.0 — Dale Cooper
+- calculate required target space;
+- validate complete user-supplied package;
+- create target system/config directories safely;
+- bind all required KELF payloads using the validated backend;
+- copy non-KELF resources;
+- verify every written file after reopening it;
+- preserve or back up replaceable existing content;
+- maintain rollback metadata until the entire transaction commits;
+- provide clear abort/failure state instead of leaving a partially installed card.
 
-**Theme:** make reports pleasant to use and pleasant to share.
+### Release cleanup before Briscoe stable
 
-Potential scope:
+- settle the default SECR backend;
+- remove development-only backend-selection behavior from ordinary release builds unless keeping it is useful for an advanced diagnostics mode;
+- strip stale development labels from UI;
+- keep low-level diagnostics available on the MagicGate detail page or debug build;
+- generate clean release checksums;
+- include `LICENSE`, credits and third-party notices in release packaging;
+- ensure release provenance records the exact PS2SDK/upstream revisions.
 
-- cleaner UI while preserving raw data access;
-- structured report export;
-- build/version metadata in reports;
-- PCSX2 regression harness for the parts that emulation can validate;
-- test-case fixtures for parser/classification logic.
+## v0.3.x — installer hardening / recovery
 
-## v0.6.0+ — open investigation
+Possible scope after the first safe installer transaction exists:
 
-Candidates include deeper card fingerprint databases, counterfeit/compatibility heuristics, expanded repair tooling and additional package-source backends. These should only be promoted into numbered milestones once preceding hardware evidence justifies them.
+- explicit backup/export before modifying an existing FMCB installation;
+- installation journal and rollback/recovery path;
+- verification-only mode for an existing installation;
+- compare existing target files against the user-supplied package;
+- detect already-bound KELFs and avoid treating them as raw sources;
+- richer free-space and filesystem-health gating;
+- clearer distinction between card storage health and MagicGate capability.
 
-## v1.0.0 — Inspector Gadget
+## Later diagnostic work
 
-Reserved for the first release we are comfortable calling a stable general-purpose PS2 memory-card diagnostic utility.
+Potential future additions, only where they provide actionable information:
 
-A 1.0 release should require at minimum:
+- persistent test report export to USB;
+- card-controller/MagicGate behavior database based on observed protocol results rather than branding;
+- timing/retry diagnostics for borderline cards;
+- deeper protocol detail view for CardAuth `50/51/52/53` failures;
+- optional comparison of multiple security backends in one test session;
+- additional safe filesystem integrity checks.
 
-- broad hardware testing across official and third-party cards;
-- stable detection and filesystem diagnostics;
-- reliable cleanup of all temporary test data;
-- well-understood formatting behavior;
-- documented raw error interpretation;
-- no known path where an ambiguous failure unlocks a destructive operation;
-- reproducible builds and release artifacts;
-- user-facing documentation sufficient for use without reading the source.
+## Non-goals
 
-The codename is non-negotiably appropriate.
+The project does **not** currently aim to:
+
+- emulate MagicGate in software;
+- bypass the MechaCon or replace Sony's cryptographic hardware;
+- fabricate MagicGate capability on a card whose controller does not implement CardAuth;
+- redistribute Sony ROM modules;
+- bundle FreeMcBoot payloads;
+- automatically format or modify a card simply because a diagnostic stage fails.
+
+The useful target is narrower: identify what a card and console can actually do, then make any future installation operation explicit, verifiable and recoverable.
