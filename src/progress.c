@@ -4,8 +4,9 @@
  *
  * Core diagnostic modules report short, factual progress events through
  * progress.h. This file is the only place that translates those events into
- * GUI titles, footer safety notes and tone. The actual progress bar is drawn
- * by gui.c through the same double-buffered GS renderer as the dashboards.
+ * GUI titles and footer safety notes. Progress remains informational even at
+ * 100%: completion of a sequence is not the same thing as a PASS result. The
+ * dashboard owns the final success/warning/error classification.
  */
 
 #include "gui.h"
@@ -43,8 +44,6 @@ void MciProgressUpdate(MciProgressDomain domain,
                        const char *action,
                        const char *detail)
 {
-    MciGuiTone tone;
-
     if (!MciGuiReady())
         return;
 
@@ -53,7 +52,6 @@ void MciProgressUpdate(MciProgressDomain domain,
     if (percent > 100)
         percent = 100;
 
-    tone = percent >= 100 ? MCI_GUI_TONE_SUCCESS : MCI_GUI_TONE_INFO;
     MciGuiRenderProgress(ProgressTitle(domain), action, detail, percent,
-                         ProgressFooter(domain), tone);
+                         ProgressFooter(domain), MCI_GUI_TONE_INFO);
 }
