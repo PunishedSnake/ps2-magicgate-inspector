@@ -305,6 +305,7 @@ static int BindKelfForInstaller(int target_port, unsigned char *buffer,
                                 unsigned int size, void *userdata)
 {
     MagicGateReport scratch;
+    void *bound;
     int rc;
     int restore_rc;
 
@@ -319,9 +320,9 @@ static int BindKelfForInstaller(int target_port, unsigned char *buffer,
     if (rc >= 0) {
         rc = SecrInit();
         if (rc >= 0) {
-            rc = SecrDownloadFile(target_port, 0, buffer);
+            bound = SecrDownloadFile(target_port, 0, buffer);
             SecrDeinit();
-            rc = (rc == 1) ? 0 : -4700;
+            rc = (bound == buffer) ? 0 : -4700;
         }
     }
 
