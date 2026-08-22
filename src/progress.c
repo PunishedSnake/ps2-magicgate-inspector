@@ -4,18 +4,12 @@
  *
  * Core diagnostic modules report short, factual progress events through
  * progress.h. This file is the only place that translates those events into
- * GUI wording, footer safety notes and the visible progress bar. The bar is
- * intentionally built from the existing GS font path, so it survives the same
- * IOP resets as the rest of the frontend and needs no second renderer state.
+ * GUI titles, footer safety notes and tone. The actual progress bar is drawn
+ * by gui.c through the same double-buffered GS renderer as the dashboards.
  */
-
-#include <stdio.h>
-#include <string.h>
 
 #include "gui.h"
 #include "progress.h"
-
-#define PROGRESS_BAR_CELLS 48
 
 static const char *ProgressTitle(MciProgressDomain domain)
 {
@@ -49,10 +43,7 @@ void MciProgressUpdate(MciProgressDomain domain,
                        const char *action,
                        const char *detail)
 {
-    char bar[PROGRESS_BAR_CELLS + 1];
-    char body[768];
-    int filled;
-    int i;
+    MciGuiTone tone;
 
     if (!MciGuiReady())
         return;
@@ -62,23 +53,7 @@ void MciProgressUpdate(MciProgressDomain domain,
     if (percent > 100)
         percent = 100;
 
-    filled = (percent * PROGRESS_BAR_CELLS + 50) / 100;
-    for (i = 0; i < PROGRESS_BAR_CELLS; i++)
-        bar[i] = i < filled ? '=' : '-';
-    bar[PROGRESS_BAR_CELLS] = '\0';
-
-    snprintf(body, sizeof(body),
-             "%s\n"
-             "%s\n\n"
-             "PROGRESS  %3d%%\n"
-             "[%s]",
-             action != NULL && action[0] != '\0' ? action : "Working...",
-             detail != NULL ? detail : "",
-             percent,
-             bar);
-
-    MciGuiRenderMessage(ProgressTitle(domain), body,
-                        ProgressFooter(domain),
-                        percent >= 100 ? MCI_GUI_TONE_SUCCESS
-                                       : MCI_GUI_TONE_INFO);
+    tone = percent >= 100 ? MCI_GUI_TONE_SUCCESS : MCI_GUI_TONE_INFO;
+    MciGuiRenderProgress(ProgressTitle(domain), action, detail, percent,
+                         ProgressFooter(domain), tone);
 }
