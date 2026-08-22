@@ -1,10 +1,18 @@
 /*
- * Briscoe dev12 exact GET_KBIT diagnostic overlay.
+ * Briscoe dev12/dev13 exact GET_KBIT diagnostic and SECR port correction.
  *
- * Unlike dev11 this does not replay card-auth commands after the failure.
- * The temporary SECRMAN 1.3 build instruments the real SecrDownloadGetKbit()
- * execution and, on failure only, returns a compact 16-byte diagnostic record
- * through the existing SECRSIF GET_KBIT response buffer.
+ * dev12 proved that both tested Sony cards reach the real first card_encrypt()
+ * with both Mechacon-prepared Kbit halves present, then fail F2/50 with
+ * stat6c=0001D100 (RX error + missing ACK). That exposed an EE-side caller bug:
+ * the Inspector passed logical memory-card ports 0/1 into SECRSIF, while the
+ * original FreeMcBoot Installer calls SecrDownloadFile(2 + port, slot, ...).
+ * CardAuth uses the supplied value directly as the SIO2 channel, therefore
+ * 0/1 addresses controller channels and 2/3 addresses the memory-card channels.
+ *
+ * dev13 corrects the port at the SECRSIF RPC boundary for HEADER, GET_KBIT and
+ * GET_KC while retaining dev12's source-level failure record. This keeps the
+ * ordinary libmc side on logical ports 0/1 and makes only SECRMAN see the same
+ * physical SIO2 port numbering used by the reference FMCB installer.
  */
 
 #include <tamtypes.h>
@@ -54,7 +62,9 @@ typedef struct Dev12Record {
     unsigned char mecha1;
 } Dev12Record;
 
+static SifRpcClientData_t *HeaderClient;
 static SifRpcClientData_t *KbitClient;
+static SifRpcClientData_t *KcClient;
 static Dev12Record Record;
 static char StageText[128];
 
@@ -68,6 +78,13 @@ const char *__real_MagicGateStageText(MagicGateStage stage);
 static void ClearRecord(void)
 {
     memset(&Record, 0, sizeof(Record));
+}
+
+static int PhysicalSecrPort(int port)
+{
+    if (port >= 0 && port <= 1)
+        return port + 2;
+    return port;
 }
 
 static void DecodeRecord(const unsigned char data[16])
@@ -122,9 +139,14 @@ int __wrap_sceSifBindRpc(SifRpcClientData_t *cd, int sid, int mode)
 {
     int rc = __real_sceSifBindRpc(cd, sid, mode);
 
-    if ((unsigned int)sid == SECRSIF_DOWNLOAD_GET_KBIT && rc >= 0 && cd->server != NULL) {
-        KbitClient = cd;
-        ClearRecord();
+    if (rc >= 0 && cd->server != NULL) {
+        if ((unsigned int)sid == SECRSIF_DOWNLOAD_HEADER)
+            HeaderClient = cd;
+        else if ((unsigned int)sid == SECRSIF_DOWNLOAD_GET_KBIT) {
+            KbitClient = cd;
+            ClearRecord();
+        } else if ((unsigned int)sid == SECRSIF_DOWNLOAD_GET_KC)
+            KcClient = cd;
     }
 
     return rc;
@@ -135,6 +157,26 @@ int __wrap_sceSifCallRpc(SifRpcClientData_t *cd, int fno, int mode,
                          SifRpcEndFunc_t endfunc, void *efarg)
 {
     int rc;
+
+    /* The reference FMCB installer calls SecrDownloadFile(2 + port, ...).
+     * Mirror that at the RPC boundary while the rest of Inspector continues to
+     * use libmc's logical 0/1 numbering. Only functions carrying a card port
+     * are adjusted; DOWNLOAD_BLOCK and GET_ICVPS2 have no port field. */
+    if (fno == 1 && send != NULL) {
+        if (cd == HeaderClient) {
+            struct SecrSifDownloadHeaderParams *param;
+            param = (struct SecrSifDownloadHeaderParams *)send;
+            param->port = PhysicalSecrPort(param->port);
+        } else if (cd == KbitClient) {
+            struct SecrSifDownloadGetKbitParams *param;
+            param = (struct SecrSifDownloadGetKbitParams *)send;
+            param->port = PhysicalSecrPort(param->port);
+        } else if (cd == KcClient) {
+            struct SecrSifDownloadGetKcParams *param;
+            param = (struct SecrSifDownloadGetKcParams *)send;
+            param->port = PhysicalSecrPort(param->port);
+        }
+    }
 
     rc = __real_sceSifCallRpc(cd, fno, mode, send, ssize,
                               receive, rsize, endfunc, efarg);
