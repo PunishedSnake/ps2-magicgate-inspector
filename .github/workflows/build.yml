@@ -6,12 +6,16 @@ on:
     branches: [ main ]
     paths:
       - 'src/**'
+      - 'iop/**'
+      - 'mgtrace_protocol.h'
       - 'Makefile'
       - '.github/workflows/build.yml'
   push:
     branches: [ main ]
     paths:
       - 'src/**'
+      - 'iop/**'
+      - 'mgtrace_protocol.h'
       - 'Makefile'
       - '.github/workflows/build.yml'
 
@@ -44,17 +48,19 @@ jobs:
           ls -lh .build/fmcb-ps2sdk-v1
           sha256sum .build/fmcb-ps2sdk-v1/*.irx
 
-      - name: Build standalone ELF in PS2DEV v2.0.0
+      - name: Build tracer and standalone ELF in PS2DEV v2.0.0
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p artifacts
+          mkdir -p artifacts .build/mgtrace
           docker pull ps2dev/ps2dev:v2.0.0
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/work" \
             -w /work \
             ps2dev/ps2dev:v2.0.0 \
-            sh -c 'apk add --no-cache build-base >/dev/null && mips64r5900el-ps2-elf-gcc --version && make'
+            sh -c 'set -eu; apk add --no-cache build-base >/dev/null; mips64r5900el-ps2-elf-gcc --version; PS2SDKSRC="$PS2SDK" make -C iop/mgtrace clean all; cp iop/mgtrace/irx/mgtrace.irx .build/mgtrace/mgtrace.irx; make'
+          ls -lh .build/mgtrace/mgtrace.irx
+          sha256sum .build/mgtrace/mgtrace.irx
           cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR.ELF
 
       - name: Verify output
