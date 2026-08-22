@@ -5,12 +5,16 @@
 #include <delaythread.h>
 
 /*
- * MagicGate / KELF capability probe for PS2 Memory Card Inspector.
+ * MagicGate / KELF capability probe.
  *
- * KELF acquisition happens under the hardware-validated normal ROM X stack.
- * The raw user-supplied FMCB.XLF is kept in EE RAM across an isolated SECR
- * session and discarded afterwards. The probe never writes a bound KELF to a
- * memory card.
+ * Raw KELF acquisition happens under the hardware-validated normal ROM X card
+ * stack. The user-supplied FMCB.XLF stays in EE RAM across an isolated security
+ * session and is discarded afterwards; this API does not write a bound KELF to
+ * either memory card.
+ *
+ * Low-level GET_KBIT failure classification lives in magicgate_diag.c. The core
+ * report deliberately keeps protocol-stage results separate from the ordinary
+ * filesystem health report.
  */
 
 typedef enum MagicGateStage {
@@ -93,18 +97,18 @@ typedef struct MagicGateReport {
     int icvps2_rc;
 } MagicGateReport;
 
-/* Called inside the isolated SECR session while loadfile RPC is active. */
+/* Called inside the isolated security session while LOADFILE RPC is active. */
 int MagicGateLoadIopModules(MagicGateIopStatus *status);
 
 void MagicGateResetReport(MagicGateReport *report, int target_port);
 void MagicGateResetKelfBuffer(MagicGateKelfBuffer *buffer);
 
-/* Run under the normal, known-good memory-card stack before any IOP reboot. */
+/* Run under the normal, known-good card stack before any IOP reboot. */
 int MagicGatePrepareKelf(int target_port, MagicGateKelfBuffer *buffer,
                          MagicGateReport *report);
 void MagicGateReleaseKelf(MagicGateKelfBuffer *buffer);
 
-/* Run only after the isolated SECR personality and MCMAN are ready. */
+/* Run only after the selected SECR/card profile has entered the isolated IOP. */
 int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
                            MagicGateReport *report);
 
