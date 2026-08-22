@@ -1,0 +1,528 @@
+from pathlib import Path
+
+
+def replace_once(path, old, new):
+    p = Path(path)
+    s = p.read_text()
+    if s.count(old) != 1:
+        raise SystemExit(f'{path}: anchor count={s.count(old)} for {old[:80]!r}')
+    p.write_text(s.replace(old, new, 1))
+
+
+replace_once('src/settings.h',
+'''typedef enum MciFsTestProfile {
+    MCI_FS_TEST_QUICK = 0,
+    MCI_FS_TEST_EXTENDED,
+    MCI_FS_TEST_THOROUGH,
+    MCI_FS_TEST_PROFILE_COUNT
+} MciFsTestProfile;
+
+typedef struct MciSettings {
+    MciVideoMode video_mode;
+    MciFsTestProfile fs_profile;
+    int preserve_existing_cnfs;
+    int verify_every_install_file;
+} MciSettings;
+''',
+'''typedef enum MciFsTestProfile {
+    MCI_FS_TEST_QUICK = 0,
+    MCI_FS_TEST_EXTENDED,
+    MCI_FS_TEST_THOROUGH,
+    MCI_FS_TEST_PROFILE_COUNT
+} MciFsTestProfile;
+
+typedef enum MciInstallVerifyMode {
+    MCI_INSTALL_VERIFY_ENFORCED = 0,
+    MCI_INSTALL_VERIFY_REQUIRED,
+    MCI_INSTALL_VERIFY_DISABLED,
+    MCI_INSTALL_VERIFY_MODE_COUNT
+} MciInstallVerifyMode;
+
+typedef struct MciSettings {
+    MciVideoMode video_mode;
+    MciFsTestProfile fs_profile;
+    int preserve_existing_cnfs;
+    MciInstallVerifyMode install_verify_mode;
+} MciSettings;
+''')
+replace_once('src/settings.h',
+'''const char *MciFsTestProfileName(MciFsTestProfile profile);
+unsigned int MciFsTestProfileBytes(MciFsTestProfile profile);
+''',
+'''const char *MciFsTestProfileName(MciFsTestProfile profile);
+unsigned int MciFsTestProfileBytes(MciFsTestProfile profile);
+const char *MciInstallVerifyModeName(MciInstallVerifyMode mode);
+''')
+
+replace_once('src/settings.c',
+'''    settings->fs_profile = MCI_FS_TEST_QUICK;
+    settings->preserve_existing_cnfs = 1;
+    settings->verify_every_install_file = 1;
+''',
+'''    settings->fs_profile = MCI_FS_TEST_QUICK;
+    settings->preserve_existing_cnfs = 1;
+    settings->install_verify_mode = MCI_INSTALL_VERIFY_ENFORCED;
+''')
+replace_once('src/settings.c',
+'''unsigned int MciFsTestProfileBytes(MciFsTestProfile profile)
+{
+    switch (profile) {
+        case MCI_FS_TEST_EXTENDED: return 64u * 1024u;
+        case MCI_FS_TEST_THOROUGH: return 256u * 1024u;
+        case MCI_FS_TEST_QUICK:
+        default: return 4u * 1024u;
+    }
+}
+''',
+'''unsigned int MciFsTestProfileBytes(MciFsTestProfile profile)
+{
+    switch (profile) {
+        case MCI_FS_TEST_EXTENDED: return 64u * 1024u;
+        case MCI_FS_TEST_THOROUGH: return 256u * 1024u;
+        case MCI_FS_TEST_QUICK:
+        default: return 4u * 1024u;
+    }
+}
+
+const char *MciInstallVerifyModeName(MciInstallVerifyMode mode)
+{
+    switch (mode) {
+        case MCI_INSTALL_VERIFY_REQUIRED: return "REQUIRED ONLY";
+        case MCI_INSTALL_VERIFY_DISABLED: return "DISABLED";
+        case MCI_INSTALL_VERIFY_ENFORCED:
+        default: return "ENFORCED";
+    }
+}
+''')
+
+replace_once('src/fmcb_transaction.h',
+'''#include "fmcb_install.h"
+#include "fmcb_recovery.h"
+''',
+'''#include "fmcb_install.h"
+#include "fmcb_recovery.h"
+#include "settings.h"
+''')
+replace_once('src/fmcb_transaction.h',
+'''    FMCB_INSTALL_RESULT_NOT_RUN = 0,
+    FMCB_INSTALL_RESULT_PASS,
+    FMCB_INSTALL_RESULT_REJECTED,
+''',
+'''    FMCB_INSTALL_RESULT_NOT_RUN = 0,
+    FMCB_INSTALL_RESULT_PASS,
+    FMCB_INSTALL_RESULT_PASS_REQUIRED_VERIFY,
+    FMCB_INSTALL_RESULT_PASS_UNVERIFIED,
+    FMCB_INSTALL_RESULT_REJECTED,
+''')
+replace_once('src/fmcb_transaction.h',
+'''typedef struct FmcbInstallOptions {
+    int preserve_existing_cnfs;
+    int verify_every_file;
+} FmcbInstallOptions;
+''',
+'''typedef struct FmcbInstallOptions {
+    int preserve_existing_cnfs;
+    MciInstallVerifyMode verify_mode;
+} FmcbInstallOptions;
+''')
+replace_once('src/fmcb_transaction.h',
+'''    int write_rc;
+    int verify_rc;
+} FmcbInstallFileReport;
+''',
+'''    int write_rc;
+    int verify_rc;
+    int verify_skipped;
+} FmcbInstallFileReport;
+''')
+
+replace_once('src/fmcb_transaction.c',
+'''        recovery == NULL || package->status != FMCB_PACKAGE_READY ||
+        !package->plan.package_complete || !options->verify_every_file ||
+        package->plan.target_port != target_port) {
+''',
+'''        recovery == NULL || package->status != FMCB_PACKAGE_READY ||
+        !package->plan.package_complete ||
+        (unsigned int)options->verify_mode >= MCI_INSTALL_VERIFY_MODE_COUNT ||
+        package->plan.target_port != target_port) {
+''')
+replace_once('src/fmcb_transaction.c',
+'''            file->write_rc = 0;
+            file->verify_rc = 0;
+            report->files_committed++;
+''',
+'''            file->write_rc = 0;
+            file->verify_rc = 0;
+            file->verify_skipped = 1;
+            report->files_committed++;
+''')
+replace_once('src/fmcb_transaction.c',
+'''        report->stage = FMCB_INSTALL_VERIFY_TARGET;
+        TxProgress(base_percent + 6,
+                   "Reopening and verifying FMCB destination",
+                   "Reading the complete committed file back from the memory card and comparing every byte against the bound/source RAM image.");
+        rc = VerifyCardFile(target_port, file->destination, source, source_size);
+        file->verify_rc = rc;
+        free(source);
+        if (rc < 0) {
+            failure_result = FMCB_INSTALL_RESULT_VERIFY_FAILED;
+            goto failure;
+        }
+        report->files_committed++;
+''',
+'''        if (options->verify_mode == MCI_INSTALL_VERIFY_ENFORCED ||
+            (options->verify_mode == MCI_INSTALL_VERIFY_REQUIRED &&
+             (file->flags & FMCB_FILE_REQUIRED))) {
+            report->stage = FMCB_INSTALL_VERIFY_TARGET;
+            TxProgress(base_percent + 6,
+                       "Reopening and verifying FMCB destination",
+                       "Reading the complete committed file back from the memory card and comparing every byte against the bound/source RAM image.");
+            rc = VerifyCardFile(target_port, file->destination, source, source_size);
+            file->verify_rc = rc;
+            file->verify_skipped = 0;
+            free(source);
+            if (rc < 0) {
+                failure_result = FMCB_INSTALL_RESULT_VERIFY_FAILED;
+                goto failure;
+            }
+        } else {
+            file->verify_rc = 0;
+            file->verify_skipped = 1;
+            free(source);
+        }
+        report->files_committed++;
+''')
+replace_once('src/fmcb_transaction.c',
+'''    report->stage = FMCB_INSTALL_RECOVERY_FINISH;
+    TxProgress(97, "Committing the verified transaction",
+               "All selected files passed read-back verification. Marking the USB journal committed before removing recovery backups.");
+''',
+'''    report->stage = FMCB_INSTALL_RECOVERY_FINISH;
+    if (options->verify_mode == MCI_INSTALL_VERIFY_ENFORCED)
+        TxProgress(97, "Committing the verified transaction",
+                   "All selected files passed read-back verification. Marking the USB journal committed before removing recovery backups.");
+    else if (options->verify_mode == MCI_INSTALL_VERIFY_REQUIRED)
+        TxProgress(97, "Committing the required-file verified transaction",
+                   "All required files passed read-back verification; optional destinations were intentionally not reread. Committing the recovery journal.");
+    else
+        TxProgress(97, "Committing the unverified transaction",
+                   "Read-back comparison was disabled by the user. Durable rollback state remains authoritative until the journal is committed.");
+''')
+replace_once('src/fmcb_transaction.c',
+'''    report->stage = FMCB_INSTALL_DONE;
+    report->result = FMCB_INSTALL_RESULT_PASS;
+    report->current_file = -1;
+    TxProgress(100, "Verified FMCB normal install complete",
+               "Every selected target was written, reopened and compared successfully; the persistent recovery journal is clean.");
+    return 0;
+''',
+'''    report->stage = FMCB_INSTALL_DONE;
+    if (options->verify_mode == MCI_INSTALL_VERIFY_ENFORCED)
+        report->result = FMCB_INSTALL_RESULT_PASS;
+    else if (options->verify_mode == MCI_INSTALL_VERIFY_REQUIRED)
+        report->result = FMCB_INSTALL_RESULT_PASS_REQUIRED_VERIFY;
+    else
+        report->result = FMCB_INSTALL_RESULT_PASS_UNVERIFIED;
+    report->current_file = -1;
+    if (options->verify_mode == MCI_INSTALL_VERIFY_ENFORCED)
+        TxProgress(100, "Verified FMCB normal install complete",
+                   "Every selected target was written, reopened and compared successfully; the persistent recovery journal is clean.");
+    else if (options->verify_mode == MCI_INSTALL_VERIFY_REQUIRED)
+        TxProgress(100, "FMCB install complete / required files verified",
+                   "Required destinations were reopened and compared; optional files were committed without read-back comparison.");
+    else
+        TxProgress(100, "FMCB install complete / read-back disabled",
+                   "The transaction committed successfully, but destination contents were not reread after writing.");
+    return 0;
+''')
+replace_once('src/fmcb_transaction.c',
+'''        case FMCB_INSTALL_RESULT_PASS: return "PASS / VERIFIED";
+        case FMCB_INSTALL_RESULT_REJECTED: return "REJECTED BY PRECONDITIONS";
+''',
+'''        case FMCB_INSTALL_RESULT_PASS: return "PASS / VERIFIED";
+        case FMCB_INSTALL_RESULT_PASS_REQUIRED_VERIFY: return "PASS / REQUIRED FILES VERIFIED";
+        case FMCB_INSTALL_RESULT_PASS_UNVERIFIED: return "PASS / READ-BACK DISABLED";
+        case FMCB_INSTALL_RESULT_REJECTED: return "REJECTED BY PRECONDITIONS";
+''')
+
+replace_once('src/gui.c',
+'''#define PSMCT32_PAGE_H 32u
+
+#define VSYNC_TIMEOUT_MS 250u
+''',
+'''#define PSMCT32_PAGE_H 32u
+#define MARQUEE_STEP_MS 120u
+#define MARQUEE_GAP_CHARS 4u
+#define MARQUEE_HOLD_STEPS 6u
+
+#define VSYNC_TIMEOUT_MS 250u
+''')
+replace_once('src/gui.c',
+'''static int FilteredPresentation = 1;
+
+static int wait_gif_idle(unsigned int timeout_ms)
+''',
+'''static int FilteredPresentation = 1;
+static u64 MarqueeEpoch;
+static int MarqueeNeeded;
+
+static int wait_gif_idle(unsigned int timeout_ms)
+''')
+replace_once('src/gui.c',
+'''static qword_t *text_box(qword_t *q, float x, float y,
+                         float max_x, float max_y,
+                         const char *value, UiRgb rgb)
+{
+    const char *p = value;
+    float cx = x;
+    float cy = y;
+    color_t color;
+
+    if (p == NULL)
+        return q;
+    color_set(&color, rgb);
+
+    while (*p != '\\0' && cy + GLYPH_H <= max_y) {
+''',
+'''static qword_t *text_marquee_box(qword_t *q, float x, float y,
+                                 float max_x, const char *value, UiRgb rgb)
+{
+    size_t length = strcspn(value, "\\r\\n");
+    unsigned int cells = max_x > x ? (unsigned int)((max_x - x) / GLYPH_W) : 0u;
+    unsigned int ring;
+    unsigned int step;
+    unsigned int phase;
+    unsigned int offset;
+    unsigned int i;
+    color_t color;
+
+    if (cells == 0u || length == 0u)
+        return q;
+    color_set(&color, rgb);
+    MarqueeNeeded = 1;
+    ring = (unsigned int)length + MARQUEE_GAP_CHARS;
+    step = (unsigned int)((GetTimerSystemTime() - MarqueeEpoch) /
+                          MSec2TimerBusClock(MARQUEE_STEP_MS));
+    phase = step % (MARQUEE_HOLD_STEPS + ring);
+    offset = phase < MARQUEE_HOLD_STEPS ? 0u : phase - MARQUEE_HOLD_STEPS;
+
+    for (i = 0; i < cells; i++) {
+        unsigned int pos = (offset + i) % ring;
+        unsigned char ch = pos < length ? (unsigned char)value[pos] : ' ';
+        q = glyph(q, x + (float)(i * GLYPH_W), y, ch, &color);
+    }
+    return q;
+}
+
+static qword_t *text_box(qword_t *q, float x, float y,
+                         float max_x, float max_y,
+                         const char *value, UiRgb rgb)
+{
+    const char *p = value;
+    float cx = x;
+    float cy = y;
+    color_t color;
+
+    if (p == NULL)
+        return q;
+    color_set(&color, rgb);
+    if (max_y - y <= GLYPH_H + 1.0f) {
+        size_t length = strcspn(value, "\\r\\n");
+        unsigned int cells = max_x > x ? (unsigned int)((max_x - x) / GLYPH_W) : 0u;
+        if (length > cells)
+            return text_marquee_box(q, x, y, max_x, value, rgb);
+    }
+
+    while (*p != '\\0' && cy + GLYPH_H <= max_y) {
+''')
+replace_once('src/gui.c',
+'''static qword_t *frame_begin(packet_t **packet_out)
+{
+    qword_t *q;
+
+    if (wait_gif_idle(GIF_TIMEOUT_MS) < 0)
+''',
+'''static qword_t *frame_begin(packet_t **packet_out)
+{
+    qword_t *q;
+
+    MarqueeNeeded = 0;
+    if (wait_gif_idle(GIF_TIMEOUT_MS) < 0)
+''')
+replace_once('src/gui.c',
+'''    q = settings_row(q, 3, selected_row, "Install read-back verify",
+                     settings->verify_every_install_file ? "ENFORCED" : "DISABLED",
+                     "Every committed installer file should be reopened and compared before success.");
+''',
+'''    q = settings_row(q, 3, selected_row, "Install read-back verify",
+                     MciInstallVerifyModeName(settings->install_verify_mode),
+                     settings->install_verify_mode == MCI_INSTALL_VERIFY_ENFORCED
+                         ? "Every selected installer file is reopened and byte-compared before commit."
+                         : settings->install_verify_mode == MCI_INSTALL_VERIFY_REQUIRED
+                               ? "Required files are reopened and compared; optional payloads skip the second read."
+                               : "Read-back comparison is disabled; durable USB rollback protection remains active.");
+''')
+replace_once('src/gui.c',
+'''    DrawStateDirty = 0;
+    CurrentVideoMode = MCI_VIDEO_NATIVE;
+    RendererReady = 1;
+''',
+'''    DrawStateDirty = 0;
+    CurrentVideoMode = MCI_VIDEO_NATIVE;
+    MarqueeEpoch = GetTimerSystemTime();
+    MarqueeNeeded = 0;
+    RendererReady = 1;
+''')
+replace_once('src/gui.c',
+'''int MciGuiReady(void)
+{
+    return RendererReady;
+}
+
+void MciGuiRenderDashboard''',
+'''int MciGuiReady(void)
+{
+    return RendererReady;
+}
+
+int MciGuiNeedsAnimation(void)
+{
+    return MarqueeNeeded;
+}
+
+void MciGuiRenderDashboard''')
+replace_once('src/gui.h',
+'''int MciGuiReady(void);
+int MciGuiApplyVideoMode(MciVideoMode mode);
+''',
+'''int MciGuiReady(void);
+int MciGuiNeedsAnimation(void);
+int MciGuiApplyVideoMode(MciVideoMode mode);
+''')
+
+replace_once('src/app_main.c',
+'''#include <delaythread.h>
+#include <libmc.h>
+''',
+'''#include <delaythread.h>
+#include <timer.h>
+#include <libmc.h>
+''')
+replace_once('src/app_main.c',
+'''    } else if (row == 2) {
+        Settings.preserve_existing_cnfs ^= 1;
+    }
+    /* Per-file read-back verification is intentionally not user-disableable. */
+}
+''',
+'''    } else if (row == 2) {
+        Settings.preserve_existing_cnfs ^= 1;
+    } else if (row == 3) {
+        int value = (int)Settings.install_verify_mode + direction;
+        if (value < 0) value = (int)MCI_INSTALL_VERIFY_MODE_COUNT - 1;
+        if (value >= (int)MCI_INSTALL_VERIFY_MODE_COUNT) value = 0;
+        Settings.install_verify_mode = (MciInstallVerifyMode)value;
+    }
+}
+''')
+replace_once('src/app_main.c',
+'''    options.preserve_existing_cnfs = Settings.preserve_existing_cnfs;
+    options.verify_every_file = 1;
+''',
+'''    options.preserve_existing_cnfs = Settings.preserve_existing_cnfs;
+    options.verify_mode = Settings.install_verify_mode;
+''')
+replace_once('src/app_main.c',
+'''    if (rc == 0) {
+        char result[360];
+        snprintf(result, sizeof(result),
+                 "Normal FMCB installation completed on mc%d. %d/%d selected entries committed or intentionally preserved. Every write passed full read-back comparison. Space check: free=%d, payload=%u, reclaimable=%u, reserve=%u clusters. Persistent recovery state was committed and removed.",
+                 target_port, report->files_committed, report->files_total,
+                 report->free_clusters, report->payload_clusters,
+                 report->reclaimable_clusters, report->reserve_clusters);
+        MciGuiRenderMessage("FMCB install PASS / VERIFIED", result,
+                            "CROSS or CIRCLE returns to the dashboard.",
+                            MCI_GUI_TONE_SUCCESS);
+''',
+'''    if (rc == 0) {
+        char result[440];
+        const char *verify_summary;
+        MciGuiTone tone = MCI_GUI_TONE_SUCCESS;
+
+        if (Settings.install_verify_mode == MCI_INSTALL_VERIFY_ENFORCED)
+            verify_summary = "Every selected write passed full read-back comparison.";
+        else if (Settings.install_verify_mode == MCI_INSTALL_VERIFY_REQUIRED)
+            verify_summary = "Required files passed read-back comparison; optional payloads were committed without a second read.";
+        else {
+            verify_summary = "Read-back comparison was disabled by user policy; the transaction committed without post-write byte comparison.";
+            tone = MCI_GUI_TONE_WARNING;
+        }
+        snprintf(result, sizeof(result),
+                 "Normal FMCB installation completed on mc%d. %d/%d selected entries committed or intentionally preserved. %s Space check: free=%d, payload=%u, reclaimable=%u, reserve=%u clusters. Persistent recovery state was committed and removed.",
+                 target_port, report->files_committed, report->files_total,
+                 verify_summary, report->free_clusters, report->payload_clusters,
+                 report->reclaimable_clusters, report->reserve_clusters);
+        MciGuiRenderMessage(FmcbInstallResultText(report->result), result,
+                            "CROSS or CIRCLE returns to the dashboard.", tone);
+''')
+replace_once('src/app_main.c',
+'''                    snprintf(message, sizeof(message),
+                             "Install normal FreeMcBoot to mc%d:\\n\\nTarget: %s/%s\\nROMVER: %04X%c  MechaCon: %u.%02u\\nPolicy: %s\\n%s\\n\\nThe card, MagicGate and package will be revalidated. Space is simulated before writes. Every replaced target is persisted and verified on USB, every card write is read back, and an interrupted transaction can be recovered on the marked target card.",
+                             selected, plan->destination_system,
+                             plan->destination_osd, plan->rom_version,
+                             plan->romver_region,
+                             plan->console.mecha_major,
+                             plan->console.mecha_minor,
+                             MciConsoleRegionPolicyText(&plan->console),
+                             compact);
+''',
+'''                    snprintf(message, sizeof(message),
+                             "Install normal FreeMcBoot to mc%d:\\n\\nTarget: %s/%s\\nROMVER: %04X%c  MechaCon: %u.%02u\\nPolicy: %s\\nVerify: %s\\n%s\\n\\nThe card, MagicGate and package will be revalidated. Space is simulated before writes. Every replaced target is persisted and verified on USB. %s An interrupted transaction can be recovered on the marked target card.",
+                             selected, plan->destination_system,
+                             plan->destination_osd, plan->rom_version,
+                             plan->romver_region,
+                             plan->console.mecha_major,
+                             plan->console.mecha_minor,
+                             MciConsoleRegionPolicyText(&plan->console),
+                             MciInstallVerifyModeName(Settings.install_verify_mode),
+                             compact,
+                             Settings.install_verify_mode == MCI_INSTALL_VERIFY_ENFORCED
+                                 ? "Every card write is also read back byte-for-byte."
+                                 : Settings.install_verify_mode == MCI_INSTALL_VERIFY_REQUIRED
+                                       ? "Required files are read back; optional files skip that second read."
+                                       : "WARNING: card destinations are not read back after writing.");
+''')
+replace_once('src/app_main.c',
+'''    int dirty = 1;
+    u32 held;
+    u32 pressed;
+''',
+'''    int dirty = 1;
+    u64 last_marquee_tick = 0;
+    u32 held;
+    u32 pressed;
+''')
+replace_once('src/app_main.c',
+'''    while (1) {
+        if (dirty) {
+            RenderDashboard(selected, page, settings_row, last_video_rc,
+                            confirm_format, last_format_rc);
+            dirty = 0;
+        }
+
+        pressed = ReadPadPressed(&held);
+''',
+'''    while (1) {
+        if (!dirty && !install_result_modal && !confirm_install &&
+            !confirm_recovery && MciGuiNeedsAnimation() &&
+            GetTimerSystemTime() - last_marquee_tick >= MSec2TimerBusClock(80u))
+            dirty = 1;
+        if (dirty) {
+            RenderDashboard(selected, page, settings_row, last_video_rc,
+                            confirm_format, last_format_rc);
+            last_marquee_tick = GetTimerSystemTime();
+            dirty = 0;
+        }
+
+        pressed = ReadPadPressed(&held);
+''')
