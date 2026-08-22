@@ -1,16 +1,13 @@
 /*
- * Briscoe dev10 diagnostic shim.
- * CI marker: hardware candidate 9.
+ * Briscoe dev10/dev11 diagnostic shim.
  *
- * Real hardware shows the PS2SDK v1 MCSERV returning RESIDENT_END and the
- * next LOADFILE RPC never completing. For this one diagnostic build we skip
- * loading that temporary MCSERV and fake only the EE-side libmc probe inside
- * the isolated MagicGate session. The normal ROM X stack still uses the real
- * libmc path before and after the probe.
+ * Real hardware showed the PS2SDK v1 MCSERV returning RESIDENT_END and the
+ * next LOADFILE RPC never completing. The isolated security session therefore
+ * skips temporary MCSERV and fakes only the EE-side libmc sanity probe.
  *
- * This isolates the question we actually care about: can the PS2SDK v1 MCMAN
- * callback path coexist with the FMCB SECRMAN and carry the Kbit/Kc card-auth
- * commands, without involving the old MCSERV RPC server at all?
+ * dev11 additionally loads a tiny project-owned mgtrace RPC server immediately
+ * after SECRSIF. The tracer talks to SIO2 directly and is used only after a
+ * failed GET_KBIT to identify the exact F2/50..53 card-auth boundary.
  */
 
 #include <tamtypes.h>
@@ -20,6 +17,8 @@
 
 extern unsigned char fmcb_mcserv_irx[];
 extern unsigned char secrsif_irx[];
+extern unsigned char mgtrace_irx[];
+extern unsigned int size_mgtrace_irx;
 
 static int Dev10IsolatedNoMcserv;
 static int Dev10FakeMcInitDone;
@@ -38,7 +37,7 @@ int __wrap_SifExecModuleBuffer(void *ptr, u32 size, u32 arg_len,
     int rc;
 
     if (ptr == fmcb_mcserv_irx) {
-        scr_printf("[DEV10] Skipping temporary MCSERV v1 (diagnostic).\n");
+        scr_printf("[DEV11] Skipping temporary MCSERV v1.\n");
         if (mod_res != 0)
             *mod_res = 0;
         Dev10IsolatedNoMcserv = 1;
@@ -48,13 +47,29 @@ int __wrap_SifExecModuleBuffer(void *ptr, u32 size, u32 arg_len,
     }
 
     if (ptr == secrsif_irx)
-        scr_printf("[DEV10] Entering SECRSIF load after MCMAN v1...\n");
+        scr_printf("[DEV11] Loading SECRSIF after MCMAN v1...\n");
 
     rc = __real_SifExecModuleBuffer(ptr, size, arg_len, args, mod_res);
 
-    if (ptr == secrsif_irx)
-        scr_printf("[DEV10] SECRSIF load returned rc=%d start=%d.\n",
+    if (ptr == secrsif_irx) {
+        int trace_rc;
+        int trace_start = -999;
+
+        scr_printf("[DEV11] SECRSIF returned rc=%d start=%d.\n",
                    rc, mod_res != 0 ? *mod_res : -999);
+        if (rc >= 0) {
+            scr_printf("[DEV11] Loading direct card-auth tracer...\n");
+            trace_rc = __real_SifExecModuleBuffer(mgtrace_irx,
+                                                   size_mgtrace_irx,
+                                                   0, NULL, &trace_start);
+            if (trace_rc < 0)
+                scr_printf("[DEV11] mgtrace FAILED rc=%d start=%d.\n",
+                           trace_rc, trace_start);
+            else
+                scr_printf("[DEV11] mgtrace OK rc=%d start=%d.\n",
+                           trace_rc, trace_start);
+        }
+    }
 
     return rc;
 }
@@ -62,7 +77,7 @@ int __wrap_SifExecModuleBuffer(void *ptr, u32 size, u32 arg_len,
 int __wrap_mcInit(int type)
 {
     if (Dev10IsolatedNoMcserv && !Dev10FakeMcInitDone) {
-        scr_printf("[DEV10] Bypassing isolated EE mcInit; MCMAN remains active.\n");
+        scr_printf("[DEV11] Bypassing isolated EE mcInit; MCMAN stays active.\n");
         Dev10FakeMcInitDone = 1;
         return 0;
     }
@@ -70,7 +85,7 @@ int __wrap_mcInit(int type)
     if (Dev10IsolatedNoMcserv && Dev10FakeMcInitDone) {
         Dev10IsolatedNoMcserv = 0;
         Dev10FakeMcPending = 0;
-        scr_printf("[DEV10] Restored ROM X stack: real mcInit resumes.\n");
+        scr_printf("[DEV11] Restored ROM X stack: real mcInit resumes.\n");
     }
 
     return __real_mcInit(type);
