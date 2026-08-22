@@ -7,26 +7,26 @@ on:
     paths:
       - 'src/**'
       - 'tools/**'
+      - 'docs/**'
       - 'Makefile'
       - '.github/workflows/build.yml'
       - 'LICENSE'
       - 'CREDITS.md'
       - 'THIRD_PARTY_NOTICES.md'
-      - 'RELEASE_NOTES.md'
       - 'licenses/**'
   push:
     branches:
       - main
-      - feat/0.2.0-briscoe
+      - feat/0.3.0
     paths:
       - 'src/**'
       - 'tools/**'
+      - 'docs/**'
       - 'Makefile'
       - '.github/workflows/build.yml'
       - 'LICENSE'
       - 'CREDITS.md'
       - 'THIRD_PARTY_NOTICES.md'
-      - 'RELEASE_NOTES.md'
       - 'licenses/**'
 
 permissions:
@@ -60,7 +60,6 @@ jobs:
             -e PS2SDK_SECURITY_COMMIT="$PS2SDK_SECURITY_COMMIT" \
             ps2dev/ps2dev:v2.0.0 \
             sh -c 'set -eu; apk add --no-cache git python3 build-base >/dev/null; for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/ps2sdk2-mg/$f"; done; git init -q /tmp/ps2sdk-src; git -C /tmp/ps2sdk-src remote add origin https://github.com/ps2dev/ps2sdk.git; git -C /tmp/ps2sdk-src fetch -q --depth 1 origin "$PS2SDK_SECURITY_COMMIT"; git -C /tmp/ps2sdk-src checkout -q FETCH_HEAD; python3 /work/tools/patch_secrman14_diag.py /tmp/ps2sdk-src/iop/security/secrman; PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrman clean all; PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrsif clean all; cp /tmp/ps2sdk-src/iop/security/secrman/irx/secrman.irx /work/.build/ps2sdk2-secr14/secrman.irx; cp /tmp/ps2sdk-src/iop/security/secrsif/irx/secrsif.irx /work/.build/ps2sdk2-secr14/secrsif.irx'
-          ls -lh .build/ps2sdk2-mg .build/ps2sdk2-secr14
           sha256sum .build/ps2sdk2-mg/*.irx .build/ps2sdk2-secr14/*.irx
 
       - name: Build standalone ELF in PS2DEV v2.0.0
@@ -74,7 +73,7 @@ jobs:
             ps2dev/ps2dev:v2.0.0 \
             sh -c 'set -eu; apk add --no-cache build-base >/dev/null; mips64r5900el-ps2-elf-gcc --version; make'
 
-      - name: Assemble release package
+      - name: Assemble development artifact
         shell: bash
         run: |
           set -euo pipefail
@@ -84,16 +83,16 @@ jobs:
           cp CREDITS.md artifacts/CREDITS.md
           cp THIRD_PARTY_NOTICES.md artifacts/THIRD_PARTY_NOTICES.md
           cp README.md artifacts/README.md
-          cp RELEASE_NOTES.md artifacts/RELEASE_NOTES.md
           cp licenses/PS2SDK-AFL-2.0.txt artifacts/licenses/PS2SDK-AFL-2.0.txt
           {
-            echo "PS2 Memory Card Inspector 0.2.0 - Briscoe"
+            echo "PS2 Memory Card Inspector 0.3.0 development"
             echo "Project revision: $GITHUB_SHA"
+            echo "Frontend: native 640x224 GS dashboard, no video mode selector"
             echo "PS2SDK security source: https://github.com/ps2dev/ps2sdk/commit/$PS2SDK_SECURITY_COMMIT"
             echo "SECRMAN: PS2SDK 2.0 module version 1.4, instrumented by tools/patch_secrman14_diag.py"
           } > artifacts/SOURCE_PROVENANCE.txt
 
-      - name: Verify release output
+      - name: Verify output
         shell: bash
         run: |
           set -euo pipefail
@@ -101,10 +100,10 @@ jobs:
           ls -lh artifacts/MC_INSPECTOR.ELF
           sha256sum artifacts/MC_INSPECTOR.ELF | tee artifacts/SHA256SUMS.txt
 
-      - name: Upload release candidate
+      - name: Upload development build
         uses: actions/upload-artifact@v4
         with:
-          name: PS2-Memory-Card-Inspector-0.2.0-Briscoe-${{ github.sha }}
+          name: PS2-Memory-Card-Inspector-0.3.0-dev-${{ github.sha }}
           path: artifacts/
           if-no-files-found: error
-          retention-days: 90
+          retention-days: 30
