@@ -1,14 +1,16 @@
 /*
  * PS2 Memory Card Inspector
  * -------------------------
- * Briscoe dev12 keeps the hardware-validated ordinary memory-card stack as the
- * permanent application personality. MagicGate/KELF work runs in an isolated
- * IOP session using the same PS2SDK v1-era card stack expected by the classic
- * FMCB SECRMAN 1.3 modules, then the normal ROM X stack is restored.
+ * Briscoe keeps ordinary memory-card I/O on the hardware-validated Sony ROM X
+ * stack and runs MagicGate/KELF work in a temporary, isolated IOP personality.
  *
- * dev12 source-builds that pinned SECRMAN and instruments only a failed
- * SecrDownloadGetKbit() path, avoiding the post-failure command replay used by
- * dev11.
+ * The selected security profile is embedded at build time. fmcb13 is the
+ * hardware-validated compatibility baseline; ps2sdk14 uses PS2SDK 2.0
+ * SECRMAN 1.4, matching SECRSIF and the matching PS2SDK 2.0 card stack.
+ * Both profiles use the same corrected logical-card -> physical-SIO2 mapping
+ * and the same in-path GET_KBIT diagnostics. The RAM-only probe never writes
+ * the bound KELF to a memory card and the normal ROM X stack is rebuilt after
+ * every security-session attempt.
  */
 
 #include <tamtypes.h>
@@ -33,13 +35,29 @@
 #include "magicgate.h"
 #include "fmcb_install.h"
 
-#define APP_VERSION "0.2.0-dev12"
+#define APP_VERSION "0.2.0-dev14"
 #define APP_CODENAME "Briscoe"
 #define SLOT_COUNT 2
 #define VIEW_CARD 0
 #define VIEW_MAGICGATE 1
 #define VIEW_FMCB 2
 #define VIEW_COUNT 3
+
+#if defined(MG_SECR_PROFILE_PS2SDK14)
+#define MG_PROFILE_NAME "PS2SDK 2.0 SECRMAN 1.4"
+#define MG_STACK_SHORT "PS2SDK2/SECR1.4"
+#define MG_SIO2_LABEL "MG/PS2SDK2 SIO2MAN"
+#define MG_PAD_LABEL "MG/PS2SDK2 PADMAN"
+#define MG_MCMAN_LABEL "MG/PS2SDK2 MCMAN"
+#define MG_MCSERV_LABEL "MG/PS2SDK2 MCSERV"
+#else
+#define MG_PROFILE_NAME "FMCB compatibility SECRMAN 1.3"
+#define MG_STACK_SHORT "FMCB13/PS2SDK-v1"
+#define MG_SIO2_LABEL "MG/FMCB SIO2MAN v1"
+#define MG_PAD_LABEL "MG/FMCB PADMAN v1"
+#define MG_MCMAN_LABEL "MG/FMCB MCMAN v1"
+#define MG_MCSERV_LABEL "MG/FMCB MCSERV v1"
+#endif
 
 extern unsigned char secrman_irx[];
 extern unsigned int size_secrman_irx;
@@ -151,7 +169,7 @@ static void ShutdownNormalClients(void)
     }
 }
 
-/* Generate the tiny SECRMAN IOPRP in EE RAM. No external IOPRP blob is used. */
+/* Generate a minimal IOPRP containing the selected SECRMAN in EE RAM. */
 static int RebootIopWithSecrman(void)
 {
     struct ioprpgen_ctx ctx;
@@ -194,15 +212,15 @@ static int RebootIopWithSecrman(void)
 }
 
 /*
- * Isolated FMCB-compatible security personality.
+ * Isolated MagicGate security personality.
  *
- * Real hardware reached DownloadHeader/DownloadBlock with ROM XMCMAN but then
- * failed at Kbit on both official Sony cards. Kbit is the first path that calls
- * SECRMAN's card_encrypt(), which requires MCMAN to have registered the
- * mcCommand and device-ID callbacks. FreeMcBoot Installer builds its card
- * modules in ps2dev/ps2dev:v1.0, whose MCMAN imports secrman 1.3. dev12 keeps
- * that exact generation inside this temporary session and instruments the real
- * GET_KBIT execution rather than replaying F2 commands after it returns.
+ * SECRMAN's GET_KBIT card_encrypt path depends on MCMAN registering its
+ * mcCommand and device-ID handlers. Each build profile therefore embeds a
+ * matched SIO2/PAD/MCMAN generation alongside its SECRMAN/SECRSIF pair.
+ *
+ * Temporary MCSERV is intentionally presented to the wrapper below but skipped
+ * at runtime: real hardware showed that starting it can wedge the following
+ * LOADFILE RPC. MCMAN stays resident, which is what CardAuth actually needs.
  */
 static int InitMagicGateSession(MagicGateReport *report)
 {
@@ -224,16 +242,16 @@ static int InitMagicGateSession(MagicGateReport *report)
     sbv_patch_enable_lmb();
 
     rc = LoadEmbeddedModule(fmcb_freesio2_irx, size_fmcb_freesio2_irx,
-                            "MG/FMCB SIO2MAN v1");
+                            MG_SIO2_LABEL);
     if (rc < 0) goto out;
     rc = LoadEmbeddedModule(fmcb_freepad_irx, size_fmcb_freepad_irx,
-                            "MG/FMCB PADMAN v1");
+                            MG_PAD_LABEL);
     if (rc < 0) goto out;
     rc = LoadEmbeddedModule(fmcb_mcman_irx, size_fmcb_mcman_irx,
-                            "MG/FMCB MCMAN v1");
+                            MG_MCMAN_LABEL);
     if (rc < 0) goto out;
     rc = LoadEmbeddedModule(fmcb_mcserv_irx, size_fmcb_mcserv_irx,
-                            "MG/FMCB MCSERV v1");
+                            MG_MCSERV_LABEL);
     if (rc < 0) goto out;
 
     mg_rc = MagicGateLoadIopModules(&MgIopStatus);
@@ -288,10 +306,11 @@ static int RunMagicGateSession(int target_port)
         return rc;
 
     scr_clear();
-    scr_printf("PS2 Memory Card Inspector - Briscoe dev12 MagicGate session\n\n");
+    scr_printf("PS2 Memory Card Inspector - %s MagicGate session\n\n",
+               APP_CODENAME);
     scr_printf("KELF prepared from %s (%d bytes)\n",
                kelf.source_path, kelf.size);
-    scr_printf("Switching to FMCB-compatible PS2SDK v1 IOP stack...\n");
+    scr_printf("Switching to isolated %s stack...\n", MG_PROFILE_NAME);
 
     ShutdownNormalClients();
 
@@ -333,7 +352,8 @@ static void RenderHeader(int selected, int view)
         page = "FMCB PREFLIGHT";
 
     scr_printf("PS2 Memory Card Inspector v%s - %s\n", APP_VERSION, APP_CODENAME);
-    scr_printf("PS2DEV 2.0 EE / ROM normal + FMCB-v1 MG / %s\n\n", page);
+    scr_printf("PS2DEV 2.0 EE / ROM normal + %s / %s\n\n",
+               MG_STACK_SHORT, page);
     scr_printf("< LEFT/RIGHT > slot   X filesystem   SQUARE MagicGate\n");
     scr_printf("CIRCLE FMCB scan   R1 next page   START test both   SELECT exit\n\n");
     scr_printf("Selected: SLOT %d (mc%d:)\n", selected + 1, selected);
@@ -471,7 +491,7 @@ static void RenderFmcbView(int selected)
     }
 
     scr_printf("\nCIRCLE: rescan user package\n");
-    scr_printf("INSTALL: DISABLED IN DEV12 (preflight is read-only)\n");
+    scr_printf("INSTALL: DISABLED IN DEV14 (preflight is read-only)\n");
 }
 
 static void Render(int selected, int view, int confirm_format, int last_format_rc)
@@ -526,7 +546,8 @@ int main(int argc, char *argv[])
 
     init_scr();
     scr_clear();
-    scr_printf("PS2 Memory Card Inspector - Briscoe dev12\n");
+    scr_printf("PS2 Memory Card Inspector v%s - %s\n", APP_VERSION, APP_CODENAME);
+    scr_printf("Security profile: %s\n", MG_PROFILE_NAME);
     scr_printf("Initializing hardware-validated normal ROM X stack...\n");
 
     init_rc = InitNormalCardStack();
