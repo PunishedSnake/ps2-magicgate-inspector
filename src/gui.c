@@ -48,8 +48,20 @@
 #define ATLAS_H 64
 
 #define ALT_STORAGE_W 640
-#define ALT_STORAGE_H 1080
+/*
+ * The alternate slots are allocated as PSM16 storage but are reinterpreted as
+ * PSM32 framebuffers. A 640x540 PSM32 GS buffer spans 10 x 17 = 170 GS pages
+ * because PSMCT32 pages are 64x32 pixels. PS2SDK graph_vram_size() uses a
+ * linear byte count and rounds 640x540 to only 169 pages. Reserving 1080 PSM16
+ * lines therefore places the second 1080i buffer's final GS page on top of the
+ * font atlas. 1088 PSM16 lines advance the allocator by the required 170 pages
+ * per slot while keeping all other alternate modes inside the same reservation.
+ */
+#define ALT_STORAGE_H 1088
 #define ALT_STORAGE_PSM GS_PSM_16
+#define GS_PAGE_WORDS 2048u
+#define PSMCT32_PAGE_W 64u
+#define PSMCT32_PAGE_H 32u
 
 #define VSYNC_TIMEOUT_MS 250u
 #define GIF_TIMEOUT_MS 250u
@@ -460,6 +472,15 @@ static void configure_alt_frames(const MciVideoSpec *spec)
     }
 }
 
+static unsigned int psmct32_page_footprint_words(unsigned int width,
+                                                  unsigned int height)
+{
+    unsigned int pages_x = (width + PSMCT32_PAGE_W - 1u) / PSMCT32_PAGE_W;
+    unsigned int pages_y = (height + PSMCT32_PAGE_H - 1u) / PSMCT32_PAGE_H;
+
+    return pages_x * pages_y * GS_PAGE_WORDS;
+}
+
 static int environment_setup(void)
 {
     packet_t *packet;
@@ -483,6 +504,20 @@ static int environment_setup(void)
                                           GRAPH_ALIGN_BLOCK);
     if (texture_address < 0)
         return -3;
+    {
+        const MciVideoGeometry *g1080 = MciVideoModeGeometry(MCI_VIDEO_1080I);
+        unsigned int frame_words;
+
+        if (g1080 == NULL)
+            return -3;
+        frame_words = psmct32_page_footprint_words(g1080->frame_width,
+                                                   g1080->frame_height);
+        /* Fail closed if a future geometry/allocation change can alias either
+         * 1080i framebuffer with its neighbour or with the font texture. */
+        if (AltFrames[1].address < AltFrames[0].address + frame_words ||
+            (unsigned int)texture_address < AltFrames[1].address + frame_words)
+            return -3;
+    }
     FontTexture.address = (unsigned int)texture_address;
 
     Zbuffer.enable = DRAW_DISABLE;
@@ -1234,7 +1269,7 @@ static qword_t *render_settings(qword_t *q,
     char video[96];
     char footer[96];
 
-    q = panel_title(q, 12, 55, 628, 65, "SETTINGS", Theme.accent);
+    q = panel_title(q, 12, 55, 628, 69, "SETTINGS", Theme.accent);
     snprintf(video, sizeof(video), "%s%s",
              MciVideoModeName(settings->video_mode),
              settings->video_mode == MciGuiCurrentVideoMode() ? "  [ACTIVE]" : "  [PENDING]");
