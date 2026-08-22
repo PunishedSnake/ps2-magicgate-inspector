@@ -240,6 +240,9 @@ static int RestoreNormalEnvironment(void)
 
     CardInspect(0, &Reports[0]);
     CardInspect(1, &Reports[1]);
+    MciGuiRenderMessage("Normal environment restored",
+                        "Sony ROM X card stack restored; real mcInit and ordinary filesystem I/O resumed.",
+                        NULL, MCI_GUI_TONE_SUCCESS);
     return 0;
 }
 
@@ -345,7 +348,7 @@ int main(int argc, char *argv[])
     init_scr();
     if (MciGuiInit() < 0) {
         scr_clear();
-        scr_printf("PS2 Memory Card Inspector 0.3.0-dev1\n\n");
+        scr_printf("PS2 Memory Card Inspector 0.3.0-dev2\n\n");
         scr_printf("GS frontend initialization failed.\n");
         SleepThread();
     }
@@ -415,7 +418,7 @@ int main(int argc, char *argv[])
 
             if (pressed & PAD_CROSS) {
                 MciGuiRenderMessage("Filesystem test",
-                                    "Inspecting the selected card and running the temporary 4 KiB integrity test.",
+                                    "Inspecting the selected card with a temporary 4 KiB read/write test.",
                                     NULL, MCI_GUI_TONE_INFO);
                 InspectAndInvalidateMagicGate(selected);
                 page = MCI_GUI_CARD;
