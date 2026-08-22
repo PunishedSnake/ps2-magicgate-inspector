@@ -1,18 +1,19 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * MagicGate SECR port bridge and failed-GET_KBIT diagnostics.
  *
- * Hardware validation established two independent requirements that belong at
- * the SECRSIF boundary rather than in the normal filesystem code:
+ * Hardware validation established two requirements that belong at the SECRSIF
+ * boundary rather than in the ordinary filesystem code:
  *
  *  - libmc exposes logical memory-card ports 0/1, while SECRMAN CardAuth uses
  *    physical SIO2 memory-card channels 2/3 directly;
- *  - a failed GET_KBIT needs to distinguish Mechacon preparation from the real
- *    card-side F2/50..53 transform without replaying extra commands afterwards.
+ *  - a failed GET_KBIT must distinguish Mechacon preparation from the real
+ *    card-side F2/50..53 transform without replaying additional commands.
  *
- * Both security profiles emit the same compact 16-byte failure record on a
- * failed GET_KBIT only. Successful SECRMAN behavior is left unchanged. This EE
- * shim decodes that record and gives the validated first-command RX/no-ACK
- * signature a specific “not supported” verdict; other failures remain protocol
+ * The PS2SDK 2.0 SECRMAN 1.4 build emits a compact 16-byte diagnostic record
+ * only when GET_KBIT fails. Successful SECRMAN behavior is unchanged. This EE
+ * shim decodes that record and classifies the hardware-validated first-command
+ * RX/no-ACK signature as unsupported CardAuth; other failures remain protocol
  * errors or indeterminate infrastructure/Mechacon failures.
  */
 
@@ -81,6 +82,11 @@ static void ClearRecord(void)
     memset(&Record, 0, sizeof(Record));
 }
 
+/*
+ * SECRMAN receives a raw SIO2 channel index, not a libmc logical port. Keep
+ * 0/1 everywhere else and translate only the three SECR RPCs that carry a card
+ * port. This mirrors the reference FreeMcBoot binding path (2 + logical port).
+ */
 static int PhysicalSecrPort(int port)
 {
     if (port >= 0 && port <= 1)
@@ -137,10 +143,10 @@ static const char *ReasonText(void)
 }
 
 /*
- * This signature was observed only after the corrected physical card port was
- * in use and the same backend had already passed known-good cards. It therefore
- * means “the card did not ACK the first CardAuth command” rather than “the
- * Inspector contacted the wrong SIO2 channel”.
+ * This exact signature was reproduced on a third-party 64 MB card without
+ * functional MagicGate while known-good cards completed the same backend with
+ * FUNCTIONAL. It therefore means that the card did not ACK the first CardAuth
+ * command, not that Inspector selected the wrong SIO2 channel.
  */
 static int LooksLikeNoMagicGateAck(void)
 {
@@ -176,9 +182,6 @@ int __wrap_sceSifCallRpc(SifRpcClientData_t *cd, int fno, int mode,
 {
     int rc;
 
-    /* Reference FMCB code signs with SecrDownloadFile(2 + port, ...). Keep the
-     * application's libmc-facing numbering at 0/1 and translate only RPCs that
-     * carry a memory-card port into SECRMAN. */
     if (fno == 1 && send != NULL) {
         if (cd == HeaderClient) {
             struct SecrSifDownloadHeaderParams *param;
