@@ -17,7 +17,7 @@ on:
   push:
     branches:
       - main
-      - feat/0.3.0
+      - feat/0.4.0
     paths:
       - 'src/**'
       - 'tools/**'
@@ -85,9 +85,11 @@ jobs:
           cp README.md artifacts/README.md
           cp licenses/PS2SDK-AFL-2.0.txt artifacts/licenses/PS2SDK-AFL-2.0.txt
           {
-            echo "PS2 Memory Card Inspector 0.3.0 development"
+            echo "PS2 Memory Card Inspector 0.4.0 development"
             echo "Project revision: $GITHUB_SHA"
-            echo "Frontend: native 640x224 GS dashboard, no video mode selector"
+            echo "Frontend: configurable Native / 480p / 576p / 720p / 1080i GS dashboard"
+            echo "Installer: verified normal-install transaction with space simulation, persistent USB recovery journal and card identity marker"
+            echo "Region policy: ROMVER + read-only MechaCon/MechaPwn profiling; unsafe Deckard CEX one-region installs are blocked"
             echo "PS2SDK security source: https://github.com/ps2dev/ps2sdk/commit/$PS2SDK_SECURITY_COMMIT"
             echo "SECRMAN: PS2SDK 2.0 module version 1.4, instrumented by tools/patch_secrman14_diag.py"
           } > artifacts/SOURCE_PROVENANCE.txt
@@ -103,7 +105,7 @@ jobs:
       - name: Upload development build
         uses: actions/upload-artifact@v4
         with:
-          name: PS2-Memory-Card-Inspector-0.3.0-dev-${{ github.sha }}
+          name: PS2-Memory-Card-Inspector-0.4.0-dev-${{ github.sha }}
           path: artifacts/
           if-no-files-found: error
           retention-days: 30
