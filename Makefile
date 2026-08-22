@@ -15,15 +15,20 @@ EE_LDFLAGS = -Wl,--gc-sections \
 	-Wl,--wrap=MagicGateResultText \
 	-Wl,--wrap=MagicGateStageText
 
-# MagicGate backend profiles.
+# Isolated MagicGate backend profiles.
 #
-# fmcb13 is the hardware-validated baseline: FMCB SECRMAN/SECRSIF 1.3 with the
-# PS2SDK-v1 card stack.
+# The profile changes only the temporary security/card personality used by the
+# RAM-only KELF probe. Ordinary filesystem I/O always returns to the Sony ROM X
+# stack. Both profiles share the EE-side logical 0/1 -> physical SIO2 2/3 card
+# port correction and the same failed-GET_KBIT diagnostic record format.
 #
-# ps2sdk14 is the controlled comparison profile: source-built PS2SDK 2.0
-# SECRMAN 1.4 + SECRSIF and the matching PS2SDK 2.0 card stack. Both profiles
-# use the same EE-side physical-port correction and the same failure-record
-# format, so hardware results can be compared directly.
+# fmcb13: hardware-validated regression baseline built from a pinned FreeMcBoot
+# compatibility SECRMAN/SECRSIF revision and the matching PS2SDK-v1-era card
+# stack. See THIRD_PARTY_NOTICES.md before redistributing this profile.
+#
+# ps2sdk14: maintained comparison backend built from PS2SDK 2.0 SECRMAN 1.4,
+# matching SECRSIF and the matching PS2SDK 2.0 card stack. CI build validated;
+# real-hardware comparison is pending.
 SECR_PROFILE ?= fmcb13
 
 MG_CARD_IRX_FILES = freesio2.irx freepad.irx mcman.irx mcserv.irx
@@ -43,7 +48,7 @@ $(MG_SECRSIF_DIR):
 	mkdir -p $@
 
 $(MG_SECRSIF): | $(MG_SECRSIF_DIR)
-	@echo "Fetching pinned FMCB SECRSIF 1.3 compatibility bridge..."
+	@echo "Fetching pinned FMCB SECRSIF compatibility bridge..."
 	wget -q -O $@ $(FMCB_SECR_BASE)/secrsif.irx
 	@test "$$(wc -c < $@)" -eq 4685 || { echo "Unexpected secrsif.irx size"; rm -f $@; exit 1; }
 	@sha256sum $@
@@ -73,6 +78,8 @@ secrman_irx.c: $(MG_SECRMAN)
 secrsif_irx.c: $(MG_SECRSIF)
 	$(PS2SDK)/bin/bin2c $< $@ secrsif_irx
 
+# Historical variable names are retained for the generated C symbols so the
+# runtime code does not care which profile supplied the matching card modules.
 fmcb_%_irx.c: $(MG_CARD_DIR)/%.irx
 	@test -f $< || { echo "Missing MagicGate card-stack IRX: $<"; echo "Stage profile $(SECR_PROFILE) before building."; exit 1; }
 	$(PS2SDK)/bin/bin2c $< $@ fmcb_$*_irx
