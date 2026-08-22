@@ -1,46 +1,30 @@
 # Roadmap
 
-The roadmap is intentionally staged around hardware evidence. PS2 Memory Card Inspector should not turn a working diagnostic primitive into a destructive installer faster than it can verify and roll back its writes.
+The roadmap is staged around hardware evidence. PS2 Memory Card Inspector should not turn a working diagnostic primitive into a destructive installer faster than it can verify and roll back its writes.
 
-## v0.2.0 — Briscoe
+## v0.2.0 — Briscoe — complete
 
-### Completed / hardware-validated
+Hardware-validated release scope:
 
-- Normal Sony ROM X memory-card personality retained for ordinary filesystem work.
-- Non-destructive 4 KiB filesystem read/write/compare/delete test.
-- Raw `FMCB.XLF` acquisition from USB into EE RAM.
-- Isolated MagicGate/KELF security session with normal-stack restoration afterward.
-- Correct BIT semantics: large plaintext blocks no longer inherit the SECRSIF `0x400` RPC limit.
-- Source-level GET_KBIT failure instrumentation without post-failure CardAuth replay.
-- Correct logical libmc `0/1` -> physical SECR/SIO2 `2/3` card-port mapping.
-- Full MagicGate/KELF probe PASS on two official Sony 8 MB cards using the `fmcb13` baseline.
-- Full PASS on a third-party 64 MB MagicGate-capable card.
-- Clean first-command no-ACK failure on a third-party 64 MB non-MagicGate card while its filesystem remains usable.
-- User-facing capability classification that separates `FUNCTIONAL`, unsupported/no-ACK, protocol errors and indeterminate infrastructure failures.
-- Read-only FMCB package preflight.
+- Sony ROM X memory-card personality retained for ordinary filesystem work;
+- temporary 4 KiB filesystem write/read/compare/delete test;
+- raw `FMCB.XLF` acquisition from USB into EE RAM;
+- isolated MagicGate/KELF session with normal-stack restoration;
+- correct BIT semantics for large plaintext entries;
+- failed-GET_KBIT instrumentation on the real CardAuth path without command replay;
+- correct libmc logical `0/1` -> SECR/SIO2 physical `2/3` mapping;
+- PS2SDK 2.0 SECRMAN 1.4 promoted to the single production security backend;
+- `FUNCTIONAL` on two Sony 8 MB cards;
+- `FUNCTIONAL` on a third-party 64 MB MagicGate-capable card;
+- `NOT SUPPORTED / NO CARD AUTH ACK` on a third-party 64 MB card without functional MagicGate while ordinary storage remains usable;
+- read-only FMCB package preflight;
+- reproducible CI packaging with source provenance, SHA-256, project license, PS2SDK AFL-2.0 text, credits and third-party notices.
 
-### Completed / build-validated, hardware pending
+The legacy SECRMAN 1.3 comparison path is retained only in history/documentation and is no longer part of the release build.
 
-- Selectable `ps2sdk14` profile using PS2SDK 2.0 SECRMAN 1.4, matching SECRSIF and matching PS2SDK 2.0 memory-card stack.
-- Equivalent GET_KBIT failure record format for direct comparison with `fmcb13`.
-- Reproducible CI build of the instrumented 1.4 profile.
+## Next milestone: controlled bind/write/read-back experiment
 
-### Next: validate PS2SDK SECRMAN 1.4 on hardware
-
-Run `ps2sdk14` against the same four-card matrix:
-
-1. official Sony 8 MB positive control A;
-2. official Sony 8 MB positive control B;
-3. third-party 64 MB negative control;
-4. third-party 64 MB MagicGate-capable positive control.
-
-The modern backend should not become the default until it reproduces both the positive and negative behavior of the validated compatibility baseline and restores the normal ROM card stack correctly after every probe.
-
-### Next: controlled bind/write/read-back experiment
-
-Once a default security backend is selected, add a deliberately narrow write experiment rather than a full installer.
-
-Required transaction:
+Do not jump directly to a full FMCB installer. The next write-capable build should perform one deliberately narrow transaction on a disposable or fully backed-up card:
 
 ```text
 preflight
@@ -49,68 +33,64 @@ preflight
   -> write one controlled target
   -> close/reopen
   -> full read-back
-  -> verify
+  -> verify bytes/metadata
   -> rollback on any failure
 ```
 
-This stage should be tested only with a fully backed-up/disposable card until failure recovery is proven.
+Success criteria:
 
-### Next: FMCB installation transaction
+- no unrelated files touched;
+- exact on-card result can be read back and verified;
+- any failure leaves enough information and backup state to restore the previous card state;
+- normal ROM X filesystem access still works after the transaction;
+- a power-cycle test is performed only after on-card verification passes.
+
+## Next: FMCB installation transaction
 
 Only after the single-file write path is hardware-validated:
 
 - calculate required target space;
-- validate complete user-supplied package;
-- create target system/config directories safely;
-- bind all required KELF payloads using the validated backend;
+- validate the complete user-supplied package;
+- create system/config directories safely;
+- bind required KELF payloads using the validated SECRMAN 1.4 backend;
 - copy non-KELF resources;
-- verify every written file after reopening it;
+- close/reopen and verify every written file;
 - preserve or back up replaceable existing content;
-- maintain rollback metadata until the entire transaction commits;
-- provide clear abort/failure state instead of leaving a partially installed card.
+- maintain rollback metadata until the whole transaction commits;
+- expose clear abort/failure states instead of leaving a partially installed card.
 
-### Release cleanup before Briscoe stable
+## v0.3.x — installer hardening and recovery
 
-- settle the default SECR backend;
-- remove development-only backend-selection behavior from ordinary release builds unless keeping it is useful for an advanced diagnostics mode;
-- strip stale development labels from UI;
-- keep low-level diagnostics available on the MagicGate detail page or debug build;
-- generate clean release checksums;
-- include `LICENSE`, credits and third-party notices in release packaging;
-- ensure release provenance records the exact PS2SDK/upstream revisions.
-
-## v0.3.x — installer hardening / recovery
-
-Possible scope after the first safe installer transaction exists:
+Possible scope:
 
 - explicit backup/export before modifying an existing FMCB installation;
 - installation journal and rollback/recovery path;
-- verification-only mode for an existing installation;
+- verification-only mode for existing installations;
 - compare existing target files against the user-supplied package;
-- detect already-bound KELFs and avoid treating them as raw sources;
+- detect already-bound KELFs and reject them as raw bind sources;
 - richer free-space and filesystem-health gating;
-- clearer distinction between card storage health and MagicGate capability.
+- clearer distinction between storage health and MagicGate capability.
 
 ## Later diagnostic work
 
-Potential future additions, only where they provide actionable information:
+Potential additions where they provide actionable information:
 
-- persistent test report export to USB;
+- export test reports to USB;
 - card-controller/MagicGate behavior database based on observed protocol results rather than branding;
 - timing/retry diagnostics for borderline cards;
-- deeper protocol detail view for CardAuth `50/51/52/53` failures;
-- optional comparison of multiple security backends in one test session;
-- additional safe filesystem integrity checks.
+- deeper CardAuth `50/51/52/53` detail view;
+- optional research builds comparing historical security backends;
+- additional safe filesystem-integrity checks.
 
 ## Non-goals
 
-The project does **not** currently aim to:
+The project does not currently aim to:
 
 - emulate MagicGate in software;
-- bypass the MechaCon or replace Sony's cryptographic hardware;
-- fabricate MagicGate capability on a card whose controller does not implement CardAuth;
+- bypass the Mechacon or replace Sony cryptographic hardware;
+- fabricate MagicGate capability on a controller that does not implement CardAuth;
 - redistribute Sony ROM modules;
 - bundle FreeMcBoot payloads;
-- automatically format or modify a card simply because a diagnostic stage fails.
+- automatically format or modify a card because a diagnostic stage fails.
 
-The useful target is narrower: identify what a card and console can actually do, then make any future installation operation explicit, verifiable and recoverable.
+The target remains narrow: identify what a card and console can actually do, then make future installation operations explicit, verifiable and recoverable.
