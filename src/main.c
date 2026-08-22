@@ -1,16 +1,16 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * PS2 Memory Card Inspector
  * -------------------------
- * Briscoe keeps ordinary memory-card I/O on the hardware-validated Sony ROM X
- * stack and runs MagicGate/KELF work in a temporary, isolated IOP personality.
+ * Briscoe keeps ordinary memory-card I/O on the Sony ROM X stack that passed
+ * real-hardware validation and runs MagicGate/KELF work in a temporary,
+ * isolated IOP personality.
  *
- * The selected security profile is embedded at build time. fmcb13 is the
- * hardware-validated compatibility baseline; ps2sdk14 uses PS2SDK 2.0
- * SECRMAN 1.4, matching SECRSIF and the matching PS2SDK 2.0 card stack.
- * Both profiles use the same corrected logical-card -> physical-SIO2 mapping
- * and the same in-path GET_KBIT diagnostics. The RAM-only probe never writes
- * the bound KELF to a memory card and the normal ROM X stack is rebuilt after
- * every security-session attempt.
+ * v0.2.0 uses the PS2SDK 2.0 security stack: SECRMAN 1.4, matching SECRSIF and
+ * the matching PS2SDK 2.0 SIO2/PAD/MCMAN generation. The EE bridge translates
+ * logical libmc ports 0/1 to physical SIO2 memory-card channels 2/3 only at the
+ * SECR RPC boundary. The RAM-only probe never writes the bound KELF to a card,
+ * and the normal ROM X stack is rebuilt after every security-session attempt.
  */
 
 #include <tamtypes.h>
@@ -35,7 +35,7 @@
 #include "magicgate.h"
 #include "fmcb_install.h"
 
-#define APP_VERSION "0.2.0-dev14"
+#define APP_VERSION "0.2.0"
 #define APP_CODENAME "Briscoe"
 #define SLOT_COUNT 2
 #define VIEW_CARD 0
@@ -43,21 +43,12 @@
 #define VIEW_FMCB 2
 #define VIEW_COUNT 3
 
-#if defined(MG_SECR_PROFILE_PS2SDK14)
 #define MG_PROFILE_NAME "PS2SDK 2.0 SECRMAN 1.4"
 #define MG_STACK_SHORT "PS2SDK2/SECR1.4"
 #define MG_SIO2_LABEL "MG/PS2SDK2 SIO2MAN"
 #define MG_PAD_LABEL "MG/PS2SDK2 PADMAN"
 #define MG_MCMAN_LABEL "MG/PS2SDK2 MCMAN"
 #define MG_MCSERV_LABEL "MG/PS2SDK2 MCSERV"
-#else
-#define MG_PROFILE_NAME "FMCB compatibility SECRMAN 1.3"
-#define MG_STACK_SHORT "FMCB13/PS2SDK-v1"
-#define MG_SIO2_LABEL "MG/FMCB SIO2MAN v1"
-#define MG_PAD_LABEL "MG/FMCB PADMAN v1"
-#define MG_MCMAN_LABEL "MG/FMCB MCMAN v1"
-#define MG_MCSERV_LABEL "MG/FMCB MCSERV v1"
-#endif
 
 extern unsigned char secrman_irx[];
 extern unsigned int size_secrman_irx;
@@ -106,9 +97,9 @@ static int LoadEmbeddedModule(void *data, unsigned int size, const char *name)
 }
 
 /*
- * The normal application personality is deliberately the same ROM X-module
- * arrangement that passed real-hardware Columbo testing. Experimental SECR
- * code is never allowed to replace it permanently.
+ * The normal application personality deliberately uses the same Sony ROM
+ * XSIO2MAN/XPADMAN/XMCMAN/XMCSERV arrangement that passed hardware testing.
+ * Temporary MagicGate modules never replace this stack permanently.
  */
 static int InitNormalCardStack(void)
 {
@@ -169,7 +160,7 @@ static void ShutdownNormalClients(void)
     }
 }
 
-/* Generate a minimal IOPRP containing the selected SECRMAN in EE RAM. */
+/* Generate a minimal IOPRP containing SECRMAN 1.4 in EE RAM. */
 static int RebootIopWithSecrman(void)
 {
     struct ioprpgen_ctx ctx;
@@ -215,12 +206,12 @@ static int RebootIopWithSecrman(void)
  * Isolated MagicGate security personality.
  *
  * SECRMAN's GET_KBIT card_encrypt path depends on MCMAN registering its
- * mcCommand and device-ID handlers. Each build profile therefore embeds a
- * matched SIO2/PAD/MCMAN generation alongside its SECRMAN/SECRSIF pair.
+ * mcCommand and device-ID handlers, so the temporary session uses a matched
+ * PS2SDK 2.0 SIO2/PAD/MCMAN generation alongside SECRMAN 1.4 and SECRSIF.
  *
- * Temporary MCSERV is intentionally presented to the wrapper below but skipped
- * at runtime: real hardware showed that starting it can wedge the following
- * LOADFILE RPC. MCMAN stays resident, which is what CardAuth actually needs.
+ * Temporary MCSERV is presented to the wrapper but intentionally not started:
+ * real hardware showed that doing so can wedge the following LOADFILE RPC.
+ * MCMAN remains resident, which is sufficient for the CardAuth path.
  */
 static int InitMagicGateSession(MagicGateReport *report)
 {
@@ -491,7 +482,7 @@ static void RenderFmcbView(int selected)
     }
 
     scr_printf("\nCIRCLE: rescan user package\n");
-    scr_printf("INSTALL: DISABLED IN DEV14 (preflight is read-only)\n");
+    scr_printf("INSTALL: NOT ENABLED IN 0.2.0 (preflight is read-only)\n");
 }
 
 static void Render(int selected, int view, int confirm_format, int last_format_rc)
@@ -547,7 +538,7 @@ int main(int argc, char *argv[])
     init_scr();
     scr_clear();
     scr_printf("PS2 Memory Card Inspector v%s - %s\n", APP_VERSION, APP_CODENAME);
-    scr_printf("Security profile: %s\n", MG_PROFILE_NAME);
+    scr_printf("Security backend: %s\n", MG_PROFILE_NAME);
     scr_printf("Initializing hardware-validated normal ROM X stack...\n");
 
     init_rc = InitNormalCardStack();
