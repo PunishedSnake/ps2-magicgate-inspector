@@ -7,10 +7,9 @@
 /*
  * MagicGate / KELF diagnostics for PS2 Memory Card Inspector.
  *
- * Briscoe dev4 deliberately separates KELF acquisition from the special SECR
- * IOP session. The KELF is read while the hardware-validated normal ROM
- * XMCMAN stack is active, kept in EE RAM across the IOP reboot, then discarded
- * after the diagnostic session. No bound KELF is written to either card.
+ * KELF acquisition happens under the hardware-validated normal ROM X stack.
+ * The raw user-supplied FMCB.XLF is kept in EE RAM across an isolated SECR
+ * session and discarded afterwards. No bound KELF is written to either card.
  */
 
 typedef enum MagicGateStage {
@@ -44,7 +43,14 @@ typedef enum MagicGateResult {
     MG_RESULT_KC_FAILED,
     MG_RESULT_ICVPS2_FAILED,
     MG_RESULT_SECR_UNAVAILABLE,
-    MG_RESULT_TARGET_NOT_PS2
+    MG_RESULT_TARGET_NOT_PS2,
+    MG_RESULT_KBIT_TRACE_RESET_FAILED,
+    MG_RESULT_KBIT_TRACE_50_FAILED,
+    MG_RESULT_KBIT_TRACE_51_FAILED,
+    MG_RESULT_KBIT_TRACE_52_FAILED,
+    MG_RESULT_KBIT_TRACE_53_FAILED,
+    MG_RESULT_KBIT_MECHA_FETCH_SUSPECT,
+    MG_RESULT_KBIT_SECR_CARD_PATH_SUSPECT
 } MagicGateResult;
 
 typedef struct MagicGateIopStatus {
