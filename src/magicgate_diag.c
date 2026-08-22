@@ -1,15 +1,19 @@
 /*
- * Briscoe MagicGate diagnostic and SECR port bridge.
+ * MagicGate SECR port bridge and failed-GET_KBIT diagnostics.
  *
- * Hardware validation established two important facts:
- *  - SECR/CardAuth consumes the physical SIO2 memory-card ports 2/3, while
- *    libmc exposes logical card ports 0/1 to the EE application.
- *  - a failed GET_KBIT can be classified reliably when the temporary SECRMAN
- *    returns the compact in-path diagnostic record produced by our source
- *    instrumentation.
+ * Hardware validation established two independent requirements that belong at
+ * the SECRSIF boundary rather than in the normal filesystem code:
  *
- * This file keeps those two concerns out of the normal card/filesystem code.
- * It never replays authentication commands and never writes to the card.
+ *  - libmc exposes logical memory-card ports 0/1, while SECRMAN CardAuth uses
+ *    physical SIO2 memory-card channels 2/3 directly;
+ *  - a failed GET_KBIT needs to distinguish Mechacon preparation from the real
+ *    card-side F2/50..53 transform without replaying extra commands afterwards.
+ *
+ * Both security profiles emit the same compact 16-byte failure record on a
+ * failed GET_KBIT only. Successful SECRMAN behavior is left unchanged. This EE
+ * shim decodes that record and gives the validated first-command RX/no-ACK
+ * signature a specific “not supported” verdict; other failures remain protocol
+ * errors or indeterminate infrastructure/Mechacon failures.
  */
 
 #include <tamtypes.h>
@@ -132,6 +136,12 @@ static const char *ReasonText(void)
     }
 }
 
+/*
+ * This signature was observed only after the corrected physical card port was
+ * in use and the same backend had already passed known-good cards. It therefore
+ * means “the card did not ACK the first CardAuth command” rather than “the
+ * Inspector contacted the wrong SIO2 channel”.
+ */
 static int LooksLikeNoMagicGateAck(void)
 {
     return Record.valid &&
