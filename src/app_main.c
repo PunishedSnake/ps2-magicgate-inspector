@@ -5,6 +5,11 @@
  * 0.2.0 established the hardware behavior. This controller keeps that IOP /
  * MagicGate architecture intact while replacing the libdebug text dashboard
  * with the native Graphics Synthesizer frontend in gui.c.
+ *
+ * 0.3.0-dev4 deliberately makes diagnostics target-centric instead of
+ * button-centric: LEFT/RIGHT selects the card and CROSS runs the complete
+ * filesystem -> MagicGate/CardAuth -> FMCB preflight sequence for that slot.
+ * Other face buttons stay available for future write/install workflows.
  */
 
 #include <tamtypes.h>
@@ -32,11 +37,6 @@
 #include "progress.h"
 
 #define SLOT_COUNT 2
-
-#define MG_SIO2_LABEL "MG/PS2SDK2 SIO2MAN"
-#define MG_PAD_LABEL "MG/PS2SDK2 PADMAN"
-#define MG_MCMAN_LABEL "MG/PS2SDK2 MCMAN"
-#define MG_MCSERV_LABEL "MG/PS2SDK2 MCSERV"
 
 extern unsigned char secrman_irx[];
 extern unsigned int size_secrman_irx;
@@ -203,11 +203,6 @@ static int InitMagicGateSession(MagicGateReport *report)
     SifInitIopHeap();
     sbv_patch_enable_lmb();
 
-    (void)MG_SIO2_LABEL;
-    (void)MG_PAD_LABEL;
-    (void)MG_MCMAN_LABEL;
-    (void)MG_MCSERV_LABEL;
-
     MciProgressUpdate(MCI_PROGRESS_MAGICGATE, 36,
                       "Loading PS2SDK 2.0 SIO2MAN",
                       "Starting the matching SIO2 transport used by MCMAN and SECRMAN CardAuth callbacks.");
@@ -328,7 +323,7 @@ static int RunMagicGateSession(int target_port)
 
     MciProgressUpdate(MCI_PROGRESS_MAGICGATE, 100,
                       "MagicGate probe and environment restore complete",
-                      "The isolated SECRMAN session has ended and the program is returning to the MagicGate results dashboard.");
+                      "The isolated SECRMAN session has ended and the program is returning to the results dashboard.");
     return report->result == MG_RESULT_PASS ? 0 : -1;
 }
 
@@ -336,6 +331,39 @@ static void InspectAndInvalidateMagicGate(int port)
 {
     CardInspect(port, &Reports[port]);
     MagicGateResetReport(&MgReports[port], port);
+}
+
+/*
+ * CROSS is the one diagnostic action in 0.3.0-dev4. The selected slot is the
+ * target; the current dashboard page only controls which results are visible.
+ * This intentionally reserves SQUARE/CIRCLE/START for later installer actions.
+ */
+static void RunSelectedFullScan(int target_port)
+{
+    char detail[192];
+
+    snprintf(detail, sizeof(detail),
+             "Running the complete read-only diagnostic sequence for mc%d: filesystem integrity, MagicGate/CardAuth and FMCB package preflight.",
+             target_port);
+    MciGuiRenderMessage("Full card scan", detail, NULL, MCI_GUI_TONE_INFO);
+
+    MagicGateResetReport(&MgReports[target_port], target_port);
+    FmcbResetPackageReport(&FmcbReports[target_port], target_port);
+
+    CardInspect(target_port, &Reports[target_port]);
+
+    if (Reports[target_port].type == MC_TYPE_PS2) {
+        (void)RunMagicGateSession(target_port);
+    } else {
+        MagicGateResetReport(&MgReports[target_port], target_port);
+        MgReports[target_port].result = MG_RESULT_TARGET_NOT_PS2;
+        MciProgressUpdate(MCI_PROGRESS_MAGICGATE, 100,
+                          "MagicGate probe skipped",
+                          "The selected slot does not currently report a PS2 memory card, so no CardAuth transaction is attempted.");
+    }
+
+    (void)FmcbProbeMassPackage(target_port, &FmcbMassStatus,
+                               &FmcbReports[target_port]);
 }
 
 static u32 ReadPadPressed(u32 *held)
@@ -389,7 +417,7 @@ int main(int argc, char *argv[])
     init_scr();
     if (MciGuiInit() < 0) {
         scr_clear();
-        scr_printf("PS2 Memory Card Inspector 0.3.0-dev3\n\n");
+        scr_printf("PS2 Memory Card Inspector 0.3.0-dev4\n\n");
         scr_printf("GS frontend initialization failed.\n");
         SleepThread();
     }
@@ -405,6 +433,7 @@ int main(int argc, char *argv[])
         SleepThread();
     }
 
+    /* Initial filesystem snapshot only; CROSS performs the complete scan. */
     InspectAndInvalidateMagicGate(0);
     InspectAndInvalidateMagicGate(1);
     FmcbResetPackageReport(&FmcbReports[0], 0);
@@ -449,33 +478,7 @@ int main(int argc, char *argv[])
             }
 
             if (pressed & PAD_CROSS) {
-                InspectAndInvalidateMagicGate(selected);
-                page = MCI_GUI_CARD;
-                dirty = 1;
-            }
-
-            if (pressed & PAD_START) {
-                InspectAndInvalidateMagicGate(0);
-                InspectAndInvalidateMagicGate(1);
-                page = MCI_GUI_CARD;
-                dirty = 1;
-            }
-
-            if (pressed & PAD_SQUARE) {
-                if (Reports[selected].type != MC_TYPE_PS2) {
-                    MagicGateResetReport(&MgReports[selected], selected);
-                    MgReports[selected].result = MG_RESULT_TARGET_NOT_PS2;
-                } else {
-                    RunMagicGateSession(selected);
-                }
-                page = MCI_GUI_MAGICGATE;
-                dirty = 1;
-            }
-
-            if (pressed & PAD_CIRCLE) {
-                FmcbProbeMassPackage(selected, &FmcbMassStatus,
-                                     &FmcbReports[selected]);
-                page = MCI_GUI_FMCB;
+                RunSelectedFullScan(selected);
                 dirty = 1;
             }
 
