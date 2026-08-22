@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Instrument PS2SDK 2.0 SECRMAN 1.4 without changing successful semantics.
 
-The emitted failure record intentionally matches the SECRMAN 1.3 diagnostic
-record so the EE-side MagicGate classifier can compare both backends directly.
+The emitted failure record intentionally matches the compatibility SECRMAN
+record so both backends can be compared with one EE-side decoder.
 
-SECRMAN 1.4 normally routes GET_KBIT through the private scePreEncryptKbit()
+PS2SDK 2.0 normally routes GET_KBIT through the private scePreEncryptKbit()
 helper. The diagnostic build must distinguish the two Mechacon half-key calls,
 so it expands that helper inline inside SecrDownloadGetKbit(). The now-unused
-static helper and its forward declaration are removed to keep PS2SDK's -Werror
-build clean.
+static helper and its forward declaration are removed from the temporary source
+tree to keep PS2SDK's -Werror build clean.
+
+This patch is applied to a pinned temporary PS2SDK checkout during CI. It does
+not vendor or permanently fork upstream SECRMAN source in this repository.
 """
 
 import pathlib
@@ -72,8 +75,8 @@ include_marker = '#include "CardAuth.h"\n'
 if include_marker not in card:
     raise SystemExit("CardAuth include marker not found")
 card = card.replace(include_marker, include_marker + r'''
-/* Briscoe: capture the real CardAuth transfer that belongs to GET_KBIT.
- * No extra SIO2 commands are replayed after a failure. */
+/* PS2 Memory Card Inspector build-time diagnostics. Capture the transfer that
+ * belongs to the real GET_KBIT CardAuth path; no command is replayed. */
 extern volatile int mgdiag_command;
 extern volatile int mgdiag_transfer_rc;
 extern volatile unsigned int mgdiag_stat6c;
@@ -94,8 +97,8 @@ if insert_marker not in secr:
     raise SystemExit("SECRMAN export marker not found")
 secr = secr.replace(insert_marker, insert_marker + r'''
 
-/* Briscoe GET_KBIT failure record. Successful SECRMAN behavior is unchanged;
- * these fields are only serialized into the 16-byte Kbit reply on failure. */
+/* Failed-GET_KBIT diagnostic state. Successful SECRMAN behavior is unchanged;
+ * this state is serialized into the otherwise unusable Kbit reply on failure. */
 volatile int mgdiag_command;
 volatile int mgdiag_transfer_rc;
 volatile unsigned int mgdiag_stat6c;
@@ -143,7 +146,7 @@ static void MgDiagEncodeFailure(void *kbit, unsigned char stage,
     unsigned int s = mgdiag_stat6c;
     d[0] = 0xD2;
     d[1] = 0x12;
-    d[2] = stage;
+    d[2] = stage; /* 1/2 = Mechacon half 0/1, 3/4 = CardAuth half 0/1 */
     d[3] = (mgdiag_command < 0) ? 0xFF : (unsigned char)mgdiag_command;
     d[4] = (stage >= 3) ? MgDiagCardReason() : 0;
     d[5] = (unsigned char)mgdiag_transfer_rc;
@@ -160,8 +163,8 @@ static void MgDiagEncodeFailure(void *kbit, unsigned char stage,
 }
 ''', 1)
 
-# Expanding the helper below makes the half that failed observable. Remove the
-# original private helper so PS2SDK 2.0's -Werror does not reject it as unused.
+# Expanding the helper below makes the failed half observable. Remove the stock
+# helper so PS2SDK 2.0's -Werror build does not reject it as unused.
 prototype = "static int scePreEncryptKbit(void *kbit);\n"
 if prototype not in secr:
     raise SystemExit("scePreEncryptKbit prototype not found")
