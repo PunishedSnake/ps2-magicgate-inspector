@@ -114,11 +114,13 @@ The `ps2sdk14` profile is built from PS2SDK commit `a13b5971ec0e39c7ba8b8559b80a
 b5c1df1c4f51b756bf6c62e5d3fc1a9a414362eab77bf3ad13cd095fc7e4723c
 ```
 
+That checksum identifies the first successful comparison build before the later UI/comment/documentation cleanup. Test reports should always quote the exact artifact they ran.
+
 See [Security backends](docs/SECURITY_BACKENDS.md) and [Building](docs/BUILDING.md).
 
 ## Safety model
 
-The filesystem test creates a uniquely named temporary file, writes a deterministic 4096-byte pattern, reads and compares it, deletes it, and verifies cleanup.
+The filesystem test chooses an unused temporary filename, verifies the card again before writing, writes a deterministic 4096-byte pattern, flushes, closes/reopens, reads and compares it, deletes it, and verifies cleanup.
 
 The MagicGate probe:
 
