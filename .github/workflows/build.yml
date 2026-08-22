@@ -33,7 +33,6 @@ permissions:
 
 # The Briscoe feature branch intentionally builds ps2sdk14 on push while the
 # backend comparison is in progress. Manual runs can still select either stack.
-# Hardware-test candidate requested after the validated FMCB 1.3 port fix.
 env:
   SECR_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.secr_profile || 'ps2sdk14' }}
 
@@ -94,6 +93,10 @@ jobs:
             sh -c 'set -eu; apk add --no-cache build-base >/dev/null; mips64r5900el-ps2-elf-gcc --version; make SECR_PROFILE="$SECR_PROFILE"'
           cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR.ELF
           printf '%s\n' "$SECR_PROFILE" > artifacts/SECR_PROFILE.txt
+          cp LICENSE artifacts/LICENSE
+          cp CREDITS.md artifacts/CREDITS.md
+          cp THIRD_PARTY_NOTICES.md artifacts/THIRD_PARTY_NOTICES.md
+          cp README.md artifacts/README.md
 
       - name: Verify output
         shell: bash
@@ -103,7 +106,7 @@ jobs:
           ls -lh artifacts/MC_INSPECTOR.ELF
           sha256sum artifacts/MC_INSPECTOR.ELF | tee artifacts/SHA256SUMS.txt
 
-      - name: Upload standalone ELF
+      - name: Upload development artifact
         uses: actions/upload-artifact@v4
         with:
           name: PS2-Memory-Card-Inspector-${{ env.SECR_PROFILE }}-${{ github.sha }}
