@@ -541,7 +541,7 @@ static qword_t *shell(qword_t *q, MciGuiPage page, int selected)
     q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
     q = rect_outline(q, 12, 8, 628, 31, Theme.border);
     q = text(q, 22, 14, "PS2 Memory Card Inspector", Theme.text);
-    snprintf(version, sizeof(version), "v0.3.0-dev3  mc%d", selected);
+    snprintf(version, sizeof(version), "v0.3.0-dev4  mc%d", selected);
     q = text_box(q, 470, 14, 618, 23, version, Theme.accent);
 
     for (i = 0; i < MCI_GUI_PAGE_COUNT; i++) {
@@ -810,15 +810,12 @@ static qword_t *footer(qword_t *q, MciGuiPage page, int confirm_format)
 {
     const char *line;
 
+    (void)page;
     q = rect_fill(q, 0, 205, UI_W, UI_H, Theme.panel_alt);
     if (confirm_format) {
         line = "L1+R1+TRIANGLE Confirm format        CIRCLE Cancel";
-    } else if (page == MCI_GUI_MAGICGATE) {
-        line = "LEFT/RIGHT Slot   SQUARE Probe   R1 Next page   SELECT Exit";
-    } else if (page == MCI_GUI_FMCB) {
-        line = "LEFT/RIGHT Slot   CIRCLE Scan   R1 Next page   SELECT Exit";
     } else {
-        line = "LEFT/RIGHT Slot   X Test   START Both   R1 Next page   SELECT Exit";
+        line = "LEFT/RIGHT Slot   X Full scan   R1 Next page   SELECT Exit";
     }
     q = text_box(q, 18, 211, 622, 220, line, Theme.muted);
     return q;
@@ -904,7 +901,7 @@ void MciGuiRenderMessage(const char *title,
     q = rect_fill(q, 0, 0, UI_W, 4, accent);
     q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
     q = rect_outline(q, 12, 8, 628, 31, Theme.border);
-    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.3.0-dev3", Theme.text);
+    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.3.0-dev4", Theme.text);
     q = text_box(q, 20, 39, 620, 48,
                  title != NULL ? title : "Status", accent);
     q = rect_fill(q, 16, 53, 624, body_bottom, Theme.panel);
@@ -949,7 +946,7 @@ void MciGuiRenderProgress(const char *title,
     q = rect_fill(q, 0, 0, UI_W, 4, accent);
     q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
     q = rect_outline(q, 12, 8, 628, 31, Theme.border);
-    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.3.0-dev3", Theme.text);
+    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.3.0-dev4", Theme.text);
 
     q = text_box(q, 20, 39, 620, 48,
                  title != NULL ? title : "Working", accent);
