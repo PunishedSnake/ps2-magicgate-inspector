@@ -202,6 +202,9 @@ int __wrap_sceSifCallRpc(SifRpcClientData_t *cd, int fno, int mode,
 
 const char *__wrap_MagicGateResultText(MagicGateResult result)
 {
+    if (result == MG_RESULT_PASS)
+        return "FUNCTIONAL";
+
     if (result != MG_RESULT_KBIT_FAILED)
         return __real_MagicGateResultText(result);
 
