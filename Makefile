@@ -2,9 +2,9 @@
 
 EE_BIN = MC_INSPECTOR.ELF
 EE_OBJS = src/app_main.o src/gui.o src/progress.o src/card.o src/magicgate.o src/fmcb_install.o \
-	src/fmcb_transaction.o src/magicgate_session.o src/magicgate_diag.o src/video_mode.o \
+	src/fmcb_transaction.o src/console_profile.o src/magicgate_session.o src/magicgate_diag.o src/video_mode.o \
 	src/ui_layout.o src/settings.o
-EE_LIBS = -ldebug -ldraw -lgraph -lpacket -ldma -lpad -lmc -lfileXio -lsecr \
+EE_LIBS = -ldebug -ldraw -lgraph -lpacket -ldma -lpad -lmc -lfileXio -lcdvd -lsecr \
 	-lioprpgen -liopreboot -lpatches -lkernel
 EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections \
 	-DMG_SECR_PROFILE_PS2SDK14=1
