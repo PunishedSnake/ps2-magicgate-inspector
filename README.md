@@ -2,81 +2,70 @@
 
 PS2 Memory Card Inspector is a standalone PlayStation 2 homebrew utility for testing memory-card filesystem health, probing real MagicGate/CardAuth capability, and validating a user-supplied FreeMcBoot package before any installation write path is enabled.
 
-The current development line is **v0.2.0 "Briscoe"**. The ordinary filesystem path and the `fmcb13` MagicGate backend have been validated on real PS2 hardware. A second `ps2sdk14` backend, built entirely from the PS2SDK 2.0 security/card stack, is available for controlled comparison and has passed CI compilation; hardware validation is the next step.
+## v0.2.0 "Briscoe"
 
-## Current status
+Briscoe is the first release with a hardware-validated MagicGate/KELF capability probe built on the modern **PS2SDK 2.0 SECRMAN 1.4** stack.
 
-The Inspector can currently:
+The ordinary memory-card path remains on the Sony ROM X modules that passed real-hardware filesystem testing. MagicGate is run in a temporary isolated IOP session, the KELF is modified only in EE RAM, and the normal ROM stack is rebuilt afterwards.
 
-- inspect both `mc0:` and `mc1:`;
-- report memory-card type, formatting state and free clusters;
-- verify root-directory access;
-- perform a temporary 4 KiB write/read/compare/delete filesystem test;
-- run a **RAM-only** KELF/MagicGate capability probe;
-- distinguish a functional MagicGate implementation from a card that simply behaves as ordinary PS2 storage;
-- classify CardAuth failures with low-level SIO2 information;
-- scan a user-supplied FMCB package on USB without writing it to the card;
-- detect the console region and resolve the expected FMCB destination folder;
-- guard destructive formatting behind an explicit confirmation chord.
+### Hardware validation
 
-**FMCB installation writes are still disabled.** The next installer milestone is a controlled bind -> write -> read-back -> verify experiment with rollback before any general installation mode is enabled.
+| Card | Filesystem | MagicGate result |
+| --- | --- | --- |
+| Sony 8 MB #1 | PASS | `FUNCTIONAL` |
+| Sony 8 MB #2 | PASS | `FUNCTIONAL` |
+| Third-party 64 MB with functional MagicGate | PASS | `FUNCTIONAL` |
+| Third-party 64 MB without functional MagicGate | PASS | `NOT SUPPORTED / NO CARD AUTH ACK` |
 
-## Hardware-validated MagicGate results
+The same positive/negative split was reproduced with the final PS2SDK 2.0 SECRMAN 1.4 backend. The probe therefore detects functional CardAuth/KELF capability rather than Sony branding, printed logos or card capacity.
 
-The current probe has both positive and negative controls:
+## What it does
 
-| Card | Filesystem | MagicGate/KELF | Observed result |
-| --- | --- | --- | --- |
-| Official Sony 8 MB, card A | PASS | PASS | `DownloadHeader=1`, encrypted BIT block complete, `Kbit=1`, `Kc=1` |
-| Official Sony 8 MB, card B | PASS | PASS | Same complete path |
-| Third-party 64 MB without working MagicGate | PASS | FAIL | First real CardAuth command `F2/50`: `pre=1/1`, `tr=1`, `stat6c=0001D100`, `id=FF`, `st=FF` |
-| Third-party 64 MB marked MagicGate-capable | PASS | PASS | Complete KELF bind probe |
+- inspects both `mc0:` and `mc1:`;
+- reports card type, formatting state and free clusters;
+- verifies root-directory access;
+- performs a temporary 4 KiB write/read/compare/delete filesystem test;
+- runs a **RAM-only** MagicGate/KELF capability probe;
+- distinguishes functional MagicGate from ordinary PS2 storage without working CardAuth;
+- reports low-level CardAuth failure details when GET_KBIT fails;
+- scans a user-supplied FreeMcBoot package from USB without installing it;
+- detects the console region and resolves the expected FMCB destination folder;
+- exposes formatting only through an explicit destructive confirmation chord.
 
-This is important: **Sony branding and 8 MB capacity are not what the test detects.** A third-party 64 MB card can pass when its controller actually implements the required MagicGate/CardAuth protocol, while another 64 MB card can remain perfectly usable as storage and fail authentication.
+**0.2.0 is not an FMCB installer.** FMCB package handling is read-only preflight. The next installation milestone is a controlled bind -> write -> reopen -> read-back -> verify transaction with rollback.
 
-A printed MagicGate logo is therefore treated as a claim, not proof. Protocol completion is the proof.
+## MagicGate result meanings
 
-## Result meanings
+`FUNCTIONAL` means the complete RAM-only binding path reached `DONE`, including `DownloadHeader`, required encrypted BIT blocks, `GET_KBIT`, `GET_KC`, and ICVPS2 when required.
 
-The user-facing result is intentionally separated from ordinary filesystem health:
+`NOT SUPPORTED / NO CARD AUTH ACK` is the hardware-validated negative-control signature: both Mechacon Kbit halves were prepared, but the card did not ACK the first real CardAuth command (`0x50`).
 
-- `FUNCTIONAL` — the complete RAM-only KELF binding probe passed.
-- `NOT SUPPORTED / NO CARD AUTH ACK` — the validated negative-control signature: Mechacon prepared both Kbit halves, but the card did not ACK the first `F2/50` CardAuth command.
-- `PROTOCOL ERROR / CARD AUTH` — the card reached CardAuth but failed at another command, response-ID/status, checksum, or SIO2 condition.
-- `TEST INDETERMINATE / ...` — the failure occurred outside a conclusive card capability result, for example in the Mechacon, RPC/session setup, or an unavailable diagnostic path.
+`PROTOCOL ERROR / CARD AUTH` means the card reached CardAuth but failed at another command or response-validation condition.
 
-See [MagicGate findings](docs/MAGICGATE.md) for the protocol sequence and the investigation history.
+`TEST INDETERMINATE / ...` is reserved for failures that do not prove card capability, such as Mechacon, RPC, session or malformed diagnostic failures.
 
-## The port-numbering bug that mattered
+## The critical port-numbering fix
 
-The most important Briscoe fix was not a different MagicGate implementation. It was using the correct SIO2 channel.
+libmc exposes cards as logical ports `0` and `1`, but SECRMAN CardAuth consumes physical SIO2 channel numbers. The memory-card channels are `2` and `3`.
 
-The EE-side libmc API identifies cards as logical ports `0` and `1`, but SECRMAN CardAuth consumes the physical SIO2 memory-card channels. The reference FreeMcBoot installer signs with:
-
-```c
-SecrDownloadFile(2 + port, slot, buffer)
-```
-
-The Inspector originally forwarded logical `0/1` into SECRMAN. That selected controller channels instead of memory-card channels and produced the repeatable failure:
+The reference FreeMcBoot binding path enters SECRMAN with `2 + port`. Inspector initially forwarded logical 0/1 directly, which selected controller channels and produced repeated:
 
 ```text
-tr=1 stat6c=0001D100 id=FF st=FF
+stat6c=0001D100 id=FF st=FF
 ```
 
-The corrected bridge keeps normal libmc traffic on `0/1` and maps only SECR RPCs carrying a card port:
+Briscoe keeps normal libmc traffic on 0/1 and translates only SECR requests that contain a card port:
 
 ```text
 mc0 logical 0 -> SECR/SIO2 physical 2
 mc1 logical 1 -> SECR/SIO2 physical 3
 ```
 
-After this correction both official Sony 8 MB cards immediately completed `Kbit` and `Kc`, while the non-MagicGate 64 MB card continued to fail at the real first CardAuth command. That positive/negative split is what validates the fix.
+Once that was corrected, known-good cards completed Kbit/Kc while the non-MagicGate card continued to fail at the genuine first CardAuth command. See [MagicGate findings](docs/MAGICGATE.md).
 
 ## Runtime architecture
 
-### Normal application personality
-
-Ordinary card inspection uses the Sony ROM X-module stack that has already passed real-hardware filesystem testing:
+### Normal personality
 
 ```text
 IOP reset
@@ -87,67 +76,23 @@ IOP reset
   -> mcInit(MC_TYPE_XMC)
 ```
 
-Filesystem tests, formatting UI and FMCB package preflight run from this normal personality.
+This path handles filesystem inspection, the temporary R/W test, formatting UI and FMCB package preflight.
 
 ### Isolated MagicGate personality
 
-Before switching IOP personalities, the Inspector reads a raw user-supplied `FMCB.XLF` into EE RAM. The security session then reboots into a temporary stack containing the selected SECRMAN/SECRSIF and matching memory-card modules. The KELF is modified only in RAM.
-
-Temporary MCSERV is deliberately not allowed to become part of the isolated probe. Real-hardware testing showed that loading it can wedge the following LOADFILE RPC, so MCMAN remains active while the one EE-side libmc sanity query used by the probe is emulated. After the probe, the complete normal ROM X stack is rebuilt before the UI resumes.
-
-See [Architecture](docs/ARCHITECTURE.md).
-
-## Security backend profiles
-
-Briscoe deliberately keeps two reproducible security profiles while the modern stack is evaluated:
-
-| Profile | SECRMAN / SECRSIF | Card stack | Status |
-| --- | --- | --- | --- |
-| `fmcb13` | Pinned FreeMcBoot Installer compatibility source | PS2SDK v1-era `freesio2/freepad/mcman` | **Hardware validated** |
-| `ps2sdk14` | PS2SDK 2.0 `secrman_special` 1.4 + matching SECRSIF | PS2SDK 2.0 `freesio2/freepad/mcman` | **Build validated; hardware test pending** |
-
-Both profiles use the same logical-to-physical port correction and the same compact GET_KBIT failure-record format, so the hardware results are directly comparable.
-
-The `ps2sdk14` profile is built from PS2SDK commit `a13b5971ec0e39c7ba8b8559b80a4e81c8425352`. The first successful instrumented 1.4 CI build was workflow run **#109**; its standalone ELF SHA-256 was:
+Before the IOP switch, a raw user-supplied `FMCB.XLF` is read into EE RAM. The temporary security session uses:
 
 ```text
-b5c1df1c4f51b756bf6c62e5d3fc1a9a414362eab77bf3ad13cd095fc7e4723c
+PS2SDK 2.0 SECRMAN 1.4
+PS2SDK 2.0 SECRSIF
+PS2SDK 2.0 freesio2 / freepad / mcman
 ```
 
-That checksum identifies the first successful comparison build before the later UI/comment/documentation cleanup. Test reports should always quote the exact artifact they ran.
+Temporary MCSERV is intentionally not started because hardware testing showed that it can wedge the following LOADFILE RPC. CardAuth requires MCMAN's registered SECRMAN callbacks, so MCMAN remains active while the immediate EE-side libmc sanity query is emulated.
 
-See [Security backends](docs/SECURITY_BACKENDS.md) and [Building](docs/BUILDING.md).
+After the probe, Inspector rebuilds the Sony ROM X stack before returning to normal operation.
 
-## Safety model
-
-The filesystem test chooses an unused temporary filename, verifies the card again before writing, writes a deterministic 4096-byte pattern, flushes, closes/reopens, reads and compares it, deletes it, and verifies cleanup.
-
-The MagicGate probe:
-
-- accepts a raw user-supplied `FMCB.XLF` from USB;
-- keeps it in EE RAM;
-- performs SECRMAN/KELF operations on that RAM copy;
-- does **not** write the bound KELF to a memory card;
-- restores the normal card stack after the isolated session.
-
-FMCB preflight validates source-side package structure only. It does not create installation directories or copy/bind payloads to the target card.
-
-Formatting is never automatic. The destructive action requires a second confirmation using **L1 + R1 + Triangle**.
-
-## Controls
-
-| Control | Action |
-| --- | --- |
-| Left / Right | Select `mc0:` or `mc1:` |
-| Cross | Inspect selected filesystem |
-| Start | Inspect both filesystems |
-| Square | Run isolated RAM-only MagicGate/KELF probe |
-| Circle | Scan the FMCB package on `mass:` / `mass0:` / `mass1:` |
-| R1 | Cycle Card / MagicGate / FMCB Preflight pages |
-| Triangle | Arm format when the current card state allows it |
-| L1 + R1 + Triangle | Confirm destructive format |
-| Circle during format confirmation | Cancel |
-| Select | Exit |
+See [Architecture](docs/ARCHITECTURE.md).
 
 ## Test KELF / FMCB package
 
@@ -159,43 +104,65 @@ mass0:/FMCB/SYSTEM/FMCB.XLF
 mass1:/FMCB/SYSTEM/FMCB.XLF
 ```
 
-An `osdmain.elf` already installed on a memory card is **not** suitable input: it is already card-bound.
+An `osdmain.elf` already installed on a memory card is not suitable input because it is already card-bound.
 
-For the wider package preflight layout, see [FMCB package](docs/FMCB_PACKAGE.md).
+For the wider package layout, see [FMCB package](docs/FMCB_PACKAGE.md).
+
+## Controls
+
+| Control | Action |
+| --- | --- |
+| Left / Right | Select `mc0:` or `mc1:` |
+| Cross | Inspect selected filesystem |
+| Start | Inspect both filesystems |
+| Square | Run isolated RAM-only MagicGate/KELF probe |
+| Circle | Scan the FMCB package on USB |
+| R1 | Cycle Card / MagicGate / FMCB Preflight pages |
+| Triangle | Arm format when allowed |
+| L1 + R1 + Triangle | Confirm destructive format |
+| Circle during format confirmation | Cancel |
+| Select | Exit |
 
 ## Building
 
-The EE application targets **PS2DEV / PS2SDK 2.0**. The canonical reproducible builds are the GitHub Actions profiles because each workflow stages the exact matching IOP modules before linking the standalone ELF.
-
-The build system accepts:
+The release build targets **PS2DEV / PS2SDK 2.0.0**. CI pins the security source to PS2SDK commit:
 
 ```text
-SECR_PROFILE=fmcb13
-SECR_PROFILE=ps2sdk14
+a13b5971ec0e39c7ba8b8559b80a4e81c8425352
 ```
 
-A plain local `make SECR_PROFILE=...` expects the matching staged files under `.build/`; see [Building](docs/BUILDING.md) for the exact layout and pinned upstream revisions.
+CI applies `tools/patch_secrman14_diag.py`, builds SECRMAN 1.4 and matching SECRSIF from that checkout, stages the matching PS2SDK 2.0 SIO2/PAD/MCMAN modules, then builds the standalone EE ELF.
+
+A plain local `make` expects those staged modules under `.build/`; see [Building](docs/BUILDING.md).
+
+## Safety
+
+The 4 KiB filesystem test uses an unused temporary filename, writes a deterministic pattern, flushes, closes/reopens, reads and compares it, deletes it, and verifies cleanup.
+
+The MagicGate probe operates on a RAM copy of the KELF and never writes the bound result to the card.
+
+FMCB package preflight performs source-side validation only. Formatting is never automatic and requires **L1 + R1 + Triangle** after being armed.
 
 ## Documentation
 
+- [Release notes](RELEASE_NOTES.md)
 - [MagicGate / CardAuth findings](docs/MAGICGATE.md)
-- [Security backend profiles](docs/SECURITY_BACKENDS.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Security backend provenance](docs/SECURITY_BACKENDS.md)
 - [Hardware and regression testing](docs/TESTING.md)
 - [Building and reproducibility](docs/BUILDING.md)
 - [FMCB package layout](docs/FMCB_PACKAGE.md)
 - [Roadmap](docs/ROADMAP.md)
-- [Release codenames](docs/CODENAMES.md)
 - [Changelog](CHANGELOG.md)
 - [Credits](CREDITS.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 ## License and attribution
 
-Original PS2 Memory Card Inspector source in this repository is released under the [MIT License](LICENSE), except where a file or imported/build-time component states otherwise.
+Original PS2 Memory Card Inspector source is released under the [MIT License](LICENSE), except where a file or third-party component states otherwise.
 
-The project builds against and, depending on the selected profile, embeds or derives build artifacts from third-party PS2 homebrew projects. Those components retain their own licenses and copyright notices. In particular, PS2SDK is distributed under the **Academic Free License 2.0**.
+The release builds against and embeds PS2SDK components. PS2SDK is distributed under the **Academic Free License 2.0**; its license text is included under [`licenses/PS2SDK-AFL-2.0.txt`](licenses/PS2SDK-AFL-2.0.txt). Exact source provenance and modification details are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) before redistributing binaries. The legacy `fmcb13` compatibility profile uses pinned FreeMcBoot Installer source at build time; its upstream provenance is documented separately and its redistribution terms should be verified independently before using that profile for a public binary release.
+Sony ROM modules and user-supplied FreeMcBoot payloads are not distributed by this project.
 
-PlayStation, MagicGate and related names are trademarks of their respective owners. This project is an independent homebrew utility and is not affiliated with or endorsed by Sony Interactive Entertainment.
+PlayStation, MagicGate and related names are trademarks of their respective owners. PS2 Memory Card Inspector is an independent homebrew project and is not affiliated with or endorsed by Sony Interactive Entertainment.
