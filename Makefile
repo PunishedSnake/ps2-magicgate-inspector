@@ -14,6 +14,7 @@ EE_LDFLAGS = -Wl,--gc-sections \
 	-Wl,--wrap=mcInit \
 	-Wl,--wrap=mcGetInfo \
 	-Wl,--wrap=mcSync \
+	-Wl,--wrap=mcReadPage \
 	-Wl,--wrap=FmcbInitMassBackend \
 	-Wl,--wrap=FmcbShutdownMassBackend \
 	-Wl,--wrap=MciRawCardSessionStart \
