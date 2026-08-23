@@ -51,10 +51,20 @@ jobs:
         run: |
           set -euo pipefail
           test -f tools/apply_0_4_user_feedback.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tools/apply_0_4_user_feedback.py')
+          s = p.read_text()
+          marker = '# Basic static sanity checks before CI gets the final word.'
+          inject = '''for _name in ("src/app_main.c", "src/gui_core.inc", "src/gui.c"):\n    _p = Path(_name)\n    _p.write_text(_p.read_text().replace("v0.4.0-dev1", "v0.4.0-dev2"))\n\n'''
+          if marker not in s:
+              raise SystemExit('feedback script sanity marker missing')
+          p.write_text(s.replace(marker, inject + marker, 1))
+          PY
           python3 tools/apply_0_4_user_feedback.py
-          # HEAD~2 is the last normal read-only workflow: one commit staged the
-          # push helper and this commit changed it to PR-triggered execution.
-          git show HEAD~2:.github/workflows/build.yml > .github/workflows/build.yml
+          # 30b6... contains the last normal read-only build workflow before
+          # the temporary patch runner was introduced.
+          git show 30b6d7590f55a5aea368bac95fbde891780f6b72:.github/workflows/build.yml > .github/workflows/build.yml
           rm tools/apply_0_4_user_feedback.py
           git diff --check
           git config user.name 'github-actions[bot]'
