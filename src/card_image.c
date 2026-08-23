@@ -51,35 +51,37 @@ typedef struct MciPs2Superblock {
 static const char SuperblockMagic[28] = "Sony PS2 Memory Card Format ";
 static const char *const MassRoots[] = {"mass:/", "mass0:/", "mass1:/"};
 
-static int McResult(void)
+static int CompleteMcCommand(int issue_rc)
 {
     int result = -999;
-    mcSync(MC_WAIT, NULL, &result);
+    int sync_rc;
+
+    /* libmc can reject a command before an RPC is queued. Never call mcSync in
+     * that case: doing so used to turn the useful immediate -1 into our -999
+     * sentinel and produced the misleading CARD GEOMETRY ERROR seen on dev3. */
+    if (issue_rc < 0)
+        return issue_rc;
+    sync_rc = mcSync(MC_WAIT, NULL, &result);
+    if (sync_rc < 0)
+        return sync_rc;
+    if (sync_rc != 1)
+        return -998;
     return result;
 }
 
 static int ReadPage(int port, u32 page, unsigned char data[IMAGE_PAGE_DATA])
 {
-    int rc;
-    mcReadPage(port, 0, (int)page, data);
-    rc = McResult();
-    return rc;
+    return CompleteMcCommand(mcReadPage(port, 0, (int)page, data));
 }
 
 static int WritePage(int port, u32 page, const unsigned char data[IMAGE_PAGE_DATA])
 {
-    int rc;
-    mcWritePage(port, 0, (int)page, (void *)data);
-    rc = McResult();
-    return rc;
+    return CompleteMcCommand(mcWritePage(port, 0, (int)page, (void *)data));
 }
 
 static int EraseBlock(int port, u32 block)
 {
-    int rc;
-    mcEraseBlock(port, 0, (int)block, -1);
-    rc = McResult();
-    return rc;
+    return CompleteMcCommand(mcEraseBlock(port, 0, (int)block, -1));
 }
 
 static u32 Crc32Update(u32 crc, const unsigned char *data, unsigned int size)
@@ -238,11 +240,23 @@ int MciCardImageProbeGeometry(int port, MciCardGeometry *geometry)
     };
     unsigned char page[IMAGE_PAGE_DATA] __attribute__((aligned(64)));
     unsigned int i;
+    int type = MC_TYPE_NONE;
+    int free_clusters = -1;
+    int formatted = 0;
     int rc;
 
     if (geometry == NULL)
         return -1;
     memset(geometry, 0, sizeof(*geometry));
+
+    /* Legacy MCMAN keeps per-port card type state. Probe the actual selected
+     * slot before the first raw-page RPC; mc1 must not inherit mc0's state. A
+     * changed-card (-1) or no-format (-2) result is valid if type says PS2. */
+    rc = CompleteMcCommand(mcGetInfo(port, 0, &type, &free_clusters, &formatted));
+    if (rc < -2)
+        return rc;
+    if (type != MC_TYPE_PS2)
+        return sceMcResFailDetect;
 
     rc = ReadPage(port, 0u, page);
     if (rc < 0)
@@ -485,7 +499,9 @@ int MciCardImageExport(int port, MciCardImageFormat format,
 
     rc = MciCardImageProbeGeometry(port, &geometry);
     if (rc < 0) {
-        report->result = MCI_CARD_IMAGE_GEOMETRY_ERROR;
+        report->result = rc <= -10 ? MCI_CARD_IMAGE_NO_CARD
+                                   : MCI_CARD_IMAGE_GEOMETRY_ERROR;
+        report->verify_rc = rc;
         return rc;
     }
     report->geometry = geometry;
@@ -742,8 +758,7 @@ int MciCardForceFormatWithBackup(int port, MciCardImageReport *report)
     MciProgressUpdate(MCI_PROGRESS_CARD_TOOLS, 98,
                       "Formatting memory card",
                       "The verified safety image is complete. Formatting the selected PS2 card now.");
-    mcFormat(port, 0);
-    rc = McResult();
+    rc = CompleteMcCommand(mcFormat(port, 0));
     report->format_rc = rc;
     if (rc < 0) {
         report->result = MCI_CARD_IMAGE_FORMAT_ERROR;

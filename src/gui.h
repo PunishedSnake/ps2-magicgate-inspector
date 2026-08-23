@@ -2,6 +2,7 @@
 #define MCI_GUI_H
 
 #include "card.h"
+#include "card_image_fs.h"
 #include "magicgate.h"
 #include "fmcb_install.h"
 #include "settings.h"
@@ -56,6 +57,13 @@ void MciGuiRenderProgress(const char *title,
                           int percent,
                           const char *footer,
                           MciGuiTone tone);
+
+void MciGuiRenderCardTools(int selected, int selected_item);
+void MciGuiRenderImageBrowser(int target_port,
+                              const MciImageSaveList *list,
+                              int selected_row,
+                              int first_row,
+                              int free_clusters);
 
 void MciGuiRenderFatal(const char *title,
                        const char *body,

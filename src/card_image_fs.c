@@ -528,6 +528,61 @@ static int BuildChildPath(const char *parent, const char *name,
     return 0;
 }
 
+static int VerifyImportedFile(MciImportTxn *txn, const MciFsDirEntry *entry,
+                              const char *path)
+{
+    unsigned char source[FS_MAX_CLUSTER_BYTES] __attribute__((aligned(64)));
+    unsigned char target[FS_MAX_CLUSTER_BYTES] __attribute__((aligned(64)));
+    u32 current = entry->cluster;
+    u32 remaining = entry->length;
+    u32 next;
+    int fd;
+    int rc;
+
+    mcOpen(txn->port, 0, path, FIO_O_RDONLY);
+    fd = McResult();
+    if (fd < 0)
+        return fd;
+
+    while (remaining > 0u) {
+        u32 chunk = remaining > txn->image->cluster_bytes
+                        ? txn->image->cluster_bytes : remaining;
+        if (current == FS_FAT_END || current >= txn->image->sb.alloc_end) {
+            mcClose(fd); (void)McResult();
+            return -30;
+        }
+        rc = ReadCluster(txn->image, txn->image->sb.alloc_offset + current,
+                         source);
+        if (rc < 0) {
+            mcClose(fd); (void)McResult();
+            return rc;
+        }
+        mcRead(fd, target, (int)chunk);
+        rc = McResult();
+        if (rc != (int)chunk || memcmp(source, target, chunk) != 0) {
+            mcClose(fd); (void)McResult();
+            return rc < 0 ? rc : -31;
+        }
+        remaining -= chunk;
+        if (remaining > 0u) {
+            rc = NextRelativeCluster(txn->image, current, &next);
+            if (rc != 0) {
+                mcClose(fd); (void)McResult();
+                return -32;
+            }
+            current = next;
+        }
+    }
+    mcRead(fd, target, 1);
+    rc = McResult();
+    if (rc != 0) {
+        mcClose(fd); (void)McResult();
+        return rc < 0 ? rc : -33;
+    }
+    mcClose(fd);
+    return McResult();
+}
+
 static int ImportFile(MciImportTxn *txn, const MciFsDirEntry *entry,
                       const char *path)
 {
@@ -588,6 +643,9 @@ static int ImportFile(MciImportTxn *txn, const MciFsDirEntry *entry,
     mcClose(fd);
     if (McResult() < 0 && rc >= 0)
         rc = -5;
+    if (rc < 0)
+        return rc;
+    rc = VerifyImportedFile(txn, entry, path);
     if (rc < 0)
         return rc;
     rc = SetMetadata(txn->port, path, entry);

@@ -1074,7 +1074,7 @@ static qword_t *shell(qword_t *q, MciGuiPage page, int selected)
     q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
     q = rect_outline(q, 12, 8, 628, 31, Theme.border);
     q = text(q, 22, 14, "PS2 Memory Card Inspector", Theme.text);
-    snprintf(version, sizeof(version), "v0.4.0-dev3 Drebin  mc%d", selected);
+    snprintf(version, sizeof(version), "v0.4.0-dev4 Drebin  mc%d", selected);
     q = text_box(q, 462, 14, 618, 23, version, Theme.accent);
 
     for (i = 0; i < MCI_GUI_PAGE_COUNT; i++) {
@@ -1199,17 +1199,16 @@ static qword_t *render_card(qword_t *q, int selected,
     } else {
         q = rect_fill(q, 158, 174, 628, 202, Theme.panel);
         q = rect_outline(q, 158, 174, 628, 202, Theme.border);
-        if (r->format_allowed)
-            q = text(q, 172, 181, "TRIANGLE  Arm destructive format", Theme.warning);
-        else
-            q = text(q, 172, 181, "Format locked for this card state", Theme.muted);
+        q = text(q, 172, 181, "TRIANGLE  Open Card Tools", Theme.accent);
         if (last_format_rc != -999) {
             snprintf(line, sizeof(line), "Last format result: %s",
                      CardResultText(last_format_rc));
             q = text_box(q, 172, 191, 615, 199, line,
                          last_format_rc == 0 ? Theme.success : Theme.danger);
         } else {
-            q = text(q, 172, 191, "Filesystem and MagicGate are evaluated independently.", Theme.muted);
+            q = text(q, 172, 191,
+                     "Backup, image browser, restore and format maintenance.",
+                     Theme.muted);
         }
     }
     return q;
@@ -1450,9 +1449,9 @@ static qword_t *footer(qword_t *q, MciGuiPage page, int confirm_format)
     } else if (page == MCI_GUI_SETTINGS) {
         line = "UP/DOWN Setting   LEFT/RIGHT Change   X Apply   L1/R1 Page   SELECT Exit";
     } else if (page == MCI_GUI_FMCB) {
-        line = "UP/DOWN Slot   X Preflight   SQUARE Installer   L2+X Full scan   L1/R1 Page";
+        line = "UP/DOWN Slot  X Preflight  SQUARE Installer  TRIANGLE Tools  L1/R1 Page";
     } else {
-        line = "UP/DOWN Slot   X Test   L2+X Full scan   L1/R1 Page   SELECT Exit";
+        line = "UP/DOWN Slot  X Test  L2+X Full  TRIANGLE Tools  L1/R1 Page";
     }
     q = text_box(q, 18, 211, 622, 220, line, Theme.muted);
     return q;
@@ -1560,7 +1559,7 @@ void MciGuiRenderMessage(const char *title,
     q = rect_fill(q, 0, 0, UI_W, 4, accent);
     q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
     q = rect_outline(q, 12, 8, 628, 31, Theme.border);
-    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.4.0-dev3 Drebin", Theme.text);
+    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.4.0-dev4 Drebin", Theme.text);
     q = text_box(q, 20, 39, 620, 48, title != NULL ? title : "Status", accent);
     q = rect_fill(q, 16, 53, 624, body_bottom, Theme.panel);
     q = rect_outline(q, 16, 53, 624, body_bottom, Theme.border);
@@ -1602,7 +1601,7 @@ void MciGuiRenderProgress(const char *title,
     q = rect_fill(q, 0, 0, UI_W, 4, accent);
     q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
     q = rect_outline(q, 12, 8, 628, 31, Theme.border);
-    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.4.0-dev3 Drebin", Theme.text);
+    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.4.0-dev4 Drebin", Theme.text);
     q = text_box(q, 20, 39, 620, 48, title != NULL ? title : "Working", accent);
     q = rect_fill(q, 16, 53, 624, 196, Theme.panel);
     q = rect_outline(q, 16, 53, 624, 196, Theme.border);

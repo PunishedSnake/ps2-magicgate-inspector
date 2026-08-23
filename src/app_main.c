@@ -30,6 +30,7 @@
 
 #include "card.h"
 #include "card_image.h"
+#include "card_image_fs.h"
 #include "card_raw_session.h"
 #include "magicgate.h"
 #include "fmcb_install.h"
@@ -507,11 +508,17 @@ static int RunVerifiedInstaller(int target_port)
         const char *failed_target =
             (report->current_file >= 0 && report->current_file < FMCB_TX_MAX_FILES)
                 ? report->files[report->current_file].destination : "n/a";
+        const FmcbInstallFileReport *failed_file =
+            (report->current_file >= 0 && report->current_file < FMCB_TX_MAX_FILES)
+                ? &report->files[report->current_file] : NULL;
         snprintf(result, sizeof(result),
-                 "Install failed at %s: %s. Target: %s. Files committed before failure: %d/%d. space rc=%d, recovery rc=%d, rollback rc=%d. If recovery remains present, do not start another install; restore the recorded transaction first.",
+                 "Install failed at %s: %s. Target: %s. Files committed: %d/%d. inventory exact=%d parent=%d open=%d. space rc=%d, recovery rc=%d, rollback rc=%d. No new install should start while recovery state is present.",
                  FmcbInstallStageText(report->stage),
                  FmcbInstallResultText(report->result), failed_target,
                  report->files_committed, report->files_total,
+                 failed_file ? failed_file->inventory_exact_rc : -999,
+                 failed_file ? failed_file->inventory_parent_rc : -999,
+                 failed_file ? failed_file->inventory_open_rc : -999,
                  report->space_rc, report->recovery_rc,
                  report->rollback_rc);
         (void)RefreshRecoveryStatus();
@@ -637,13 +644,15 @@ static void ShowCardImageResult(const char *title,
 {
     char message[560];
     snprintf(message, sizeof(message),
-             "%s on mc%d\n\nResult: %s (rc=%d)\nPath: %s\nPages: %u/%u\nCRC32: %08X\nVerified: %s%s",
+             "%s on mc%d\n\nResult: %s (rc=%d)\nPath: %s\nPages: %u/%u\nCRC32: %08X\nVerified: %s\nRaw stack: mcInit=%d mcInfo(issue/sync/result)=%d/%d/%d%s",
              MciCardImageFormatName(report->format), report->port,
              MciCardImageResultText(report->result), rc,
              report->path[0] != '\0' ? report->path : "n/a",
              report->pages_done, report->pages_total,
              report->logical_crc32, report->verified ? "YES" : "NO",
-             destructive ? "\n\nThe card was modified only after the source/safety image passed verification." : "");
+             RawCardStatus.mcinit_rc, RawCardStatus.mcinfo_issue_rc,
+             RawCardStatus.mcinfo_sync_rc, RawCardStatus.mcinfo_result,
+             destructive ? "\n\nThe card was modified only after source/recovery verification." : "");
     MciGuiRenderMessage(title, message,
                         "CROSS or CIRCLE returns to Card Tools.",
                         rc == 0 ? MCI_GUI_TONE_SUCCESS : MCI_GUI_TONE_DANGER);
@@ -744,35 +753,106 @@ static void RunForceFormatWithBackup(int port)
     ShowCardImageResult("Force format", &report, rc, 1);
 }
 
-static void RunCardToolsMenu(int port)
+static int CurrentFreeClusters(int port)
 {
-    enum { CARD_TOOLS_ROWS = 8 };
+    int type = MC_TYPE_NONE;
+    int free_clusters = -1;
+    int formatted = 0;
+    int result = -999;
+    int issue_rc;
+    int sync_rc;
+
+    issue_rc = mcGetInfo(port, 0, &type, &free_clusters, &formatted);
+    if (issue_rc < 0)
+        return issue_rc;
+    sync_rc = mcSync(MC_WAIT, NULL, &result);
+    if (sync_rc < 0)
+        return sync_rc;
+    if (type != MC_TYPE_PS2 || !formatted || result < -2)
+        return result < -2 ? result : -1;
+    return free_clusters;
+}
+
+static u32 SelectedImageClusters(const MciImageSaveList *list)
+{
+    u32 total = 0u;
+    int i;
+    for (i = 0; i < list->save_count; i++)
+        if (list->saves[i].selected)
+            total += list->saves[i].required_clusters;
+    return total;
+}
+
+static void ShowSelectiveRestoreResult(const MciImageImportReport *report, int rc)
+{
+    char message[520];
+    snprintf(message, sizeof(message),
+             "Result: %s (rc=%d)\n\nSelected saves: %d\nRestored saves: %d\nFiles: %u  directories: %u\nBytes verified: %u\nRequired clusters: %u  target free before: %d\nFailed path: %s\nRollback rc: %d",
+             MciImageFsResultText(report->result), rc,
+             report->selected_saves, report->restored_saves,
+             report->files_written, report->directories_written,
+             report->bytes_written, report->required_clusters,
+             report->target_free_clusters,
+             report->failed_path[0] ? report->failed_path : "none",
+             report->rollback_rc);
+    MciGuiRenderMessage("Selective restore", message,
+                        "CROSS or CIRCLE returns to Card Tools.",
+                        rc == 0 ? MCI_GUI_TONE_SUCCESS : MCI_GUI_TONE_DANGER);
+    WaitForModalDismiss();
+}
+
+static void RunSelectiveRestoreLatest(int port, MciCardImageFormat format)
+{
+    MciImageSaveList list;
+    MciImageImportReport report;
+    char path[MCI_CARD_IMAGE_PATH_MAX];
     int row = 0;
+    int first = 0;
+    int free_clusters;
+    int rc;
     u32 held;
     u32 pressed;
-    char body[900];
+
+    /* Until the source picker lands, use the newest Drebin image for either
+     * source slot. This already permits mc0-image -> mc1 and vice versa. */
+    rc = MciCardImageFindLatest(port, format, path, sizeof(path));
+    if (rc < 0)
+        rc = MciCardImageFindLatest(port ^ 1, format, path, sizeof(path));
+    if (rc < 0) {
+        MciGuiRenderMessage("Image Browser",
+                            "No Drebin image of this format was found in mass:/MCI. Create a backup first or place a compatible image in the managed image set.",
+                            "CROSS or CIRCLE returns to Card Tools.",
+                            MCI_GUI_TONE_WARNING);
+        WaitForModalDismiss();
+        return;
+    }
+
+    rc = MciImageFsScan(path, format, &list);
+    if (rc < 0 || list.save_count <= 0) {
+        char message[280];
+        snprintf(message, sizeof(message),
+                 "The image could not be indexed as a PS2 save filesystem. Result: %s (rc=%d).",
+                 MciImageFsResultText(list.result), rc);
+        MciGuiRenderMessage("Image Browser", message,
+                            "CROSS or CIRCLE returns to Card Tools.",
+                            MCI_GUI_TONE_DANGER);
+        WaitForModalDismiss();
+        return;
+    }
+
+    rc = MciImageFsRefreshTargetConflicts(port, &list);
+    if (rc < 0) {
+        MciGuiRenderMessage("Image Browser",
+                            "The destination card could not be checked for existing save-directory conflicts.",
+                            "CROSS or CIRCLE returns to Card Tools.",
+                            MCI_GUI_TONE_DANGER);
+        WaitForModalDismiss();
+        return;
+    }
+    free_clusters = CurrentFreeClusters(port);
 
     for (;;) {
-        snprintf(body, sizeof(body),
-                 "Selected card: mc%d\n\n"
-                 "%c Create verified PCSX2 .ps2 image\n"
-                 "%c Create verified OPL .vmc image\n"
-                 "%c Verify latest .ps2 image\n"
-                 "%c Verify latest .vmc image\n"
-                 "%c Exact restore latest .ps2 image\n"
-                 "%c Exact restore latest .vmc image\n"
-                 "%c Force format + verified .ps2 backup\n"
-                 "%c Return\n\n"
-                 "Exports and restores use page-level PS2SDK MCMAN/MCSERV. Exact restore rejects different card geometry; smaller-to-larger migration remains a separate filesystem-aware operation.",
-                 port,
-                 row == 0 ? '>' : ' ', row == 1 ? '>' : ' ',
-                 row == 2 ? '>' : ' ', row == 3 ? '>' : ' ',
-                 row == 4 ? '>' : ' ', row == 5 ? '>' : ' ',
-                 row == 6 ? '>' : ' ', row == 7 ? '>' : ' ');
-        MciGuiRenderMessage("CARD TOOLS - Drebin", body,
-                            "UP/DOWN selects. CROSS runs. CIRCLE returns.",
-                            row >= 4 && row <= 6 ? MCI_GUI_TONE_WARNING : MCI_GUI_TONE_INFO);
-
+        MciGuiRenderImageBrowser(port, &list, row, first, free_clusters);
         for (;;) {
             pressed = ReadPadPressed(&held);
             if (pressed != 0u)
@@ -782,21 +862,80 @@ static void RunCardToolsMenu(int port)
         if (pressed & PAD_CIRCLE)
             return;
         if (pressed & PAD_UP) {
-            row = row == 0 ? CARD_TOOLS_ROWS - 1 : row - 1;
-            continue;
+            row = row == 0 ? list.save_count - 1 : row - 1;
+        } else if (pressed & PAD_DOWN) {
+            row = (row + 1) % list.save_count;
         }
-        if (pressed & PAD_DOWN) {
-            row = (row + 1) % CARD_TOOLS_ROWS;
-            continue;
+        if (row < first)
+            first = row;
+        else if (row >= first + 7)
+            first = row - 6;
+
+        if ((pressed & PAD_SQUARE) && !list.saves[row].conflict) {
+            if (list.saves[row].selected) {
+                list.saves[row].selected = 0;
+            } else if (free_clusters >= 0 &&
+                       SelectedImageClusters(&list) + list.saves[row].required_clusters <=
+                           (u32)free_clusters) {
+                list.saves[row].selected = 1;
+            }
         }
+
+        if (pressed & PAD_TRIANGLE) {
+            u32 remaining = free_clusters > 0 ? (u32)free_clusters : 0u;
+            int i;
+            for (i = 0; i < list.save_count; i++) {
+                list.saves[i].selected = 0;
+                if (!list.saves[i].conflict &&
+                    list.saves[i].required_clusters <= remaining) {
+                    list.saves[i].selected = 1;
+                    remaining -= list.saves[i].required_clusters;
+                }
+            }
+        }
+
+        if ((pressed & PAD_CROSS) && SelectedImageClusters(&list) > 0u) {
+            rc = MciImageFsImportSelected(port, &list, &report);
+            if (rc == 0)
+                ResetSlotReports(port);
+            ShowSelectiveRestoreResult(&report, rc);
+            return;
+        }
+    }
+}
+
+static void RunCardToolsMenu(int port)
+{
+    int item = 0;
+    u32 held;
+    u32 pressed;
+
+    for (;;) {
+        MciGuiRenderCardTools(port, item);
+        for (;;) {
+            pressed = ReadPadPressed(&held);
+            if (pressed != 0u)
+                break;
+            DelayThread(16000);
+        }
+        if (pressed & PAD_CIRCLE)
+            return;
+        if (pressed & PAD_LEFT)
+            item = (item & ~1) | ((item & 1) ^ 1);
+        else if (pressed & PAD_RIGHT)
+            item = (item & ~1) | ((item & 1) ^ 1);
+        if (pressed & PAD_UP)
+            item = item < 2 ? item + 6 : item - 2;
+        else if (pressed & PAD_DOWN)
+            item = item >= 6 ? item - 6 : item + 2;
         if (!(pressed & PAD_CROSS))
             continue;
 
-        switch (row) {
+        switch (item) {
             case 0: RunCardImageExportAction(port, MCI_CARD_IMAGE_PS2); break;
             case 1: RunCardImageExportAction(port, MCI_CARD_IMAGE_VMC); break;
-            case 2: RunCardImageVerifyLatest(port, MCI_CARD_IMAGE_PS2); break;
-            case 3: RunCardImageVerifyLatest(port, MCI_CARD_IMAGE_VMC); break;
+            case 2: RunSelectiveRestoreLatest(port, MCI_CARD_IMAGE_PS2); break;
+            case 3: RunSelectiveRestoreLatest(port, MCI_CARD_IMAGE_VMC); break;
             case 4: RunCardImageRestoreLatest(port, MCI_CARD_IMAGE_PS2); break;
             case 5: RunCardImageRestoreLatest(port, MCI_CARD_IMAGE_VMC); break;
             case 6: RunForceFormatWithBackup(port); break;
@@ -864,7 +1003,7 @@ int main(int argc, char *argv[])
     init_scr();
     if (MciGuiInit() < 0) {
         scr_clear();
-        scr_printf("PS2 Memory Card Inspector 0.4.0-dev3 Drebin\n\n");
+        scr_printf("PS2 Memory Card Inspector 0.4.0-dev4 Drebin\n\n");
         scr_printf("GS frontend initialization failed.\n");
         SleepThread();
     }

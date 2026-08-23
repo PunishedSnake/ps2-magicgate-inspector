@@ -70,6 +70,9 @@ void FmcbInstallResetReport(FmcbInstallReport *report, int target_port)
     report->free_clusters = -1;
     report->minimum_remaining_clusters = -1;
     for (i = 0; i < FMCB_TX_MAX_FILES; i++) {
+        report->files[i].inventory_exact_rc = -999;
+        report->files[i].inventory_parent_rc = -999;
+        report->files[i].inventory_open_rc = -999;
         report->files[i].backup_rc = -999;
         report->files[i].bind_rc = -999;
         report->files[i].write_rc = -999;
@@ -283,6 +286,15 @@ static int NameEqualCi(const char *a, const char *b)
     return *a == '\0' && *b == '\0';
 }
 
+static int CompleteInventoryCommand(int issue_rc)
+{
+    if (issue_rc < 0)
+        return issue_rc;
+    return McResult();
+}
+
+/* Return 1 when found, 0 when the parent was enumerated and the name is absent,
+ * or a negative mc/lib error if the parent itself cannot be enumerated. */
 static int InventoryTargetFromParent(int port, const char *path,
                                      int *exists, unsigned int *size)
 {
@@ -303,8 +315,7 @@ static int InventoryTargetFromParent(int port, const char *path,
         return -4621;
 
     memset(entries, 0, sizeof(entries));
-    mcGetDir(port, 0, pattern, 0, 64, entries);
-    count = McResult();
+    count = CompleteInventoryCommand(mcGetDir(port, 0, pattern, 0, 64, entries));
     if (count == sceMcResNoEntry || count == 0)
         return 0;
     if (count < 0)
@@ -312,27 +323,61 @@ static int InventoryTargetFromParent(int port, const char *path,
     if (count > 64)
         count = 64;
     for (i = 0; i < count; i++) {
-        if (NameEqualCi(entries[i].EntryName, name)) {
+        if (NameEqualCi((const char *)entries[i].EntryName, name)) {
             *exists = 1;
             *size = entries[i].FileSizeByte;
-            return 0;
+            return 1;
         }
     }
     return 0;
 }
 
+/* Protected system directories may reject mcGetDir while their files are still
+ * perfectly readable. A direct read-only open is both less invasive and a
+ * stronger precondition for rollback: if it succeeds, we know the old target
+ * can actually be captured before replacement. */
+static int InventoryTargetFromOpen(int port, const char *path,
+                                   int *exists, unsigned int *size)
+{
+    int fd;
+    int end;
+    int close_rc;
+
+    fd = CompleteInventoryCommand(mcOpen(port, 0, path, FIO_O_RDONLY));
+    if (fd == sceMcResNoEntry)
+        return 0;
+    if (fd < 0)
+        return fd;
+
+    end = CompleteInventoryCommand(mcSeek(fd, 0, SEEK_END));
+    close_rc = CloseCardFile(fd);
+    if (end < 0)
+        return end;
+    if (close_rc < 0)
+        return close_rc;
+    *exists = 1;
+    *size = (unsigned int)end;
+    return 1;
+}
+
 static int InventoryTarget(int port, const char *path,
-                           int *exists, unsigned int *size)
+                           int *exists, unsigned int *size,
+                           int *exact_out, int *parent_out, int *open_out)
 {
     sceMcTblGetDir info __attribute__((aligned(64)));
     int exact_rc;
-    int fallback_rc;
+    int parent_rc;
+    int open_rc;
 
     *exists = 0;
     *size = 0;
+    *exact_out = -999;
+    *parent_out = -999;
+    *open_out = -999;
+
     memset(&info, 0, sizeof(info));
-    mcGetDir(port, 0, path, 0, 1, &info);
-    exact_rc = McResult();
+    exact_rc = CompleteInventoryCommand(mcGetDir(port, 0, path, 0, 1, &info));
+    *exact_out = exact_rc;
     if (exact_rc == sceMcResNoEntry || exact_rc == 0)
         return 0;
     if (exact_rc > 0) {
@@ -341,10 +386,19 @@ static int InventoryTarget(int port, const char *path,
         return 0;
     }
 
-    fallback_rc = InventoryTargetFromParent(port, path, exists, size);
-    if (fallback_rc == 0)
+    parent_rc = InventoryTargetFromParent(port, path, exists, size);
+    *parent_out = parent_rc;
+    if (parent_rc >= 0)
         return 0;
-    return exact_rc;
+
+    open_rc = InventoryTargetFromOpen(port, path, exists, size);
+    *open_out = open_rc;
+    if (open_rc >= 0)
+        return 0;
+
+    /* Fail closed. We only call an inaccessible target absent if one of the
+     * read-only probes has actually proved absence. */
+    return open_rc;
 }
 
 static int PrepareInventory(int target_port,
@@ -383,7 +437,10 @@ static int PrepareInventory(int target_port,
 
         report->current_file = i;
         rc = InventoryTarget(target_port, file->destination, &file->existed,
-                             &file->previous_size);
+                             &file->previous_size,
+                             &file->inventory_exact_rc,
+                             &file->inventory_parent_rc,
+                             &file->inventory_open_rc);
         if (rc < 0)
             return rc;
         file->reclaimable_clusters = file->existed
