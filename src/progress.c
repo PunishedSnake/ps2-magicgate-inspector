@@ -1,13 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-/*
- * Live progress adapter for the native GS frontend.
- *
- * Core diagnostic modules report short, factual progress events through
- * progress.h. This file is the only place that translates those events into
- * GUI titles and footer safety notes. Progress remains informational even at
- * 100%: completion of a sequence is not the same thing as a PASS result. The
- * dashboard owns the final success/warning/error classification.
- */
+/* Live progress adapter for the native GS frontend. */
 
 #include "gui.h"
 #include "progress.h"
@@ -17,8 +9,9 @@ static const char *ProgressTitle(MciProgressDomain domain)
     switch (domain) {
         case MCI_PROGRESS_FILESYSTEM: return "Filesystem inspection";
         case MCI_PROGRESS_MAGICGATE: return "MagicGate / KELF probe";
-        case MCI_PROGRESS_FMCB: return "FMCB package preflight";
+        case MCI_PROGRESS_FMCB: return "FMCB package / installer";
         case MCI_PROGRESS_ENVIRONMENT: return "IOP / card environment";
+        case MCI_PROGRESS_CARD_TOOLS: return "Memory Card Tools";
         default: return "Working";
     }
 }
@@ -31,9 +24,11 @@ static const char *ProgressFooter(MciProgressDomain domain)
         case MCI_PROGRESS_MAGICGATE:
             return "Do not remove the memory card or USB source during the security probe.";
         case MCI_PROGRESS_FMCB:
-            return "Read-only package scan; no FMCB files are written to the memory card.";
+            return "Do not remove the memory card or USB source during an installer transaction.";
         case MCI_PROGRESS_ENVIRONMENT:
             return "Please wait while the program changes or restores the IOP environment.";
+        case MCI_PROGRESS_CARD_TOOLS:
+            return "Do not remove the selected card or USB storage while imaging or restoring.";
         default:
             return "Please wait.";
     }
