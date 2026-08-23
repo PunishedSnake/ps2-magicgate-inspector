@@ -48,6 +48,31 @@ static int McSyncResult(void)
     return result;
 }
 
+/*
+ * XMCMAN uses sceMcResChangedCard as a generation-change notification. The
+ * first mcGetInfo after initialization or a newly observed card can therefore
+ * return -1 while still filling type/free/format metadata correctly. For the
+ * opening snapshot of an explicit scan this is informational, so consume that
+ * one-shot edge and report the stable query instead.
+ *
+ * Do not use this helper in VerifySameCard(): a ChangedCard result there means
+ * the card really changed during the test and must remain a hard safety stop.
+ */
+static int GetInitialInfoStable(int port, int *type,
+                                int *free_clusters, int *formatted)
+{
+    int rc;
+    int attempts = 0;
+
+    do {
+        mcGetInfo(port, 0, type, free_clusters, formatted);
+        rc = McSyncResult();
+        attempts++;
+    } while (rc == sceMcResChangedCard && attempts < 3);
+
+    return rc;
+}
+
 static unsigned int NormalizeTestBytes(unsigned int bytes)
 {
     if (bytes < TEST_CHUNK)
@@ -283,8 +308,8 @@ void CardInspectSized(int port, CardReport *r, unsigned int test_bytes)
 
     CardProgress(port, 4, "Querying memory-card metadata",
                  "Calling mcGetInfo to identify the card type, format state and free clusters.");
-    mcGetInfo(port, 0, &r->type, &r->free_clusters, &r->formatted);
-    r->info_rc = McSyncResult();
+    r->info_rc = GetInitialInfoStable(port, &r->type,
+                                      &r->free_clusters, &r->formatted);
 
     if (r->info_rc == sceMcResFailAuth) {
         r->health = CARD_AUTH_FAILURE;
