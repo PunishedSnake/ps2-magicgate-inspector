@@ -3,7 +3,8 @@
 EE_BIN = MC_INSPECTOR.ELF
 EE_OBJS = src/app_main.o src/gui.o src/progress.o src/card.o src/magicgate.o src/fmcb_install.o \
 	src/usb_search.o src/fmcb_transaction.o src/fmcb_recovery.o src/fmcb_recovery_marker.o src/console_profile.o \
-	src/magicgate_session.o src/magicgate_diag.o src/video_mode.o src/ui_layout.o src/settings.o
+	src/magicgate_session.o src/magicgate_diag.o src/video_mode.o src/ui_layout.o src/settings.o \
+	src/kelf_cache.o src/card_raw_session.o src/card_image.o
 EE_LIBS = -ldebug -ldraw -lgraph -lpacket -ldma -lpad -lmc -lfileXio -lcdvd -lsecr \
 	-lioprpgen -liopreboot -lpatches -lkernel
 EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections \
@@ -24,8 +25,8 @@ EE_LDFLAGS = -Wl,--gc-sections \
 
 # 0.4.x keeps the single hardware-validated production security backend from
 # Briscoe: PS2SDK 2.0 SECRMAN 1.4, matching SECRSIF and the matching PS2SDK 2.0
-# SIO2/PAD/MCMAN generation. Display/settings and installer work do not weaken
-# the separation between ordinary ROM X filesystem I/O and the SECR session.
+# SIO2/PAD/MCMAN generation. Drebin also reuses that PS2SDK card generation in
+# a separate, explicit raw-page imaging personality with a real MCSERV.
 MG_CARD_DIR ?= .build/ps2sdk2-mg
 MG_SECR_DIR ?= .build/ps2sdk2-secr14
 MG_SECRMAN ?= $(MG_SECR_DIR)/secrman.irx
