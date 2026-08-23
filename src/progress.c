@@ -49,6 +49,7 @@ void MciProgressUpdate(MciProgressDomain domain,
 {
     const char *safe_action = action != NULL ? action : "";
     const char *safe_detail = detail != NULL ? detail : "";
+    char normalized_detail[192];
 
     if (percent < 0)
         percent = 0;
@@ -63,6 +64,22 @@ void MciProgressUpdate(MciProgressDomain domain,
         strcmp(safe_detail,
                "Reading the image back and validating logical data plus .ps2 ECC records.") == 0) {
         safe_detail = "Reading the image back and validating the complete logical image stream.";
+    }
+
+    /* The image engine's old `page -> OPL .vmc` wording looked like a target
+     * filename even though the text after the arrow was only a format label.
+     * Make that distinction explicit until card_image.c exposes report->path to
+     * the live progress renderer. */
+    if (strcmp(safe_action, "Creating memory-card image") == 0) {
+        const char *arrow = strstr(safe_detail, " -> ");
+        if (arrow != NULL) {
+            unsigned int prefix = (unsigned int)(arrow - safe_detail);
+            if (prefix + strlen(arrow + 4) + 12u < sizeof(normalized_detail)) {
+                snprintf(normalized_detail, sizeof(normalized_detail),
+                         "%.*s | format: %s", (int)prefix, safe_detail, arrow + 4);
+                safe_detail = normalized_detail;
+            }
+        }
     }
 
     /* The GS can update much more frequently than a crash log needs. Keep one
