@@ -3,6 +3,53 @@
 This document defines the filesystem-level restore workflow for Drebin 0.4.x.
 It is intentionally separate from raw Exact Restore.
 
+## Hardware qualification notes
+
+### dev4 raw-card port-state regression
+
+Real-hardware dev4 testing converted the earlier generic `rc=-999` failure into
+a reproducible `CARD GEOMETRY ERROR (rc=-4)` with a healthy raw RPC handshake:
+
+```
+mcInit=0
+mcGetInfo issue/sync/result=0/1/-1
+pages=0/0
+```
+
+The PS2SDK error value is `sceMcResNoEntry`, not a geometry failure. Source
+inspection of the pinned PS2SDK revision showed that legacy MCSERV performs
+ordinary `GetInfo` using logical EE ports 0/1, but its raw erase/read helpers
+translate those same ports to physical SIO2 memory-card channels 2/3 before
+querying MCMAN card-type state. On a freshly loaded temporary MCMAN, card state
+therefore existed under index 0/1 while raw page operations looked at index 2/3.
+
+Drebin now reproducibly patches only its temporary legacy raw MCSERV so erase
+and read-page paths detect/prime the physical 2/3 MCMAN slot before accessing
+raw NAND pages. `_McReadPage` also propagates the real low-level read result
+instead of discarding it. Sony ROM X and the normal X-style MagicGate stack are
+not patched by this workaround.
+
+### dev4 installer post-MagicGate detection regression
+
+The same hardware run showed FMCB inventory failure codes:
+
+```
+inventory exact=-12
+inventory parent=-12
+inventory open=-12
+```
+
+`-12` is `sceMcResFailDetect`, not a file-permission error. The failure occurs
+because MagicGate temporarily replaces the IOP personality and the following
+Sony ROM X rebuild starts XMCMAN with fresh card-detection state. Drebin now
+re-primes both logical card slots after successful normal XMC `mcInit`, including
+a second `GetInfo` pass when the first pass returns the expected changed-card
+result `-1`.
+
+These fixes are hardware hypotheses until the next real-console run confirms
+that raw export advances beyond page zero and FMCB inventory advances beyond
+PRECONDITIONS.
+
 ## Two restore models
 
 ### Exact Restore
