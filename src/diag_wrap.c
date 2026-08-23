@@ -8,6 +8,7 @@
 #include "diag_log.h"
 #include "fmcb_transaction.h"
 
+int __real_MciCardImageProbeGeometry(int port, MciCardGeometry *geometry);
 int __real_MciCardImageExport(int port, MciCardImageFormat format,
                               MciCardImageReport *report);
 int __real_MciCardImageVerifyFile(const char *path, MciCardImageFormat format,
@@ -80,6 +81,26 @@ void __wrap_MciRawCardSessionStop(MciRawCardSessionStatus *status)
     __real_MciRawCardSessionStop(status);
     MciDiagLogPrintf("RAW", "session stop end ready=%d",
                      status != NULL ? status->ready : -1);
+}
+
+int __wrap_MciCardImageProbeGeometry(int port, MciCardGeometry *geometry)
+{
+    int rc;
+
+    MciDiagLogPrintf("IMAGE", "geometry probe begin port=mc%d", port);
+    rc = __real_MciCardImageProbeGeometry(port, geometry);
+    if (geometry != NULL) {
+        MciDiagLogPrintf("IMAGE",
+                         "geometry probe end port=mc%d rc=%d page=%u cluster_pages=%u block_pages=%u total_pages=%u clusters=%u superblock=%d",
+                         port, rc, geometry->page_size,
+                         geometry->pages_per_cluster, geometry->pages_per_block,
+                         geometry->total_pages, geometry->clusters_per_card,
+                         geometry->from_superblock);
+    } else {
+        MciDiagLogPrintf("IMAGE", "geometry probe end port=mc%d rc=%d geometry=NULL",
+                         port, rc);
+    }
+    return rc;
 }
 
 int __wrap_MciCardImageExport(int port, MciCardImageFormat format,
