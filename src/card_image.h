@@ -34,6 +34,7 @@ typedef struct MciCardGeometry {
 } MciCardGeometry;
 
 typedef struct MciCardImageReport {
+    /* Logical libmc port only: mc0=0, mc1=1. Never pre-shift to SIO2 2/3. */
     int port;
     MciCardImageFormat format;
     MciCardImageResult result;
@@ -48,6 +49,12 @@ typedef struct MciCardImageReport {
     char path[MCI_CARD_IMAGE_PATH_MAX];
 } MciCardImageReport;
 
+/*
+ * Every `port` argument in this API is a logical libmc/MCMAN port (0/1).
+ * Card Tools must not perform the MagicGate/CardAuth +2 conversion here.
+ * MCMAN selects physical SIO2 memory-card channel 2/3 internally when it
+ * builds the transfer. See mc_port.h and docs/MEMORY_CARD_PORT_DOMAINS.md.
+ */
 void MciCardImageResetReport(MciCardImageReport *report, int port,
                              MciCardImageFormat format);
 const char *MciCardImageFormatName(MciCardImageFormat format);
