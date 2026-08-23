@@ -397,20 +397,25 @@ static void RunSelectedFullScan(int target_port)
     char detail[192];
 
     snprintf(detail, sizeof(detail),
-             "Running the complete read-only sequence for mc%d using %s, then MagicGate/CardAuth and FMCB package preflight.",
+             "Running the complete read-only sequence for mc%d using %s, then FMCB package preflight and MagicGate/CardAuth.",
              target_port, MciFsTestProfileName(Settings.fs_profile));
     MciGuiRenderMessage("Full card scan", detail, NULL, MCI_GUI_TONE_INFO);
     MagicGateResetReport(&MgReports[target_port], target_port);
     FmcbResetPackageReport(&FmcbReports[target_port], target_port);
     CardInspectSized(target_port, &Reports[target_port], CurrentFsTestBytes());
+
+    /* Discover and fully validate the installer while the normal USB stack is
+     * already stable. A successful preflight caches the package root, so the
+     * following MagicGate test can open its FMCB.XLF directly rather than
+     * searching again after an IOP transition. */
+    (void)FmcbProbeMassPackage(target_port, &FmcbMassStatus,
+                               &FmcbReports[target_port]);
     if (Reports[target_port].type == MC_TYPE_PS2) {
         (void)RunMagicGateSession(target_port);
     } else {
         MagicGateResetReport(&MgReports[target_port], target_port);
         MgReports[target_port].result = MG_RESULT_TARGET_NOT_PS2;
     }
-    (void)FmcbProbeMassPackage(target_port, &FmcbMassStatus,
-                               &FmcbReports[target_port]);
     (void)RefreshRecoveryStatus();
 }
 
@@ -638,7 +643,7 @@ int main(int argc, char *argv[])
     init_scr();
     if (MciGuiInit() < 0) {
         scr_clear();
-        scr_printf("PS2 Memory Card Inspector 0.4.0-dev1\n\n");
+        scr_printf("PS2 Memory Card Inspector 0.4.0-dev2\n\n");
         scr_printf("GS frontend initialization failed.\n");
         SleepThread();
     }

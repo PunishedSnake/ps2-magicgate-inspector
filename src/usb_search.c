@@ -3,6 +3,7 @@
 
 #define NEWLIB_PORT_AWARE
 
+#include <delaythread.h>
 #include <fileXio_rpc.h>
 #include <iox_stat.h>
 #include <stdio.h>
@@ -15,6 +16,8 @@ static const char *const SearchRoots[] = {
     "mass0:/",
     "mass1:/"
 };
+
+static char VerifiedPackageRoot[MCI_USB_SEARCH_PATH_MAX];
 
 typedef struct SearchState {
     const char *filename;
@@ -55,6 +58,29 @@ static int parent_is_system(const char *directory)
     return name_equal_ci(last_component(directory), "SYSTEM");
 }
 
+static int entry_name_safe(const char *name, int is_directory)
+{
+    const unsigned char *p = (const unsigned char *)name;
+
+    if (name == NULL || name[0] == '\0')
+        return 0;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+        return 0;
+
+    /* FMCB package discovery has no reason to enter hidden/pseudo directories.
+     * In particular, this prevents malformed USBHDFSD/FAT directory aliases
+     * such as repeated `.as/.as/...` from turning into a fake recursive tree. */
+    if (is_directory && name[0] == '.')
+        return 0;
+
+    while (*p != '\0') {
+        if (*p < 0x20u || *p == '/' || *p == '\\' || *p == ':')
+            return 0;
+        p++;
+    }
+    return 1;
+}
+
 static int join_path(const char *directory, const char *name,
                      char *out, unsigned int out_size)
 {
@@ -67,6 +93,27 @@ static int join_path(const char *directory, const char *name,
     written = snprintf(out, out_size, "%s%s%s", directory,
                        len > 0 && directory[len - 1] == '/' ? "" : "/", name);
     return (written >= 0 && (unsigned int)written < out_size) ? 0 : -2;
+}
+
+int MciUsbWaitForStorage(unsigned int attempts, unsigned int delay_usec)
+{
+    unsigned int attempt;
+    unsigned int i;
+
+    if (attempts == 0u)
+        attempts = 1u;
+    for (attempt = 0; attempt < attempts; attempt++) {
+        for (i = 0; i < sizeof(SearchRoots) / sizeof(SearchRoots[0]); i++) {
+            int fd = fileXioDopen(SearchRoots[i]);
+            if (fd >= 0) {
+                fileXioDclose(fd);
+                return 0;
+            }
+        }
+        if (attempt + 1u < attempts && delay_usec > 0u)
+            DelayThread(delay_usec);
+    }
+    return -1;
 }
 
 static int search_directory(const char *directory, unsigned int depth,
@@ -91,25 +138,28 @@ static int search_directory(const char *directory, unsigned int depth,
         state->progress(directory, state->dirs_scanned, state->userdata);
 
     for (;;) {
+        int is_directory;
+        int is_regular;
+
         memset(&entry, 0, sizeof(entry));
         rc = fileXioDread(fd, &entry);
         if (rc <= 0)
             break;
-        if (entry.name[0] == '\0' || strcmp(entry.name, ".") == 0 ||
-            strcmp(entry.name, "..") == 0)
+        entry.name[sizeof(entry.name) - 1] = '\0';
+        is_directory = FIO_S_ISDIR(entry.stat.mode);
+        is_regular = FIO_S_ISREG(entry.stat.mode);
+        if (!entry_name_safe(entry.name, is_directory))
             continue;
         if (join_path(directory, entry.name, child, sizeof(child)) < 0)
             continue;
 
-        if (FIO_S_ISREG(entry.stat.mode) &&
-            name_equal_ci(entry.name, state->filename)) {
+        if (is_regular && name_equal_ci(entry.name, state->filename)) {
             if (!state->require_system_parent || parent_is_system(directory)) {
                 snprintf(state->out_path, state->out_size, "%s", child);
                 fileXioDclose(fd);
                 return 1;
             }
-        } else if (FIO_S_ISDIR(entry.stat.mode) &&
-                   depth < MCI_USB_SEARCH_MAX_DEPTH &&
+        } else if (is_directory && depth < MCI_USB_SEARCH_MAX_DEPTH &&
                    state->dirs_scanned < MCI_USB_SEARCH_MAX_DIRS) {
             rc = search_directory(child, depth + 1u, state);
             if (rc == 1) {
@@ -181,5 +231,43 @@ int MciUsbPackageRootFromXlf(const char *xlf_path,
     if (snprintf(out_root, out_size, "%s", temp) < 0 ||
         strlen(temp) >= out_size)
         return -7;
+    return 0;
+}
+
+void MciUsbClearVerifiedPackageRoot(void)
+{
+    VerifiedPackageRoot[0] = '\0';
+}
+
+int MciUsbRememberVerifiedPackageRoot(const char *root)
+{
+    if (root == NULL || root[0] == '\0' ||
+        strlen(root) >= sizeof(VerifiedPackageRoot))
+        return -1;
+    snprintf(VerifiedPackageRoot, sizeof(VerifiedPackageRoot), "%s", root);
+    return 0;
+}
+
+int MciUsbGetVerifiedPackageRoot(char *out_root, unsigned int out_size)
+{
+    iox_stat_t stat;
+    char xlf[MCI_USB_SEARCH_PATH_MAX];
+
+    if (out_root == NULL || out_size == 0 || VerifiedPackageRoot[0] == '\0')
+        return -1;
+    if (join_path(VerifiedPackageRoot, "SYSTEM/FMCB.XLF", xlf,
+                  sizeof(xlf)) < 0) {
+        MciUsbClearVerifiedPackageRoot();
+        return -2;
+    }
+    memset(&stat, 0, sizeof(stat));
+    if (fileXioGetStat(xlf, &stat) < 0 || !FIO_S_ISREG(stat.mode) ||
+        stat.size == 0u) {
+        MciUsbClearVerifiedPackageRoot();
+        return -3;
+    }
+    if (strlen(VerifiedPackageRoot) >= out_size)
+        return -4;
+    snprintf(out_root, out_size, "%s", VerifiedPackageRoot);
     return 0;
 }

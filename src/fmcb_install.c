@@ -388,15 +388,58 @@ static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *repor
 int FmcbProbeMassPackage(int target_port, const FmcbMassBackendStatus *backend,
                          FmcbPackageReport *report)
 {
+    MciConsoleProfile console;
     char xlf_path[MCI_USB_SEARCH_PATH_MAX];
     char package_root[FMCB_SOURCE_ROOT_MAX];
     char detail[256];
+    int profile_rc = -1;
     int rc;
+    int attempt;
 
     FmcbResetPackageReport(report, target_port);
-    MciProgressUpdate(MCI_PROGRESS_FMCB, 3, "Checking USB storage",
-                      "Making sure the USB filesystem is available before looking for FreeMcBoot files.");
-    if (backend == NULL || !backend->available) {
+
+    /* Resolve the console before package discovery so the dashboard never
+     * reports `Region ?` merely because USB enumeration or a package search
+     * failed. A freshly rebuilt IOP can need one short retry before ROM/CDVD
+     * services are completely settled. */
+    MciProgressUpdate(MCI_PROGRESS_FMCB, 3, "Identifying this PS2",
+                      "Reading the active system region and console security profile before looking for FreeMcBoot files.");
+    for (attempt = 0; attempt < 3; attempt++) {
+        profile_rc = MciConsoleProfileProbe(&console);
+        if (profile_rc == 0)
+            break;
+        if (attempt < 2)
+            DelayThread(100000);
+    }
+    FmcbBuildInstallPlan(target_port, &console, &report->plan);
+    report->entry_count = FmcbPackageEntryCount();
+
+    if (profile_rc < 0 || console.mg_folder_region == '?' || console.is_psx) {
+        report->status = FMCB_PACKAGE_UNSUPPORTED_CONSOLE;
+        MciProgressUpdate(MCI_PROGRESS_FMCB, 100,
+                          "Console region could not be resolved",
+                          "The active PS2 system region is still unavailable, so installation remains blocked. No card writes were attempted.");
+        return -1;
+    }
+    if (console.region_mismatch) {
+        report->status = FMCB_PACKAGE_REGION_AMBIGUOUS;
+        MciProgressUpdate(MCI_PROGRESS_FMCB, 100,
+                          "MechaPwn region transition is not settled",
+                          "The detected Deckard DEX-like policy expects the A system-update region, but active ROMVER has not converged to it. Reboot the console before installing.");
+        return -1;
+    }
+    if (console.cross_region_required) {
+        report->status = FMCB_PACKAGE_CROSS_REGION_REQUIRED;
+        MciProgressUpdate(MCI_PROGRESS_FMCB, 100,
+                          "Deckard MechaPwn CEX needs cross-region FMCB",
+                          "A one-region install could stop booting after a later MechaPwn CEX region change. This build blocks writes until the verified transaction covers every regional destination.");
+        return -1;
+    }
+
+    MciProgressUpdate(MCI_PROGRESS_FMCB, 6, "Checking USB storage",
+                      "Waiting for the USB filesystem to become readable. This can take a moment after a MagicGate security-session reboot.");
+    if (backend == NULL || !backend->available ||
+        MciUsbWaitForStorage(20u, 100000u) < 0) {
         report->status = FMCB_PACKAGE_SOURCE_UNAVAILABLE;
         report->source_probe_rc = -1;
         MciProgressUpdate(MCI_PROGRESS_FMCB, 100, "USB storage is not available",
@@ -404,9 +447,28 @@ int FmcbProbeMassPackage(int target_port, const FmcbMassBackendStatus *backend,
         return -1;
     }
 
-    MciProgressUpdate(MCI_PROGRESS_FMCB, 7,
+    /* A cache entry exists only after the complete manifest has passed once.
+     * Reuse its root to avoid a full tree walk, but re-run ProbeRoot so moved,
+     * deleted or modified package files are still caught before installation. */
+    if (MciUsbGetVerifiedPackageRoot(package_root, sizeof(package_root)) == 0) {
+        snprintf(detail, sizeof(detail),
+                 "Using the previously verified package at %.170s and rechecking its files.",
+                 package_root);
+        MciProgressUpdate(MCI_PROGRESS_FMCB, 10,
+                          "Using cached FreeMcBoot package", detail);
+        report->source_probe_rc = 0;
+        rc = ProbeRoot(package_root, target_port, report);
+        if (rc == 0 && report->status == FMCB_PACKAGE_READY)
+            return 0;
+        MciUsbClearVerifiedPackageRoot();
+        FmcbResetPackageReport(report, target_port);
+        FmcbBuildInstallPlan(target_port, &console, &report->plan);
+        report->entry_count = FmcbPackageEntryCount();
+    }
+
+    MciProgressUpdate(MCI_PROGRESS_FMCB, 9,
                       "Searching USB storage for a FreeMcBoot package",
-                      "Looking recursively for SYSTEM/FMCB.XLF. The package folder may be placed anywhere on the USB drive.");
+                      "Looking recursively for SYSTEM/FMCB.XLF. The package folder may be placed anywhere in visible USB folders.");
     rc = MciUsbFindFmcbXlf(xlf_path, sizeof(xlf_path), 1,
                            PackageSearchProgress, NULL);
     report->source_probe_rc = rc;
@@ -415,19 +477,22 @@ int FmcbProbeMassPackage(int target_port, const FmcbMassBackendStatus *backend,
                                       sizeof(package_root));
         if (rc == 0) {
             snprintf(detail, sizeof(detail),
-                     "Found FreeMcBoot at %.170s. Checking the rest of the package now.",
+                     "Found FreeMcBoot at %.170s. Checking the complete installer package now.",
                      package_root);
             MciProgressUpdate(MCI_PROGRESS_FMCB, 16,
                               "FreeMcBoot package found", detail);
             report->source_probe_rc = 0;
-            return ProbeRoot(package_root, target_port, report);
+            rc = ProbeRoot(package_root, target_port, report);
+            if (rc == 0 && report->status == FMCB_PACKAGE_READY)
+                (void)MciUsbRememberVerifiedPackageRoot(package_root);
+            return rc;
         }
         report->source_probe_rc = rc;
     }
 
     report->status = FMCB_PACKAGE_NOT_FOUND;
     MciProgressUpdate(MCI_PROGRESS_FMCB, 100, "FreeMcBoot package not found",
-                      "No SYSTEM/FMCB.XLF was found within the bounded recursive USB scan. A standalone FMCB.XLF can still be used for the MagicGate test.");
+                      "No complete-package anchor SYSTEM/FMCB.XLF was found in visible USB folders. A standalone FMCB.XLF can still be used for the MagicGate test.");
     return -1;
 }
 

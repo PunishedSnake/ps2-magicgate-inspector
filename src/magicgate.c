@@ -304,36 +304,60 @@ static int DownloadGetIcvps2(unsigned char icvps2[8])
     return param->result;
 }
 
-static int FindRawKelfSource(MagicGateReport *report)
+static int UseRawKelfPath(MagicGateReport *report, const char *path,
+                          const char *source_kind)
 {
     iox_stat_t stat;
-    char path[MCI_USB_SEARCH_PATH_MAX];
     char detail[224];
     int rc;
-
-    MgProgress(report, 2, "Searching USB storage for FMCB.XLF",
-               "Scanning folders recursively. FMCB.XLF can be stored anywhere on the USB drive.");
-    rc = MciUsbFindFmcbXlf(path, sizeof(path), 0,
-                           RawKelfSearchProgress, report);
-    report->source_io_rc = rc;
-    if (rc < 0)
-        return sceMcResNoEntry;
 
     memset(&stat, 0, sizeof(stat));
     rc = fileXioGetStat(path, &stat);
     report->source_io_rc = rc;
     if (rc < 0)
         return rc;
-    if (stat.size < sizeof(SecrKELFHeader_t) || stat.size > MG_MAX_KELF_SIZE)
+    if (!FIO_S_ISREG(stat.mode) || stat.size < sizeof(SecrKELFHeader_t) ||
+        stat.size > MG_MAX_KELF_SIZE)
         return MG_INVALID_LAYOUT;
 
     report->source_port = MG_RAW_SOURCE_PORT;
     report->source_size = (int)stat.size;
-    snprintf(report->source_path, sizeof(report->source_path), "RAW %s", path);
-    snprintf(detail, sizeof(detail), "Found %.160s (%d bytes).",
-             path, report->source_size);
-    MgProgress(report, 8, "FMCB.XLF found", detail);
+    snprintf(report->source_path, sizeof(report->source_path), "%s", path);
+    snprintf(detail, sizeof(detail), "%s: %.150s (%d KiB).",
+             source_kind, path, (report->source_size + 1023) / 1024);
+    MgProgress(report, 8, "FMCB.XLF ready", detail);
     return 0;
+}
+
+static int FindRawKelfSource(MagicGateReport *report)
+{
+    char package_root[MCI_USB_SEARCH_PATH_MAX];
+    char path[MCI_USB_SEARCH_PATH_MAX];
+    int rc;
+
+    /* A complete FMCB package that already passed preflight is the preferred
+     * source. This avoids recursively walking the USB tree on every scan. */
+    if (MciUsbGetVerifiedPackageRoot(package_root, sizeof(package_root)) == 0) {
+        int written = snprintf(path, sizeof(path), "%s/SYSTEM/FMCB.XLF",
+                               package_root);
+        if (written > 0 && (unsigned int)written < sizeof(path)) {
+            rc = UseRawKelfPath(report, path, "Using verified installer package");
+            if (rc == 0)
+                return 0;
+        }
+        MciUsbClearVerifiedPackageRoot();
+    }
+
+    MgProgress(report, 2, "Looking for FMCB.XLF",
+               "No verified package path is cached, so visible USB folders are being searched once.");
+    if (MciUsbWaitForStorage(20u, 100000u) < 0)
+        return sceMcResNoEntry;
+    rc = MciUsbFindFmcbXlf(path, sizeof(path), 0,
+                           RawKelfSearchProgress, report);
+    report->source_io_rc = rc;
+    if (rc < 0)
+        return sceMcResNoEntry;
+    return UseRawKelfPath(report, path, "Found on USB storage");
 }
 
 static const char *RawPathFromReport(const MagicGateReport *report)

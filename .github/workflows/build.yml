@@ -30,51 +30,13 @@ on:
       - 'licenses/**'
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   PS2SDK_SECURITY_COMMIT: a13b5971ec0e39c7ba8b8559b80a4e81c8425352
 
 jobs:
-  apply-hardware-feedback:
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/0.4.0'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout feature branch
-        uses: actions/checkout@v4
-        with:
-          ref: feat/0.4.0
-          fetch-depth: 0
-
-      - name: Apply post-test fixes
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -f tools/apply_0_4_user_feedback.py
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('tools/apply_0_4_user_feedback.py')
-          s = p.read_text()
-          marker = '# Basic static sanity checks before CI gets the final word.'
-          inject = '''for _name in ("src/app_main.c", "src/gui_core.inc", "src/gui.c"):\n    _p = Path(_name)\n    _p.write_text(_p.read_text().replace("v0.4.0-dev1", "v0.4.0-dev2"))\n\n'''
-          if marker not in s:
-              raise SystemExit('feedback script sanity marker missing')
-          p.write_text(s.replace(marker, inject + marker, 1))
-          PY
-          python3 tools/apply_0_4_user_feedback.py
-          # 30b6... contains the last normal read-only build workflow before
-          # the temporary patch runner was introduced.
-          git show 30b6d7590f55a5aea368bac95fbde891780f6b72:.github/workflows/build.yml > .github/workflows/build.yml
-          rm tools/apply_0_4_user_feedback.py
-          git diff --check
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src .github/workflows/build.yml tools/apply_0_4_user_feedback.py
-          git commit -m 'fix(0.4): stabilize preflight and cache verified FMCB source'
-          git push origin HEAD:feat/0.4.0
-
   build:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.ref != 'feat/0.4.0'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 

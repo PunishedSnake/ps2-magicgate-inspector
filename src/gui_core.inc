@@ -1074,7 +1074,7 @@ static qword_t *shell(qword_t *q, MciGuiPage page, int selected)
     q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
     q = rect_outline(q, 12, 8, 628, 31, Theme.border);
     q = text(q, 22, 14, "PS2 Memory Card Inspector", Theme.text);
-    snprintf(version, sizeof(version), "v0.4.0-dev1  mc%d", selected);
+    snprintf(version, sizeof(version), "v0.4.0-dev2  mc%d", selected);
     q = text_box(q, 462, 14, 618, 23, version, Theme.accent);
 
     for (i = 0; i < MCI_GUI_PAGE_COUNT; i++) {
@@ -1215,6 +1215,37 @@ static qword_t *render_card(qword_t *q, int selected,
     return q;
 }
 
+static const char *magicgate_user_step(const MagicGateReport *mg)
+{
+    const char *result;
+
+    if (mg == NULL || mg->result == MG_RESULT_NOT_RUN)
+        return "Not tested yet";
+    if (mg->result == MG_RESULT_PASS)
+        return "MagicGate authentication completed";
+
+    result = MagicGateResultText(mg->result);
+    if (mg->stage == MG_STAGE_GET_KBIT &&
+        strncmp(result, "NOT SUPPORTED", 13) == 0)
+        return "Card did not answer MagicGate authentication";
+
+    switch (mg->stage) {
+        case MG_STAGE_FIND_KELF: return "Finding the FMCB test file";
+        case MG_STAGE_READ_KELF: return "Reading the FMCB test file";
+        case MG_STAGE_VALIDATE_KELF: return "Checking the FMCB test file";
+        case MG_STAGE_SESSION_SETUP: return "Starting the isolated security test";
+        case MG_STAGE_SESSION_CARD_CHECK: return "Checking the selected memory card";
+        case MG_STAGE_BIND_RPC: return "Preparing the MagicGate security service";
+        case MG_STAGE_DOWNLOAD_HEADER:
+        case MG_STAGE_DOWNLOAD_BLOCKS: return "Sending protected test data";
+        case MG_STAGE_GET_KBIT: return "Authenticating the memory card";
+        case MG_STAGE_GET_KC: return "Verifying the card security key";
+        case MG_STAGE_GET_ICVPS2: return "Checking the final KELF signature";
+        case MG_STAGE_DONE: return "MagicGate test finished";
+        default: return "Waiting to start";
+    }
+}
+
 static qword_t *render_magicgate(qword_t *q, int selected,
                                  const CardReport cards[2],
                                  const MagicGateReport magicgate[2],
@@ -1222,7 +1253,7 @@ static qword_t *render_magicgate(qword_t *q, int selected,
                                  const FmcbPackageReport packages[2])
 {
     const MagicGateReport *mg = &magicgate[selected];
-    char line[160];
+    char line[256];
 
     q = slot_summary(q, selected, cards, magicgate, packages);
     q = panel_title(q, 158, 55, 628, 88, "MAGICGATE / KELF CAPABILITY", mg_color(mg->result));
@@ -1230,13 +1261,17 @@ static qword_t *render_magicgate(qword_t *q, int selected,
 
     q = rect_fill(q, 158, 93, 628, 123, Theme.panel);
     q = rect_outline(q, 158, 93, 628, 123, Theme.border);
-    q = text(q, 172, 100, "Stage", Theme.muted);
-    q = text_box(q, 236, 100, 615, 108, MagicGateStageText(mg->stage), Theme.text);
+    q = text(q, 172, 100, "Test step", Theme.muted);
+    q = text_box(q, 252, 100, 615, 108, magicgate_user_step(mg), Theme.text);
+    q = text(q, 172, 111, "Source", Theme.muted);
     if (mg->source_path[0] != '\0') {
-        snprintf(line, sizeof(line), "%s  (%d bytes)", mg->source_path, mg->source_size);
-        q = text_box(q, 172, 111, 615, 119, line, Theme.muted);
+        const char *path = strncmp(mg->source_path, "RAW ", 4) == 0
+                               ? mg->source_path + 4 : mg->source_path;
+        snprintf(line, sizeof(line), "%s  (%d KiB)", path,
+                 (mg->source_size + 1023) / 1024);
+        q = selected_single_line(q, 236, 111, 615, 119, line, Theme.muted);
     } else {
-        q = text(q, 172, 111, "KELF source: not prepared", Theme.muted);
+        q = text_box(q, 236, 111, 615, 119, "No FMCB.XLF selected", Theme.muted);
     }
 
     q = rect_fill(q, 158, 128, 389, 202, Theme.panel);
@@ -1368,7 +1403,6 @@ static qword_t *render_settings(qword_t *q,
                                 int selected_row, int last_video_rc)
 {
     char video[96];
-    char footer[96];
     unsigned int state;
 
     state = ((unsigned int)settings->video_mode & 0xffu) |
@@ -1402,15 +1436,7 @@ static qword_t *render_settings(qword_t *q,
                                ? "Required files are reopened and compared; optional payloads skip the second read."
                                : "Read-back comparison is disabled; durable USB rollback protection remains active.");
 
-    q = rect_fill(q, 24, 190, 616, 202, Theme.panel_alt);
-    q = rect_outline(q, 24, 190, 616, 202, Theme.border);
-    if (last_video_rc == -999)
-        snprintf(footer, sizeof(footer), "Current output: %s", MciVideoModeName(MciGuiCurrentVideoMode()));
-    else
-        snprintf(footer, sizeof(footer), "Last display switch rc=%d   current=%s",
-                 last_video_rc, MciVideoModeName(MciGuiCurrentVideoMode()));
-    q = text_box(q, 34, 193, 606, 201, footer,
-                 last_video_rc < 0 && last_video_rc != -999 ? Theme.danger : Theme.muted);
+    (void)last_video_rc;
     return q;
 }
 
@@ -1534,7 +1560,7 @@ void MciGuiRenderMessage(const char *title,
     q = rect_fill(q, 0, 0, UI_W, 4, accent);
     q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
     q = rect_outline(q, 12, 8, 628, 31, Theme.border);
-    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.4.0-dev1", Theme.text);
+    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.4.0-dev2", Theme.text);
     q = text_box(q, 20, 39, 620, 48, title != NULL ? title : "Status", accent);
     q = rect_fill(q, 16, 53, 624, body_bottom, Theme.panel);
     q = rect_outline(q, 16, 53, 624, body_bottom, Theme.border);
@@ -1576,7 +1602,7 @@ void MciGuiRenderProgress(const char *title,
     q = rect_fill(q, 0, 0, UI_W, 4, accent);
     q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
     q = rect_outline(q, 12, 8, 628, 31, Theme.border);
-    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.4.0-dev1", Theme.text);
+    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.4.0-dev2", Theme.text);
     q = text_box(q, 20, 39, 620, 48, title != NULL ? title : "Working", accent);
     q = rect_fill(q, 16, 53, 624, 196, Theme.panel);
     q = rect_outline(q, 16, 53, 624, 196, Theme.border);
