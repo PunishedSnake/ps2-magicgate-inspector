@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 #include "card_image.h"
+#include "card_raw_session.h"
 #include "diag_log.h"
 #include "fmcb_transaction.h"
 
@@ -15,6 +16,8 @@ int __real_MciCardImageRestoreExact(int port, const char *path,
                                     MciCardImageFormat format,
                                     MciCardImageReport *report);
 int __real_MciCardForceFormatWithBackup(int port, MciCardImageReport *report);
+int __real_MciRawCardSessionStart(MciRawCardSessionStatus *status);
+void __real_MciRawCardSessionStop(MciRawCardSessionStatus *status);
 int __real_FmcbInstallNormalTransactional(int target_port,
                                           const FmcbPackageReport *package,
                                           const FmcbInstallOptions *options,
@@ -45,6 +48,38 @@ static void LogImageReport(const char *operation, int rc,
                      report->geometry.pages_per_block,
                      report->geometry.clusters_per_card,
                      report->geometry.from_superblock);
+}
+
+int __wrap_MciRawCardSessionStart(MciRawCardSessionStatus *status)
+{
+    int rc;
+
+    MciDiagLogPrintf("RAW", "session start begin");
+    rc = __real_MciRawCardSessionStart(status);
+    if (status == NULL) {
+        MciDiagLogPrintf("RAW", "session start end rc=%d status=NULL", rc);
+        return rc;
+    }
+    MciDiagLogPrintf("RAW",
+                     "session start end rc=%d ready=%d modules sio2=%d pad=%d mcman=%d mcserv=%d iomanx=%d filexio_mod=%d usbd=%d usbhdfsd=%d clients mcinit=%d mcinfo=%d/%d/%d type=%d free=%d formatted=%d filexio_init=%d",
+                     rc, status->ready, status->sio2_rc, status->pad_rc,
+                     status->mcman_rc, status->mcserv_rc, status->iomanx_rc,
+                     status->filexio_module_rc, status->usbd_rc,
+                     status->usbhdfsd_rc, status->mcinit_rc,
+                     status->mcinfo_issue_rc, status->mcinfo_sync_rc,
+                     status->mcinfo_result, status->card_type,
+                     status->free_clusters, status->formatted,
+                     status->filexio_init_rc);
+    return rc;
+}
+
+void __wrap_MciRawCardSessionStop(MciRawCardSessionStatus *status)
+{
+    MciDiagLogPrintf("RAW", "session stop begin ready=%d",
+                     status != NULL ? status->ready : -1);
+    __real_MciRawCardSessionStop(status);
+    MciDiagLogPrintf("RAW", "session stop end ready=%d",
+                     status != NULL ? status->ready : -1);
 }
 
 int __wrap_MciCardImageExport(int port, MciCardImageFormat format,
