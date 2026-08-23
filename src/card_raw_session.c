@@ -81,6 +81,9 @@ void MciRawCardSessionReset(MciRawCardSessionStatus *status)
 int MciRawCardSessionStart(MciRawCardSessionStatus *status)
 {
     int mcinfo_result = -999;
+    int type = MC_TYPE_NONE;
+    int free_clusters = -1;
+    int formatted = 0;
     int rc;
 
     if (status == NULL)
@@ -160,14 +163,17 @@ out:
     if (status->mcinit_rc < 0)
         return status->mcinit_rc;
 
-    status->mcinfo_issue_rc = mcGetInfo(0, 0, NULL, NULL, NULL);
-    /* The call above deliberately primes MCMAN's card state for slot 0, but the
-     * actual selected slot may be mc1. A second probe is done by Card Tools
-     * before the first page operation. Here we only prove the RPC is live. */
+    status->mcinfo_issue_rc = mcGetInfo(0, 0, &type, &free_clusters, &formatted);
+    /* This first probe proves that a real legacy MCSERV RPC is live. The image
+     * engine performs another probe on the actually selected port before the
+     * first raw page read, so mc1 gets independent card-state initialization. */
     if (status->mcinfo_issue_rc < 0)
         return status->mcinfo_issue_rc;
     status->mcinfo_sync_rc = mcSync(MC_WAIT, NULL, &mcinfo_result);
     status->mcinfo_result = mcinfo_result;
+    status->card_type = type;
+    status->free_clusters = free_clusters;
+    status->formatted = formatted;
     if (status->mcinfo_sync_rc < 0)
         return status->mcinfo_sync_rc;
 
