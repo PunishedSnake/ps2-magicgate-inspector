@@ -11,6 +11,12 @@ typedef struct MciRawCardSessionStatus {
     int usbd_rc;
     int usbhdfsd_rc;
     int mcinit_rc;
+    int mcinfo_issue_rc;
+    int mcinfo_sync_rc;
+    int mcinfo_result;
+    int card_type;
+    int free_clusters;
+    int formatted;
     int filexio_init_rc;
     int ready;
 } MciRawCardSessionStatus;
