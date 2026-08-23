@@ -54,7 +54,7 @@ static int IoAvailable;
 static int PathReady;
 static int Initialized;
 static int InWrite;
-static int MassWritePaused;
+static unsigned int MassWritePauseDepth;
 
 static int WriteAll(int fd, const char *text, unsigned int length)
 {
@@ -116,7 +116,7 @@ static int WriteRawLineNow(const char *line)
     int rc;
     int close_rc;
 
-    if (!IoAvailable || MassWritePaused || InWrite)
+    if (!IoAvailable || MassWritePauseDepth != 0u || InWrite)
         return -1;
     if (EnsurePath() < 0)
         return -2;
@@ -174,7 +174,7 @@ static void EnsureInitialized(void)
     IoAvailable = 0;
     PathReady = 0;
     InWrite = 0;
-    MassWritePaused = 0;
+    MassWritePauseDepth = 0u;
     snprintf(Pending[0], sizeof(Pending[0]),
              "#%06u [SESSION] ========== Drebin diagnostic session start ==========",
              Sequence);
@@ -184,7 +184,7 @@ static void FlushPending(void)
 {
     char line[DIAG_LINE_MAX];
 
-    if (!IoAvailable || MassWritePaused)
+    if (!IoAvailable || MassWritePauseDepth != 0u)
         return;
     if (EnsurePath() < 0) {
         IoAvailable = 0;
@@ -225,7 +225,7 @@ void MciDiagLogReset(void)
     IoAvailable = 0;
     PathReady = 0;
     InWrite = 0;
-    MassWritePaused = 0;
+    MassWritePauseDepth = 0u;
     LogPath[0] = '\0';
     LogDevice[0] = '\0';
     MciDiagLogPrintf("SESSION", "========== Drebin diagnostic session start ==========");
@@ -277,19 +277,22 @@ void MciDiagLogSetMassWritePaused(int paused)
     EnsureInitialized();
 
     if (paused) {
-        if (MassWritePaused)
-            return;
-        /* This marker is durable because callers enter the guard before opening
-         * the image stream. No DREBIN.LOG file operation occurs after this. */
-        MciDiagLogPrintf("LOGGER",
-                         "card-image mass I/O critical section begins; durable trace paused");
-        MassWritePaused = 1;
+        if (MassWritePauseDepth == 0u) {
+            /* This marker is durable because the outermost caller enters the
+             * guard before opening the long-lived image descriptor. */
+            MciDiagLogPrintf("LOGGER",
+                             "card-image mass I/O critical section begins; durable trace paused");
+        }
+        MassWritePauseDepth++;
         return;
     }
 
-    if (!MassWritePaused)
+    if (MassWritePauseDepth == 0u)
         return;
-    MassWritePaused = 0;
+    MassWritePauseDepth--;
+    if (MassWritePauseDepth != 0u)
+        return;
+
     FlushPending();
     MciDiagLogPrintf("LOGGER",
                      "card-image mass I/O critical section ended; durable trace resumed");
@@ -317,7 +320,7 @@ void MciDiagLogPrintf(const char *component, const char *format, ...)
              ++Sequence, component, payload);
     line[sizeof(line) - 1u] = '\0';
 
-    if (IoAvailable && !MassWritePaused) {
+    if (IoAvailable && MassWritePauseDepth == 0u) {
         rc = WriteRawLineNow(line);
         if (rc == 0)
             return;
