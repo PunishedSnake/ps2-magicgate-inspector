@@ -52,19 +52,41 @@ jobs:
         shell: bash
         run: docker --version
 
-      - name: Stage PS2SDK 2.0 MagicGate stack
+      - name: Stage PS2SDK 2.0 security and card personalities
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p .build/ps2sdk2-mg .build/ps2sdk2-secr14
+          mkdir -p .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
           docker pull ps2dev/ps2dev:v2.0.0
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/work" \
             -w /work \
             -e PS2SDK_SECURITY_COMMIT="$PS2SDK_SECURITY_COMMIT" \
             ps2dev/ps2dev:v2.0.0 \
-            sh -c 'set -eu; apk add --no-cache git python3 build-base >/dev/null; for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/ps2sdk2-mg/$f"; done; git init -q /tmp/ps2sdk-src; git -C /tmp/ps2sdk-src remote add origin https://github.com/ps2dev/ps2sdk.git; git -C /tmp/ps2sdk-src fetch -q --depth 1 origin "$PS2SDK_SECURITY_COMMIT"; git -C /tmp/ps2sdk-src checkout -q FETCH_HEAD; python3 /work/tools/patch_secrman14_diag.py /tmp/ps2sdk-src/iop/security/secrman; PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrman clean all; PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrsif clean all; cp /tmp/ps2sdk-src/iop/security/secrman/irx/secrman.irx /work/.build/ps2sdk2-secr14/secrman.irx; cp /tmp/ps2sdk-src/iop/security/secrsif/irx/secrsif.irx /work/.build/ps2sdk2-secr14/secrsif.irx'
-          sha256sum .build/ps2sdk2-mg/*.irx .build/ps2sdk2-secr14/*.irx
+            sh -c 'set -eu; \
+              apk add --no-cache git python3 build-base >/dev/null; \
+              for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/ps2sdk2-mg/$f"; done; \
+              git init -q /tmp/ps2sdk-src; \
+              git -C /tmp/ps2sdk-src remote add origin https://github.com/ps2dev/ps2sdk.git; \
+              git -C /tmp/ps2sdk-src fetch -q --depth 1 origin "$PS2SDK_SECURITY_COMMIT"; \
+              git -C /tmp/ps2sdk-src checkout -q FETCH_HEAD; \
+              python3 /work/tools/patch_secrman14_diag.py /tmp/ps2sdk-src/iop/security/secrman; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrman clean all; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrsif clean all; \
+              cp /tmp/ps2sdk-src/iop/security/secrman/irx/secrman.irx /work/.build/ps2sdk2-secr14/secrman.irx; \
+              cp /tmp/ps2sdk-src/iop/security/secrsif/irx/secrsif.irx /work/.build/ps2sdk2-secr14/secrsif.irx; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman all MCMAN_BUILDING_XMCMAN=0 MCMAN_BUILDING_XMCMAN_V2=0; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv all MCMAN_BUILDING_XMCSERV=0; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcman/irx/mcman.irx /work/.build/ps2sdk2-raw/mcman.irx; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcserv/irx/mcserv.irx /work/.build/ps2sdk2-raw/mcserv.irx'
+          echo 'Normal MagicGate/X-style modules:'
+          sha256sum .build/ps2sdk2-mg/*.irx
+          echo 'Security modules:'
+          sha256sum .build/ps2sdk2-secr14/*.irx
+          echo 'Legacy raw-page modules:'
+          sha256sum .build/ps2sdk2-raw/*.irx
 
       - name: Build standalone ELF in PS2DEV v2.0.0
         shell: bash
@@ -92,12 +114,13 @@ jobs:
             echo "PS2 Memory Card Inspector 0.4.0-dev4 - Drebin"
             echo "Project revision: $GITHUB_SHA"
             echo "Frontend: configurable Native / 480p / 576p / 720p / 1080i GS dashboard"
-            echo "Card Tools: verified PCSX2 .ps2 and OPL .vmc image engine with filesystem-aware browser/selective restore backend"
+            echo "Card Tools: PCSX2 .ps2 and OPL .vmc imaging plus filesystem-aware browser/selective restore"
+            echo "Raw page backend: dedicated legacy PS2SDK MCMAN/MCSERV built with XMC compatibility disabled"
             echo "Selective restore: source geometry is never copied; saves are streamed through PS2 filesystem/FAT parsing into the destination card"
             echo "MagicGate: immutable raw FMCB.XLF cache in EE RAM with disposable per-bind clones"
             echo "Installer: protected-target inventory fallback, configurable read-back policy and persistent USB recovery journal"
             echo "Region policy: ROMVER + read-only MechaCon/MechaPwn profiling; unsafe Deckard CEX one-region installs are blocked"
-            echo "PS2SDK security source: https://github.com/ps2dev/ps2sdk/commit/$PS2SDK_SECURITY_COMMIT"
+            echo "PS2SDK source: https://github.com/ps2dev/ps2sdk/commit/$PS2SDK_SECURITY_COMMIT"
             echo "SECRMAN: PS2SDK 2.0 module version 1.4, instrumented by tools/patch_secrman14_diag.py"
           } > artifacts/SOURCE_PROVENANCE.txt
 
