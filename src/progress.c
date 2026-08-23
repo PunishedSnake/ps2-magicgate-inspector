@@ -1,8 +1,15 @@
 /* SPDX-License-Identifier: MIT */
 /* Live progress adapter for the native GS frontend. */
 
+#include <string.h>
+
+#include "diag_log.h"
 #include "gui.h"
 #include "progress.h"
+
+static int LastLoggedDomain = -1;
+static int LastLoggedPercent = -1;
+static char LastLoggedAction[96];
 
 static const char *ProgressTitle(MciProgressDomain domain)
 {
@@ -39,13 +46,28 @@ void MciProgressUpdate(MciProgressDomain domain,
                        const char *action,
                        const char *detail)
 {
-    if (!MciGuiReady())
-        return;
+    const char *safe_action = action != NULL ? action : "";
+    const char *safe_detail = detail != NULL ? detail : "";
 
     if (percent < 0)
         percent = 0;
     if (percent > 100)
         percent = 100;
+
+    /* The GS can update much more frequently than a crash log needs. Keep one
+     * durable line per visible percent/action transition so raw imaging does
+     * not turn USB sync traffic into the workload we are trying to diagnose. */
+    if ((int)domain != LastLoggedDomain || percent != LastLoggedPercent ||
+        strcmp(safe_action, LastLoggedAction) != 0) {
+        MciDiagLogPrintf("PROGRESS", "domain=%s percent=%d action=%s | %s",
+                         ProgressTitle(domain), percent, safe_action, safe_detail);
+        LastLoggedDomain = (int)domain;
+        LastLoggedPercent = percent;
+        snprintf(LastLoggedAction, sizeof(LastLoggedAction), "%s", safe_action);
+    }
+
+    if (!MciGuiReady())
+        return;
 
     MciGuiRenderProgress(ProgressTitle(domain), action, detail, percent,
                          ProgressFooter(domain), MCI_GUI_TONE_INFO);
