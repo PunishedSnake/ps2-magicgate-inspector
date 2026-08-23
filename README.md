@@ -90,7 +90,7 @@ PS2SDK 2.0 freesio2 / freepad / mcman
 
 Temporary MCSERV is intentionally not started because hardware testing showed that it can wedge the following LOADFILE RPC. CardAuth requires MCMAN's registered SECRMAN callbacks, so MCMAN remains active while the immediate EE-side libmc sanity query is emulated.
 
-After the probe, Inspector rebuilds the Sony ROM X stack before returning to normal operation.
+After the probe, Inspector rebuilds the Sony ROM X stack before returning to normal operation. The restore does **not** silently re-run the 4 KiB filesystem integrity test; page-scoped diagnostics only run when explicitly requested. Existing filesystem results remain visible until the user runs the Card test again or requests a full scan.
 
 See [Architecture](docs/ARCHITECTURE.md).
 
@@ -110,18 +110,23 @@ For the wider package layout, see [FMCB package](docs/FMCB_PACKAGE.md).
 
 ## Controls
 
+The 0.3 development UI separates **slot selection**, **result-page navigation**, and **test execution**:
+
 | Control | Action |
 | --- | --- |
-| Left / Right | Select `mc0:` or `mc1:` |
-| Cross | Inspect selected filesystem |
-| Start | Inspect both filesystems |
-| Square | Run isolated RAM-only MagicGate/KELF probe |
-| Circle | Scan the FMCB package on USB |
-| R1 | Cycle Card / MagicGate / FMCB Preflight pages |
+| Up / Down | Select `mc0:` or `mc1:` to match the vertical slot list |
+| L1 / R1 | Previous / next Card, MagicGate or FMCB Preflight page |
+| Cross | Run only the test represented by the current page on the selected slot |
+| L2 + Cross | Run the complete selected-slot scan: filesystem -> MagicGate/CardAuth -> FMCB preflight |
 | Triangle | Arm format when allowed |
 | L1 + R1 + Triangle | Confirm destructive format |
 | Circle during format confirmation | Cancel |
+| Square / Circle / Start | Reserved for future actions outside format confirmation |
 | Select | Exit |
+
+A plain Cross therefore does exactly one thing: on `CARD` it runs the filesystem integrity test, on `MAGICGATE` it runs the isolated RAM-only CardAuth/KELF probe, and on `FMCB PREFLIGHT` it scans the USB package. Users who want the complete diagnostic sequence can explicitly request it with **L2 + Cross**.
+
+Changing slot or page never auto-starts I/O. The application also starts with neutral `NOT RUN`/`UNKNOWN` diagnostic state instead of automatically writing a temporary filesystem test file during startup.
 
 ## Building
 

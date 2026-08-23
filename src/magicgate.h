@@ -63,13 +63,13 @@ typedef struct MagicGateKelfBuffer {
     unsigned char *data;
     int size;
     int source_port;
-    char source_path[64];
+    char source_path[224];
 } MagicGateKelfBuffer;
 
 typedef struct MagicGateReport {
     int target_port;
     int source_port;
-    char source_path[64];
+    char source_path[224];
     int source_size;
     int source_io_rc;
 

@@ -1,25 +1,21 @@
 #ifndef MCI_FMCB_INSTALL_H
 #define MCI_FMCB_INSTALL_H
 
-/*
- * FreeMcBoot package planning and read-only USB preflight.
- *
- * The data model intentionally describes both source files and their eventual
- * destination classes so the future installer can reuse the same validated
- * manifest. Nothing declared here performs a memory-card installation write;
- * Briscoe stops at package discovery/planning until a separate transactional
- * bind -> write -> reopen -> read-back -> verify -> rollback path is validated.
- */
+#include "console_profile.h"
+
+/* FreeMcBoot package discovery plus the destination model shared by preflight
+ * and the 0.4 verified normal-install transaction. */
 
 #define FMCB_MAX_PACKAGE_ENTRIES 16
 #define FMCB_PATH_MAX 96
-#define FMCB_SOURCE_ROOT_MAX 32
+#define FMCB_SOURCE_ROOT_MAX 192
 
 #define FMCB_FILE_REQUIRED 0x01
 #define FMCB_FILE_OPTIONAL 0x02
 #define FMCB_FILE_KELF 0x04
 #define FMCB_FILE_CONFIG 0x08
 #define FMCB_FILE_RESOURCE 0x10
+#define FMCB_FILE_CEX_ONLY 0x20
 
 typedef enum FmcbPackageStatus {
     FMCB_PACKAGE_NOT_SCANNED = 0,
@@ -27,7 +23,9 @@ typedef enum FmcbPackageStatus {
     FMCB_PACKAGE_NOT_FOUND,
     FMCB_PACKAGE_INCOMPLETE,
     FMCB_PACKAGE_READY,
-    FMCB_PACKAGE_UNSUPPORTED_CONSOLE
+    FMCB_PACKAGE_UNSUPPORTED_CONSOLE,
+    FMCB_PACKAGE_REGION_AMBIGUOUS,
+    FMCB_PACKAGE_CROSS_REGION_REQUIRED
 } FmcbPackageStatus;
 
 typedef struct FmcbPackageEntry {
@@ -48,6 +46,7 @@ typedef struct FmcbMassBackendStatus {
 typedef struct FmcbPackageFileStatus {
     char relative_path[FMCB_PATH_MAX];
     unsigned int flags;
+    int selected;
     int found;
     int stat_rc;
     unsigned int size;
@@ -55,16 +54,23 @@ typedef struct FmcbPackageFileStatus {
 
 typedef struct FmcbInstallPlan {
     int target_port;
+    MciConsoleProfile console;
     char romver_region;
+    unsigned int rom_version;
     char region_letter;
     char destination_system[32];
+    char destination_osd[32];
     int required_files;
     int optional_files;
+    int selected_files;
     int kelf_files;
     int config_files;
     int resource_files;
     int package_complete;
     int magicgate_required;
+    int compact_unlock_candidate;
+    int compact_unlock_active;
+    unsigned int compact_possible_savings;
 } FmcbInstallPlan;
 
 typedef struct FmcbPackageReport {
@@ -82,8 +88,11 @@ typedef struct FmcbPackageReport {
 
 int FmcbPackageEntryCount(void);
 const FmcbPackageEntry *FmcbPackageEntryAt(int index);
-void FmcbBuildInstallPlan(int target_port, char region_letter,
+int FmcbPackageEntrySelected(const FmcbInstallPlan *plan, int index);
+void FmcbBuildInstallPlan(int target_port, const MciConsoleProfile *console,
                           FmcbInstallPlan *plan);
+int FmcbResolveDestination(const FmcbInstallPlan *plan, int entry_index,
+                           char *path, unsigned int path_size);
 
 int FmcbInitMassBackend(FmcbMassBackendStatus *status);
 void FmcbShutdownMassBackend(FmcbMassBackendStatus *status);

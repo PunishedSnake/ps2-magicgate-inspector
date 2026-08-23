@@ -12,12 +12,15 @@
  * libmc sanity query used by the RAM-only probe. After the security transaction
  * the application rebuilds the normal Sony ROM X card stack; subsequent libmc
  * calls are real again.
+ *
+ * This shim deliberately emits no libdebug screen output. Once the GS frontend
+ * is active, direct scr_printf() calls can contaminate one of its double-buffered
+ * framebuffers. Session progress is presented by app_main.c through gui.c.
  */
 
 #include <tamtypes.h>
 #include <loadfile.h>
 #include <libmc.h>
-#include <debug.h>
 
 extern unsigned char fmcb_mcserv_irx[];
 extern unsigned char secrsif_irx[];
@@ -39,7 +42,6 @@ int __wrap_SifExecModuleBuffer(void *ptr, u32 size, u32 arg_len,
     int rc;
 
     if (ptr == fmcb_mcserv_irx) {
-        scr_printf("[MG] Skipping temporary MCSERV; MCMAN remains resident.\n");
         if (mod_res != 0)
             *mod_res = 0;
         IsolatedNoMcserv = 1;
@@ -48,22 +50,13 @@ int __wrap_SifExecModuleBuffer(void *ptr, u32 size, u32 arg_len,
         return 0x7f;
     }
 
-    if (ptr == secrsif_irx)
-        scr_printf("[MG] Loading SECRSIF bridge...\n");
-
     rc = __real_SifExecModuleBuffer(ptr, size, arg_len, args, mod_res);
-
-    if (ptr == secrsif_irx)
-        scr_printf("[MG] SECRSIF returned rc=%d start=%d.\n",
-                   rc, mod_res != 0 ? *mod_res : -999);
-
     return rc;
 }
 
 int __wrap_mcInit(int type)
 {
     if (IsolatedNoMcserv && !FakeMcInitDone) {
-        scr_printf("[MG] Bypassing isolated EE mcInit; MCMAN stays active.\n");
         FakeMcInitDone = 1;
         return 0;
     }
@@ -71,7 +64,6 @@ int __wrap_mcInit(int type)
     if (IsolatedNoMcserv && FakeMcInitDone) {
         IsolatedNoMcserv = 0;
         FakeMcPending = 0;
-        scr_printf("[MG] Normal ROM X stack restored; real mcInit resumes.\n");
     }
 
     return __real_mcInit(type);
