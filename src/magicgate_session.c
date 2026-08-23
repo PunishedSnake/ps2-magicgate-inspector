@@ -48,6 +48,15 @@ void MciSessionAllowRealMcserv(int allowed)
     AllowRealMcserv = allowed != 0;
 }
 
+void MciSessionResetShim(void)
+{
+    /* These variables live on the EE and therefore survive an IOP reboot. */
+    IsolatedNoMcserv = 0;
+    FakeMcInitDone = 0;
+    FakeMcPending = 0;
+    AllowRealMcserv = 0;
+}
+
 int __wrap_SifExecModuleBuffer(void *ptr, u32 size, u32 arg_len,
                                const char *args, int *mod_res)
 {
