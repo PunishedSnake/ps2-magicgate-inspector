@@ -1,7 +1,11 @@
 /* SPDX-License-Identifier: MIT */
 /* High-value operation wrappers for the persistent Drebin trace. */
 
+#define NEWLIB_PORT_AWARE
+
+#include <fileXio_rpc.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "card_image.h"
 #include "card_raw_session.h"
@@ -19,6 +23,8 @@ int __real_MciCardImageRestoreExact(int port, const char *path,
 int __real_MciCardForceFormatWithBackup(int port, MciCardImageReport *report);
 int __real_MciRawCardSessionStart(MciRawCardSessionStatus *status);
 void __real_MciRawCardSessionStop(MciRawCardSessionStatus *status);
+int __real_FmcbInitMassBackend(FmcbMassBackendStatus *status);
+void __real_FmcbShutdownMassBackend(FmcbMassBackendStatus *status);
 int __real_FmcbInstallNormalTransactional(int target_port,
                                           const FmcbPackageReport *package,
                                           const FmcbInstallOptions *options,
@@ -26,6 +32,8 @@ int __real_FmcbInstallNormalTransactional(int target_port,
                                           void *bind_userdata,
                                           FmcbRecoveryStatus *recovery,
                                           FmcbInstallReport *report);
+
+static unsigned int MassBackendInitCalls;
 
 static void LogImageReport(const char *operation, int rc,
                            const MciCardImageReport *report)
@@ -49,6 +57,60 @@ static void LogImageReport(const char *operation, int rc,
                      report->geometry.pages_per_block,
                      report->geometry.clusters_per_card,
                      report->geometry.from_superblock);
+}
+
+static int SyncPathDevice(const char *path)
+{
+    char device[16];
+    const char *colon;
+    unsigned int length;
+
+    if (path == NULL)
+        return -1;
+    colon = strchr(path, ':');
+    if (colon == NULL)
+        return -2;
+    length = (unsigned int)(colon - path) + 1u;
+    if (length == 0u || length >= sizeof(device))
+        return -3;
+    memcpy(device, path, length);
+    device[length] = '\0';
+    return fileXioSync(device, 0);
+}
+
+/* The very first mass-backend initialization is the boot path. The previous
+ * trace build hung there because logging itself probed mass: before USBHDFSD
+ * had completed enumeration. Never attach the logger during that first call.
+ * Later calls are environment restores after a user operation; FmcbInit already
+ * waited for USB enumeration, so that is a safe point to flush the EE ring. */
+int __wrap_FmcbInitMassBackend(FmcbMassBackendStatus *status)
+{
+    int rc = __real_FmcbInitMassBackend(status);
+    unsigned int call = ++MassBackendInitCalls;
+
+    if (call == 1u) {
+        MciDiagLogPrintf("LIFECYCLE",
+                         "boot mass backend init rc=%d; persistent logger deliberately remains RAM-only",
+                         rc);
+    } else if (rc >= 0 && status != NULL && status->available) {
+        MciDiagLogSetIoAvailable(1);
+        MciDiagLogPrintf("LIFECYCLE",
+                         "restored mass backend init call=%u rc=%d available=%d",
+                         call, rc, status->available);
+    } else {
+        MciDiagLogPrintf("LIFECYCLE",
+                         "mass backend restore call=%u failed rc=%d available=%d",
+                         call, rc, status != NULL ? status->available : -1);
+    }
+    return rc;
+}
+
+void __wrap_FmcbShutdownMassBackend(FmcbMassBackendStatus *status)
+{
+    /* Detach is strictly RAM-only, so no logger RPC can survive fileXioExit or
+     * the IOP personality switch that usually follows this function. */
+    MciDiagLogSetIoAvailable(0);
+    __real_FmcbShutdownMassBackend(status);
 }
 
 int __wrap_MciRawCardSessionStart(MciRawCardSessionStatus *status)
@@ -119,9 +181,15 @@ int __wrap_MciCardImageVerifyFile(const char *path, MciCardImageFormat format,
                                   MciCardImageReport *report)
 {
     int rc;
+    int sync_rc;
 
-    MciDiagLogPrintf("IMAGE", "verify begin format=%s path=%s",
-                     MciCardImageFormatName(format), path != NULL ? path : "NULL");
+    /* Export closes the image immediately before calling verify. Publish that
+     * one file's FAT/data state here instead of wrapping every fileXioClose in
+     * the entire application. */
+    sync_rc = SyncPathDevice(path);
+    MciDiagLogPrintf("IMAGE", "verify begin format=%s path=%s preverify_sync=%d",
+                     MciCardImageFormatName(format), path != NULL ? path : "NULL",
+                     sync_rc);
     rc = __real_MciCardImageVerifyFile(path, format, report);
     LogImageReport("verify", rc, report);
     return rc;
@@ -162,6 +230,10 @@ int __wrap_FmcbInstallNormalTransactional(int target_port,
     int rc;
     int i;
 
+    /* Revalidation has already exercised mass: successfully by the time the
+     * transaction starts. This is a safe, user-triggered attach point even if
+     * no earlier MagicGate/raw restore attached the persistent trace. */
+    MciDiagLogSetIoAvailable(1);
     MciDiagLogPrintf("FMCB",
                      "transaction begin target=mc%d package=%s root=%s entries=%d verify_mode=%d preserve_cnfs=%d recovery_present=%d recovery_valid=%d",
                      target_port,
