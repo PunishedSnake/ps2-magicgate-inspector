@@ -271,24 +271,80 @@ static int IsFreemcbCnf(const char *source)
     return strcmp(name, "FREEMCB.CNF") == 0;
 }
 
+static int NameEqualCi(const char *a, const char *b)
+{
+    while (*a != '\0' && *b != '\0') {
+        unsigned char ca = (unsigned char)*a++;
+        unsigned char cb = (unsigned char)*b++;
+        if (ca >= 'A' && ca <= 'Z') ca = (unsigned char)(ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z') cb = (unsigned char)(cb + ('a' - 'A'));
+        if (ca != cb) return 0;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static int InventoryTargetFromParent(int port, const char *path,
+                                     int *exists, unsigned int *size)
+{
+    sceMcTblGetDir entries[64] __attribute__((aligned(64)));
+    char pattern[FMCB_PATH_MAX];
+    const char *slash = strrchr(path, '/');
+    const char *name;
+    int prefix_len;
+    int count;
+    int i;
+
+    if (slash == NULL || slash == path || slash[1] == '\0')
+        return -4620;
+    name = slash + 1;
+    prefix_len = (int)(slash - path);
+    if (snprintf(pattern, sizeof(pattern), "%.*s/*", prefix_len, path) < 0 ||
+        strlen(pattern) >= sizeof(pattern))
+        return -4621;
+
+    memset(entries, 0, sizeof(entries));
+    mcGetDir(port, 0, pattern, 0, 64, entries);
+    count = McResult();
+    if (count == sceMcResNoEntry || count == 0)
+        return 0;
+    if (count < 0)
+        return count;
+    if (count > 64)
+        count = 64;
+    for (i = 0; i < count; i++) {
+        if (NameEqualCi(entries[i].EntryName, name)) {
+            *exists = 1;
+            *size = entries[i].FileSizeByte;
+            return 0;
+        }
+    }
+    return 0;
+}
+
 static int InventoryTarget(int port, const char *path,
                            int *exists, unsigned int *size)
 {
     sceMcTblGetDir info __attribute__((aligned(64)));
-    int rc;
+    int exact_rc;
+    int fallback_rc;
 
     *exists = 0;
     *size = 0;
     memset(&info, 0, sizeof(info));
     mcGetDir(port, 0, path, 0, 1, &info);
-    rc = McResult();
-    if (rc == sceMcResNoEntry || rc == 0)
+    exact_rc = McResult();
+    if (exact_rc == sceMcResNoEntry || exact_rc == 0)
         return 0;
-    if (rc < 0)
-        return rc;
-    *exists = 1;
-    *size = info.FileSizeByte;
-    return 0;
+    if (exact_rc > 0) {
+        *exists = 1;
+        *size = info.FileSizeByte;
+        return 0;
+    }
+
+    fallback_rc = InventoryTargetFromParent(port, path, exists, size);
+    if (fallback_rc == 0)
+        return 0;
+    return exact_rc;
 }
 
 static int PrepareInventory(int target_port,
@@ -325,6 +381,7 @@ static int PrepareInventory(int target_port,
         file->size = source_status->size;
         file->required_clusters = ClustersForBytes(file->size);
 
+        report->current_file = i;
         rc = InventoryTarget(target_port, file->destination, &file->existed,
                              &file->previous_size);
         if (rc < 0)

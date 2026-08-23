@@ -7,6 +7,7 @@
 #include <io_common.h>
 #include <iox_stat.h>
 #include <malloc.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 

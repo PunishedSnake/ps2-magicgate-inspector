@@ -30,6 +30,7 @@
 #include <string.h>
 
 #include "magicgate.h"
+#include "kelf_cache.h"
 #include "progress.h"
 #include "usb_search.h"
 
@@ -329,11 +330,38 @@ static int UseRawKelfPath(MagicGateReport *report, const char *path,
     return 0;
 }
 
+static int UseCachedRawKelf(MagicGateReport *report)
+{
+    char path[MCI_USB_SEARCH_PATH_MAX];
+    unsigned int size = 0u;
+    char detail[224];
+
+    if (MciKelfCacheGetSource(path, sizeof(path), &size) < 0)
+        return -1;
+    if (size < sizeof(SecrKELFHeader_t) || size > MG_MAX_KELF_SIZE) {
+        MciKelfCacheInvalidate();
+        return -1;
+    }
+
+    report->source_port = MG_RAW_SOURCE_PORT;
+    report->source_size = (int)size;
+    report->source_io_rc = 0;
+    snprintf(report->source_path, sizeof(report->source_path), "%s", path);
+    snprintf(detail, sizeof(detail),
+             "EE RAM cache: %.150s (%u KiB). USB search/read skipped.",
+             path, (size + 1023u) / 1024u);
+    MgProgress(report, 8, "FMCB.XLF ready from cache", detail);
+    return 0;
+}
+
 static int FindRawKelfSource(MagicGateReport *report)
 {
     char package_root[MCI_USB_SEARCH_PATH_MAX];
     char path[MCI_USB_SEARCH_PATH_MAX];
     int rc;
+
+    if (UseCachedRawKelf(report) == 0)
+        return 0;
 
     /* A complete FMCB package that already passed preflight is the preferred
      * source. This avoids recursively walking the USB tree on every scan. */
@@ -371,70 +399,33 @@ static int ReadRawKelfSource(const MagicGateReport *report,
                              unsigned char **out_buffer)
 {
     const char *path = RawPathFromReport(report);
-    unsigned char *buffer;
+    unsigned int clone_size = 0u;
+    int cache_hit = 0;
     char detail[224];
-    int alloc_size;
-    int total;
-    int chunk;
-    int fd;
     int rc;
-    int last_percent = -1;
 
     if (report->source_size <= 0 || report->source_size > MG_MAX_KELF_SIZE)
         return MG_INVALID_LAYOUT;
 
-    alloc_size = report->source_size + 0x400;
-    buffer = memalign(64, alloc_size);
-    if (buffer == NULL)
-        return -ENOMEM;
-    memset(buffer, 0, alloc_size);
-
-    MgProgress(report, 10, "Opening raw FMCB.XLF",
-               "Allocating an aligned EE RAM buffer and opening the USB source read-only.");
-    fd = fileXioOpen(path, FIO_O_RDONLY);
-    if (fd < 0) {
-        free(buffer);
-        return fd;
-    }
-
-    total = 0;
-    while (total < report->source_size) {
-        int percent;
-
-        chunk = report->source_size - total;
-        if (chunk > MG_READ_CHUNK)
-            chunk = MG_READ_CHUNK;
-
-        rc = fileXioRead(fd, buffer + total, chunk);
-        if (rc < 0) {
-            fileXioClose(fd);
-            free(buffer);
-            return rc;
-        }
-        if (rc == 0 || rc > chunk) {
-            fileXioClose(fd);
-            free(buffer);
-            return MG_SHORT_READ;
-        }
-        total += rc;
-
-        percent = 10 + (total * 10) / report->source_size;
-        if (percent != last_percent) {
-            snprintf(detail, sizeof(detail),
-                     "Reading %s into EE RAM: %d / %d bytes.",
-                     path, total, report->source_size);
-            MgProgress(report, percent, "Reading raw FMCB.XLF", detail);
-            last_percent = percent;
-        }
-    }
-
-    rc = fileXioClose(fd);
-    if (rc < 0) {
-        free(buffer);
+    MgProgress(report, 10, "Preparing raw FMCB.XLF",
+               "Using an immutable EE cache and a disposable aligned clone for the mutating security transaction.");
+    rc = MciKelfCacheClone(path, (unsigned int)report->source_size,
+                           out_buffer, &clone_size, &cache_hit);
+    if (rc < 0)
         return rc;
+    if (clone_size != (unsigned int)report->source_size) {
+        free(*out_buffer);
+        *out_buffer = NULL;
+        return MG_SHORT_READ;
     }
 
-    *out_buffer = buffer;
+    snprintf(detail, sizeof(detail),
+             cache_hit
+                 ? "Cloned %u KiB from the persistent EE RAM cache; no USB read was required."
+                 : "Read and cached %u KiB from USB, then cloned an untouched working copy.",
+             (clone_size + 1023u) / 1024u);
+    MgProgress(report, 20, cache_hit ? "Using cached FMCB.XLF"
+                                     : "FMCB.XLF cached in EE RAM", detail);
     return 0;
 }
 
