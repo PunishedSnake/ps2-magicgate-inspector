@@ -6,6 +6,10 @@ on:
       - feat/0.4.0
     paths:
       - 'tools/APPLY_MARQUEE_ENDPOINT'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'tools/APPLY_MARQUEE_ENDPOINT'
 
 permissions:
   contents: write
