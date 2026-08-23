@@ -9,9 +9,10 @@
  * have had enough time to become usable. Callers therefore explicitly attach
  * and detach the logger at safe lifecycle boundaries.
  *
- * Every durable line is still opened in append mode, written, closed and
- * best-effort synced. While mass: is detached, a bounded EE-side ring retains
- * the latest trace lines and flushes them after a later explicit attach.
+ * Every durable line is opened in append mode, written, closed and best-effort
+ * synced. While mass: is detached, or while a card-image stream owns a long-
+ * lived mass: descriptor, a bounded EE-side ring retains trace lines and flushes
+ * them only after the filesystem is safe for logger I/O again.
  */
 
 #define NEWLIB_PORT_AWARE
@@ -27,7 +28,7 @@
 #include "diag_log.h"
 
 #define DIAG_LINE_MAX 320u
-#define DIAG_PENDING_LINES 64u
+#define DIAG_PENDING_LINES 256u
 #define DIAG_ATTACH_ATTEMPTS 4u
 #define DIAG_ATTACH_DELAY_USEC 50000u
 
@@ -53,6 +54,7 @@ static int IoAvailable;
 static int PathReady;
 static int Initialized;
 static int InWrite;
+static int MassWritePaused;
 
 static int WriteAll(int fd, const char *text, unsigned int length)
 {
@@ -114,7 +116,7 @@ static int WriteRawLineNow(const char *line)
     int rc;
     int close_rc;
 
-    if (!IoAvailable || InWrite)
+    if (!IoAvailable || MassWritePaused || InWrite)
         return -1;
     if (EnsurePath() < 0)
         return -2;
@@ -172,6 +174,7 @@ static void EnsureInitialized(void)
     IoAvailable = 0;
     PathReady = 0;
     InWrite = 0;
+    MassWritePaused = 0;
     snprintf(Pending[0], sizeof(Pending[0]),
              "#%06u [SESSION] ========== Drebin diagnostic session start ==========",
              Sequence);
@@ -181,7 +184,7 @@ static void FlushPending(void)
 {
     char line[DIAG_LINE_MAX];
 
-    if (!IoAvailable)
+    if (!IoAvailable || MassWritePaused)
         return;
     if (EnsurePath() < 0) {
         IoAvailable = 0;
@@ -222,6 +225,7 @@ void MciDiagLogReset(void)
     IoAvailable = 0;
     PathReady = 0;
     InWrite = 0;
+    MassWritePaused = 0;
     LogPath[0] = '\0';
     LogDevice[0] = '\0';
     MciDiagLogPrintf("SESSION", "========== Drebin diagnostic session start ==========");
@@ -268,6 +272,29 @@ void MciDiagLogSetIoAvailable(int available)
     }
 }
 
+void MciDiagLogSetMassWritePaused(int paused)
+{
+    EnsureInitialized();
+
+    if (paused) {
+        if (MassWritePaused)
+            return;
+        /* This marker is durable because callers enter the guard before opening
+         * the image stream. No DREBIN.LOG file operation occurs after this. */
+        MciDiagLogPrintf("LOGGER",
+                         "card-image mass I/O critical section begins; durable trace paused");
+        MassWritePaused = 1;
+        return;
+    }
+
+    if (!MassWritePaused)
+        return;
+    MassWritePaused = 0;
+    FlushPending();
+    MciDiagLogPrintf("LOGGER",
+                     "card-image mass I/O critical section ended; durable trace resumed");
+}
+
 void MciDiagLogPrintf(const char *component, const char *format, ...)
 {
     char payload[240];
@@ -290,7 +317,7 @@ void MciDiagLogPrintf(const char *component, const char *format, ...)
              ++Sequence, component, payload);
     line[sizeof(line) - 1u] = '\0';
 
-    if (IoAvailable) {
+    if (IoAvailable && !MassWritePaused) {
         rc = WriteRawLineNow(line);
         if (rc == 0)
             return;
