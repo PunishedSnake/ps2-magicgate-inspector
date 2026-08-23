@@ -13,10 +13,21 @@ mcman_devinfos[] entry which has not received the complete GetInfo/device-spec
 initialization. Merely detecting a card in 2/3 is insufficient because raw page
 I/O immediately consumes pagesize/cardflags from that structure.
 
+There is one more legacy semantic that is hostile to an imaging tool. MCMAN's
+McReadPage() retries a page whose spare-area ECC cannot be corrected. If the SIO2
+page transfer itself succeeds on every attempt but ECC remains uncorrectable,
+McReadPage() finally returns sceMcResNoFormat (-2) even though the last 512-byte
+page payload is present in the destination buffer. A filesystem caller should
+indeed distrust that page. A forensic/best-effort image dumper must preserve it
+instead of deleting the whole partial image.
+
 Drebin patches only the temporary non-XMC MCSERV built for Card Tools:
 - preserve logical port 0/1 for erase/read/write MCMAN calls;
 - let MCMAN itself select physical SIO2 channel 2/3;
-- propagate the real McReadPage result instead of hard-coding success.
+- propagate the real McReadPage result;
+- convert the special post-transfer uncorrectable-ECC result (-2) to positive 1.
+  EE-side imaging treats any negative result as fatal and a positive result as a
+  readable page with a source-ECC warning. Other negative errors remain fatal.
 
 The normal Sony ROM X stack and PS2SDK X-style MagicGate stack are untouched.
 """
@@ -48,6 +59,9 @@ def patch(path: Path) -> None:
     text = text.replace(old, new)
 
     # Upstream legacy MCSERV discards the actual low-level page-read result.
+    # Preserve it, but turn MCMAN's special 'transport succeeded, ECC remained
+    # uncorrectable after retries' result into a positive warning. _McReadPage
+    # still DMA-copies the 512-byte payload to EE regardless of this status.
     old_read = """\tif (McGetMcType(dP->port, dP->slot) == 2) {
 \t\tr = 0;
 \t\tMcReadPage(dP->port, dP->slot, dP->fd, (void *)(mcserv_buf + fastsize));
@@ -55,6 +69,13 @@ def patch(path: Path) -> None:
     new_read = """\tif (McGetMcType(dP->port, dP->slot) == 2) {
 \t\tr = McReadPage(dP->port, dP->slot, dP->fd,
 \t\t               (void *)(mcserv_buf + fastsize));
+\t\t/*
+\t\t * McReadPage returns sceMcResNoFormat (-2) after repeated
+\t\t * uncorrectable ECC even though mcman_readpage transferred the page.
+\t\t * Return +1 so a raw image can keep that payload and report a warning.
+\t\t */
+\t\tif (r == sceMcResNoFormat)
+\t\t\tr = 1;
 \t}"""
     if old_read not in text:
         raise SystemExit("legacy _McReadPage body did not match expected PS2SDK source")
@@ -76,4 +97,4 @@ if __name__ == "__main__":
         raise SystemExit("usage: patch_raw_mcserv_ports.py <mcserv.c>")
     source = Path(sys.argv[1])
     patch(source)
-    print("PS2SDK legacy MCSERV logical-state raw-page patch applied")
+    print("PS2SDK legacy MCSERV logical-state/ECC-tolerant raw-page patch applied")
