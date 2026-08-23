@@ -16,6 +16,7 @@ EE_LDFLAGS = -Wl,--gc-sections \
 	-Wl,--wrap=mcSync \
 	-Wl,--wrap=fileXioInit \
 	-Wl,--wrap=fileXioExit \
+	-Wl,--wrap=fileXioClose \
 	-Wl,--wrap=MciCardImageExport \
 	-Wl,--wrap=MciCardImageVerifyFile \
 	-Wl,--wrap=MciCardImageRestoreExact \
