@@ -1,0 +1,193 @@
+name: Apply focused marquee accessibility fix
+
+on:
+  push:
+    branches:
+      - feat/0.4.0
+    paths:
+      - 'tools/APPLY_MARQUEE_ACCESSIBILITY'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/0.4.0
+          fetch-depth: 0
+
+      - name: Apply focused marquee and concise display labels
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              s = p.read_text()
+              n = s.count(old)
+              if n != 1:
+                  raise SystemExit(f'{path}: expected one anchor, got {n}: {old[:100]!r}')
+              p.write_text(s.replace(old, new, 1))
+
+          replace_once('src/gui.c',
+          '''#define MARQUEE_STEP_MS 120u
+#define MARQUEE_GAP_CHARS 4u
+#define MARQUEE_HOLD_STEPS 6u
+''',
+          '''/* Accessibility-first marquee: one whole glyph every 480 ms. The
+ * selected row also pauses at the beginning before it starts moving. */
+#define MARQUEE_STEP_MS 480u
+#define MARQUEE_GAP_CHARS 4u
+#define MARQUEE_HOLD_STEPS 6u
+''')
+
+          replace_once('src/gui.c',
+          '''static u64 MarqueeEpoch;
+static int MarqueeNeeded;
+''',
+          '''static u64 MarqueeEpoch;
+static int MarqueeNeeded;
+static int LastSettingsMarqueeRow = -1;
+''')
+
+          replace_once('src/gui.c',
+          '''    color_set(&color, rgb);
+    if (max_y - y <= GLYPH_H + 1.0f) {
+        size_t length = strcspn(value, "\\r\\n");
+        unsigned int cells = max_x > x ? (unsigned int)((max_x - x) / GLYPH_W) : 0u;
+        if (length > cells)
+            return text_marquee_box(q, x, y, max_x, value, rgb);
+    }
+
+    while (*p != '\\0' && cy + GLYPH_H <= max_y) {
+''',
+          '''    color_set(&color, rgb);
+
+    while (*p != '\\0' && cy + GLYPH_H <= max_y) {
+''')
+
+          replace_once('src/gui.c',
+          '''static qword_t *text(qword_t *q, float x, float y,
+                     const char *value, UiRgb rgb)
+{
+    return text_box(q, x, y, UI_W - 12.0f, UI_H - 3.0f, value, rgb);
+}
+''',
+          '''static qword_t *selected_single_line(qword_t *q, float x, float y,
+                                            float max_x, float max_y,
+                                            const char *value, UiRgb rgb)
+{
+    size_t length;
+    unsigned int cells;
+
+    if (value == NULL)
+        return q;
+    length = strcspn(value, "\\r\\n");
+    cells = max_x > x ? (unsigned int)((max_x - x) / GLYPH_W) : 0u;
+    if (length > cells)
+        return text_marquee_box(q, x, y, max_x, value, rgb);
+    return text_box(q, x, y, max_x, max_y, value, rgb);
+}
+
+static qword_t *text(qword_t *q, float x, float y,
+                     const char *value, UiRgb rgb)
+{
+    return text_box(q, x, y, UI_W - 12.0f, UI_H - 3.0f, value, rgb);
+}
+''')
+
+          replace_once('src/gui.c',
+          '''    q = text_box(q, 38, y0 + 4, 310, y0 + 12, name, Theme.text);
+    q = text_box(q, 322, y0 + 4, 604, y0 + 12, value, Theme.accent);
+    q = text_box(q, 38, y0 + 15, 604, y0 + 23, hint, Theme.muted);
+    return q;
+}
+''',
+          '''    q = text_box(q, 38, y0 + 4, 310, y0 + 12, name, Theme.text);
+    if (row == selected) {
+        q = selected_single_line(q, 322, y0 + 4, 604, y0 + 12,
+                                 value, Theme.accent);
+        q = selected_single_line(q, 38, y0 + 15, 604, y0 + 23,
+                                 hint, Theme.muted);
+    } else {
+        q = text_box(q, 322, y0 + 4, 604, y0 + 12, value, Theme.accent);
+        q = text_box(q, 38, y0 + 15, 604, y0 + 23, hint, Theme.muted);
+    }
+    return q;
+}
+''')
+
+          replace_once('src/gui.c',
+          '''    q = panel_title(q, 12, 55, 628, 69, "SETTINGS", Theme.accent);
+    snprintf(video, sizeof(video), "%s%s",
+''',
+          '''    if (selected_row != LastSettingsMarqueeRow) {
+        MarqueeEpoch = GetTimerSystemTime();
+        LastSettingsMarqueeRow = selected_row;
+    }
+
+    q = panel_title(q, 12, 55, 628, 69, "SETTINGS", Theme.accent);
+    snprintf(video, sizeof(video), "%s%s",
+''')
+
+          replace_once('src/gui.c',
+          '''    if ((unsigned int)page >= MCI_GUI_PAGE_COUNT)
+        page = MCI_GUI_CARD;
+
+    q = frame_begin(&packet);
+''',
+          '''    if ((unsigned int)page >= MCI_GUI_PAGE_COUNT)
+        page = MCI_GUI_CARD;
+    if (page != MCI_GUI_SETTINGS)
+        LastSettingsMarqueeRow = -1;
+
+    q = frame_begin(&packet);
+''')
+
+          replace_once('src/video_mode.c',
+          '''static const MciVideoIdentity Modes[MCI_VIDEO_MODE_COUNT] = {
+    {"native", "Native automatic (640x224 field)",
+     {640, 448, 640, 224, 640, 224, 0, 0, 640, 224, 32, 2, 1, 1}},
+    {"480p", "480p progressive (720x448)",
+     {720, 480, 720, 448, 768, 448, 0, 0, 720, 448, 32, 2, 0, 1}},
+    {"576p", "576p progressive (720x576)",
+     {720, 576, 720, 576, 768, 576, 40, 0, 640, 480, 32, 1, 0, 0}},
+    {"720p", "720p progressive (1280x720)",
+     {1280, 720, 640, 720, 640, 720, 0, 0, 640, 720, 32, 1, 0, 0}},
+    {"1080i", "1080i interlaced (1920x1080)",
+     {1920, 1080, 640, 540, 640, 540, 0, 13, 640, 527, 32, 2, 1, 0}}
+};
+''',
+          '''static const MciVideoIdentity Modes[MCI_VIDEO_MODE_COUNT] = {
+    {"native", "Native (640x224)",
+     {640, 448, 640, 224, 640, 224, 0, 0, 640, 224, 32, 2, 1, 1}},
+    {"480p", "480p (720x448)",
+     {720, 480, 720, 448, 768, 448, 0, 0, 720, 448, 32, 2, 0, 1}},
+    {"576p", "576p (720x576)",
+     {720, 576, 720, 576, 768, 576, 40, 0, 640, 480, 32, 1, 0, 0}},
+    {"720p", "720p (1280x720)",
+     {1280, 720, 640, 720, 640, 720, 0, 0, 640, 720, 32, 1, 0, 0}},
+    {"1080i", "1080i (1920x1080)",
+     {1920, 1080, 640, 540, 640, 540, 0, 13, 640, 527, 32, 2, 1, 0}}
+};
+''')
+          PY
+
+          git diff --check
+          git diff --stat
+
+      - name: Commit code-only patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/gui.c src/video_mode.c
+          git commit -m 'fix(ui): slow marquee and animate selected setting only'
+          git push origin HEAD:feat/0.4.0
