@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include "magicgate.h"
+#include "mc_port.h"
 
 #define MGDIAG_MAGIC0 0xD2
 #define MGDIAG_MAGIC1 0x12
@@ -80,18 +81,6 @@ const char *__real_MagicGateStageText(MagicGateStage stage);
 static void ClearRecord(void)
 {
     memset(&Record, 0, sizeof(Record));
-}
-
-/*
- * SECRMAN receives a raw SIO2 channel index, not a libmc logical port. Keep
- * 0/1 everywhere else and translate only the three SECR RPCs that carry a card
- * port. This mirrors the reference FreeMcBoot binding path (2 + logical port).
- */
-static int PhysicalSecrPort(int port)
-{
-    if (port >= 0 && port <= 1)
-        return port + 2;
-    return port;
 }
 
 static void DecodeRecord(const unsigned char data[16])
@@ -183,18 +172,27 @@ int __wrap_sceSifCallRpc(SifRpcClientData_t *cd, int fno, int mode,
     int rc;
 
     if (fno == 1 && send != NULL) {
+        /*
+         * THIS IS THE DOMAIN CROSSING.
+         *
+         * Drebin/libsecr callers stay on logical mc0/mc1 values 0/1. The three
+         * SECR RPCs below are the point where CardAuth starts consuming a raw
+         * SIO2 card channel, so translation to 2/3 happens here exactly once.
+         * Do not move this +2 into ordinary libmc, MCSERV or MCMAN code.
+         * See src/mc_port.h and docs/MEMORY_CARD_PORT_DOMAINS.md.
+         */
         if (cd == HeaderClient) {
             struct SecrSifDownloadHeaderParams *param;
             param = (struct SecrSifDownloadHeaderParams *)send;
-            param->port = PhysicalSecrPort(param->port);
+            param->port = MciSecrBoundaryCardPort(param->port);
         } else if (cd == KbitClient) {
             struct SecrSifDownloadGetKbitParams *param;
             param = (struct SecrSifDownloadGetKbitParams *)send;
-            param->port = PhysicalSecrPort(param->port);
+            param->port = MciSecrBoundaryCardPort(param->port);
         } else if (cd == KcClient) {
             struct SecrSifDownloadGetKcParams *param;
             param = (struct SecrSifDownloadGetKcParams *)send;
-            param->port = PhysicalSecrPort(param->port);
+            param->port = MciSecrBoundaryCardPort(param->port);
         }
     }
 
