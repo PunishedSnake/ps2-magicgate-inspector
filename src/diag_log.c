@@ -2,11 +2,16 @@
 /*
  * Crash-oriented Drebin diagnostic logger.
  *
- * The IOP is deliberately rebooted several times by the application, so a
- * persistent file descriptor would become invalid across personality changes.
- * Every durable log line is therefore opened in append mode, written, closed
- * and best-effort synced. While fileXio/mass: is unavailable, a small EE-side
- * ring retains the most recent lines and flushes them when USB returns.
+ * IMPORTANT LIFECYCLE RULE:
+ * The logger never owns fileXio initialization and never probes mass: from a
+ * linker wrapper. Drebin deliberately replaces the IOP personality at runtime;
+ * only the application knows when a newly bound fileXio client and USBHDFSD
+ * have had enough time to become usable. Callers therefore explicitly attach
+ * and detach the logger at safe lifecycle boundaries.
+ *
+ * Every durable line is still opened in append mode, written, closed and
+ * best-effort synced. While mass: is detached, a bounded EE-side ring retains
+ * the latest trace lines and flushes them after a later explicit attach.
  */
 
 #define NEWLIB_PORT_AWARE
@@ -22,8 +27,8 @@
 #include "diag_log.h"
 
 #define DIAG_LINE_MAX 320u
-#define DIAG_PENDING_LINES 32u
-#define DIAG_ATTACH_ATTEMPTS 10u
+#define DIAG_PENDING_LINES 64u
+#define DIAG_ATTACH_ATTEMPTS 4u
 #define DIAG_ATTACH_DELAY_USEC 50000u
 
 typedef struct MciDiagRoot {
@@ -48,10 +53,6 @@ static int IoAvailable;
 static int PathReady;
 static int Initialized;
 static int InWrite;
-
-int __real_fileXioInit(void);
-void __real_fileXioExit(void);
-int __real_fileXioClose(int fd);
 
 static int WriteAll(int fd, const char *text, unsigned int length)
 {
@@ -135,9 +136,6 @@ static int WriteRawLineNow(const char *line)
         rc = close_rc;
 
     if (rc == 0) {
-        /* USBHDFSD may cache FAT metadata. Close first, then ask the device to
-         * publish it. Sync failure is intentionally non-fatal to logging: the
-         * close still gives us the best durable state the driver can provide. */
         (void)fileXioSync(LogDevice, 0);
         DelayThread(2000);
     }
@@ -236,13 +234,22 @@ void MciDiagLogSetIoAvailable(int available)
     EnsureInitialized();
 
     if (!available) {
-        if (IoAvailable)
-            MciDiagLogPrintf("LOGGER", "mass/fileXio is about to become unavailable");
+        /* Detach must be safe even if the caller is about to reset the IOP or
+         * has already lost the old RPC server. Never perform USB I/O here. */
         IoAvailable = 0;
         PathReady = 0;
+        LogPath[0] = '\0';
+        LogDevice[0] = '\0';
+        MciDiagLogPrintf("LOGGER", "mass/fileXio detached; buffering trace in EE RAM");
         return;
     }
 
+    if (IoAvailable && PathReady)
+        return;
+
+    /* This is called only after the application has explicitly allowed USB
+     * enumeration time. Failure is non-fatal: stay RAM-only and try again at
+     * the next safe lifecycle boundary. */
     for (attempt = 0u; attempt < DIAG_ATTACH_ATTEMPTS; attempt++) {
         IoAvailable = 1;
         PathReady = 0;
@@ -250,11 +257,12 @@ void MciDiagLogSetIoAvailable(int available)
             FlushPending();
             if (IoAvailable)
                 MciDiagLogPrintf("LOGGER",
-                                 "mass/fileXio resumed after %u attempt(s); path=%s",
+                                 "mass/fileXio attached after %u attempt(s); path=%s",
                                  attempt + 1u, LogPath);
             return;
         }
         IoAvailable = 0;
+        PathReady = 0;
         if (attempt + 1u < DIAG_ATTACH_ATTEMPTS)
             DelayThread(DIAG_ATTACH_DELAY_USEC);
     }
@@ -288,6 +296,8 @@ void MciDiagLogPrintf(const char *component, const char *format, ...)
             return;
         IoAvailable = 0;
         PathReady = 0;
+        LogPath[0] = '\0';
+        LogDevice[0] = '\0';
     }
     QueueLine(line);
 }
@@ -301,41 +311,4 @@ const char *MciDiagLogPath(void)
 {
     EnsureInitialized();
     return PathReady ? LogPath : "mass?:/MCI/DREBIN.LOG";
-}
-
-int __wrap_fileXioInit(void)
-{
-    int rc;
-
-    EnsureInitialized();
-    rc = __real_fileXioInit();
-    if (rc >= 0) {
-        MciDiagLogSetIoAvailable(1);
-        MciDiagLogPrintf("LOGGER", "fileXioInit completed rc=%d", rc);
-    } else {
-        MciDiagLogPrintf("LOGGER", "fileXioInit failed rc=%d", rc);
-    }
-    return rc;
-}
-
-void __wrap_fileXioExit(void)
-{
-    MciDiagLogSetIoAvailable(0);
-    __real_fileXioExit();
-}
-
-int __wrap_fileXioClose(int fd)
-{
-    int rc = __real_fileXioClose(fd);
-
-    /* For non-logger handles, publish FAT/data state immediately. This is
-     * intentionally conservative in the diagnostic build and makes a completed
-     * image close durable before the subsequent verify pass begins. */
-    if (!InWrite && IoAvailable && LogDevice[0] != '\0') {
-        int sync_rc = fileXioSync(LogDevice, 0);
-        if (rc < 0 || sync_rc < 0)
-            MciDiagLogPrintf("USB", "fileXioClose fd=%d rc=%d sync_rc=%d",
-                             fd, rc, sync_rc);
-    }
-    return rc;
 }
