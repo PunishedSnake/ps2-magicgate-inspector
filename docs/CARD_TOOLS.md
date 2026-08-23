@@ -37,6 +37,26 @@ libmc exposes corrected 512-byte page data rather than arbitrary physical spare 
 
 Each page is stored as 512 logical data bytes with no ECC/spare area. This is the compact logical-page layout commonly used for PS2 VMC files.
 
+### Filesystem geometry is not fixed to official 8 MiB cards
+
+The filesystem browser must not assume that every valid PS2 memory-card superblock uses the erase geometry commonly seen on an official 8 MiB card. Real-hardware qualification of a functional 64 MiB card produced this valid superblock geometry:
+
+```text
+page_len          = 512
+pages_per_cluster = 2
+pages_per_block   = 32
+clusters_per_card = 65536
+alloc_offset      = 266
+alloc_end         = 65238
+rootdir_cluster   = 0
+backup_block1     = 4095
+backup_block2     = 4094
+```
+
+An early Drebin image-browser validator incorrectly rejected `pages_per_block > 16`, causing both otherwise valid `.vmc` and `.ps2` images of this card to fail with `IMAGE INVALID (rc=-3)`. That restriction was invalid: `pages_per_block` describes physical erase geometry and the filesystem browser does not erase the source image. Browser validation therefore requires a non-zero value but does not impose the official-card `16` value as a universal upper limit.
+
+Keep physical erase-geometry policy in the raw exact-restore/format layer. Do not move it into the filesystem parser.
+
 ## Export verification
 
 An export is not reported as successful after the last write alone. Drebin closes the image, reopens it, reads the entire file back, validates size and layout, validates every `.ps2` ECC record, calculates CRC32 over the complete logical page stream and compares that value with the CRC captured from the physical card while dumping it.
