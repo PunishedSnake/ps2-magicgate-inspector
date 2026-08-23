@@ -23,25 +23,38 @@ EE_LDFLAGS = -Wl,--gc-sections \
 	-Wl,--wrap=FmcbRecoveryRun \
 	-Wl,--wrap=FmcbRecoveryFinish
 
-# 0.4.x keeps the single hardware-validated production security backend from
-# Briscoe: PS2SDK 2.0 SECRMAN 1.4, matching SECRSIF and the matching PS2SDK 2.0
-# SIO2/PAD/MCMAN generation. Drebin also reuses that PS2SDK card generation in
-# a separate, explicit raw-page imaging personality with a real MCSERV.
+# 0.4.x keeps the hardware-validated Briscoe security backend: PS2SDK 2.0
+# SECRMAN 1.4 plus the normal matching X-style card generation. Raw page RPCs
+# are a different interface contract. Modern PS2SDK's default mcserv is built
+# with BUILDING_XMCSERV=1, so libmc identifies it as XMC and deliberately blocks
+# mcReadPage/mcWritePage/mcEraseBlock. Drebin therefore embeds a second, pinned
+# legacy MCMAN/MCSERV pair built with the XMC compatibility switches disabled.
 MG_CARD_DIR ?= .build/ps2sdk2-mg
 MG_SECR_DIR ?= .build/ps2sdk2-secr14
+RAW_CARD_DIR ?= .build/ps2sdk2-raw
 MG_SECRMAN ?= $(MG_SECR_DIR)/secrman.irx
 MG_SECRSIF ?= $(MG_SECR_DIR)/secrsif.irx
+RAW_MCMAN ?= $(RAW_CARD_DIR)/mcman.irx
+RAW_MCSERV ?= $(RAW_CARD_DIR)/mcserv.irx
 
 MG_CARD_IRX_FILES = freesio2.irx freepad.irx mcman.irx mcserv.irx
 MG_CARD_OBJS = $(addprefix fmcb_,$(MG_CARD_IRX_FILES:.irx=_irx.o))
+RAW_CARD_OBJS = raw_mcman_irx.o raw_mcserv_irx.o
 PS2SDK_IRX_FILES = iomanX.irx fileXio.irx usbd.irx usbhdfsd.irx
 
-EE_OBJS += secrman_irx.o secrsif_irx.o $(MG_CARD_OBJS) $(PS2SDK_IRX_FILES:.irx=_irx.o)
+EE_OBJS += secrman_irx.o secrsif_irx.o $(MG_CARD_OBJS) $(RAW_CARD_OBJS) $(PS2SDK_IRX_FILES:.irx=_irx.o)
 
 $(MG_SECRMAN) $(MG_SECRSIF):
 	@test -f $@ || { \
 		echo "Missing staged PS2SDK 2.0 security module: $@"; \
 		echo "Run the CI staging step or stage the pinned PS2SDK 2.0 modules locally."; \
+		exit 1; \
+	}
+
+$(RAW_MCMAN) $(RAW_MCSERV):
+	@test -f $@ || { \
+		echo "Missing staged legacy raw-card module: $@"; \
+		echo "Build PS2SDK MCMAN/MCSERV with XMC compatibility disabled."; \
 		exit 1; \
 	}
 
@@ -51,8 +64,15 @@ secrman_irx.c: $(MG_SECRMAN)
 secrsif_irx.c: $(MG_SECRSIF)
 	$(PS2SDK)/bin/bin2c $< $@ secrsif_irx
 
+raw_mcman_irx.c: $(RAW_MCMAN)
+	$(PS2SDK)/bin/bin2c $< $@ raw_mcman_irx
+
+raw_mcserv_irx.c: $(RAW_MCSERV)
+	$(PS2SDK)/bin/bin2c $< $@ raw_mcserv_irx
+
 # The fmcb_* generated symbol prefix is retained for source compatibility with
-# the Briscoe runtime. The embedded files are PS2SDK 2.0 modules.
+# the Briscoe/MagicGate runtime. These are the normal PS2SDK 2.0 modules and are
+# not the legacy raw-page pair above.
 fmcb_%_irx.c: $(MG_CARD_DIR)/%.irx
 	@test -f $< || { echo "Missing staged MagicGate card-stack IRX: $<"; exit 1; }
 	$(PS2SDK)/bin/bin2c $< $@ fmcb_$*_irx
