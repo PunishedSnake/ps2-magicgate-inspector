@@ -13,6 +13,10 @@
  * the application rebuilds the normal Sony ROM X card stack; subsequent libmc
  * calls are real again.
  *
+ * Drebin's raw image personality is the deliberate exception: PS2SDK MCSERV is
+ * allowed to start there because its page-level RPCs are required for .ps2/.vmc
+ * imaging. The caller enables that exception only around the MCSERV load.
+ *
  * This shim deliberately emits no libdebug screen output. Once the GS frontend
  * is active, direct scr_printf() calls can contaminate one of its double-buffered
  * framebuffers. Session progress is presented by app_main.c through gui.c.
@@ -22,12 +26,15 @@
 #include <loadfile.h>
 #include <libmc.h>
 
+#include "magicgate_session.h"
+
 extern unsigned char fmcb_mcserv_irx[];
 extern unsigned char secrsif_irx[];
 
 static int IsolatedNoMcserv;
 static int FakeMcInitDone;
 static int FakeMcPending;
+static int AllowRealMcserv;
 
 int __real_SifExecModuleBuffer(void *ptr, u32 size, u32 arg_len,
                                const char *args, int *mod_res);
@@ -36,12 +43,17 @@ int __real_mcGetInfo(int port, int slot, int *type, int *free_clusters,
                      int *formatted);
 int __real_mcSync(int mode, int *cmd, int *result);
 
+void MciSessionAllowRealMcserv(int allowed)
+{
+    AllowRealMcserv = allowed != 0;
+}
+
 int __wrap_SifExecModuleBuffer(void *ptr, u32 size, u32 arg_len,
                                const char *args, int *mod_res)
 {
     int rc;
 
-    if (ptr == fmcb_mcserv_irx) {
+    if (ptr == fmcb_mcserv_irx && !AllowRealMcserv) {
         if (mod_res != 0)
             *mod_res = 0;
         IsolatedNoMcserv = 1;
