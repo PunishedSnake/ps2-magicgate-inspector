@@ -22,6 +22,8 @@ jobs:
           ref: feat/0.4.0-dev3-drebin
           fetch-depth: 0
 
+      # This workflow exists only to apply the large, assertion-checked source
+      # integration cleanly on the development branch.
       - name: Apply source integration
         shell: bash
         run: |
