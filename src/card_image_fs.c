@@ -284,10 +284,16 @@ static int OpenImage(const char *path, MciCardImageFormat format,
         return -2;
     }
     memcpy(&image->sb, first, sizeof(image->sb));
+    /*
+     * pages_per_block is physical erase geometry, not a filesystem-browser
+     * constraint. Official 8 MiB cards commonly report 16, while the 64 MiB
+     * hardware-qualified image reports 32. The browser never erases blocks, so
+     * rejecting values above 16 only discards otherwise valid PS2 filesystems.
+     */
     if (memcmp(image->sb.magic, SuperblockMagic, sizeof(SuperblockMagic)) != 0 ||
         image->sb.page_len != FS_PAGE_SIZE ||
         (image->sb.pages_per_cluster != 1u && image->sb.pages_per_cluster != 2u) ||
-        image->sb.pages_per_block == 0u || image->sb.pages_per_block > 16u ||
+        image->sb.pages_per_block == 0u ||
         image->sb.clusters_per_card == 0u ||
         image->sb.alloc_offset >= image->sb.clusters_per_card ||
         image->sb.alloc_end == 0u ||
