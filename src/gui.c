@@ -62,11 +62,13 @@
 #define GS_PAGE_WORDS 2048u
 #define PSMCT32_PAGE_W 64u
 #define PSMCT32_PAGE_H 32u
-/* Accessibility-first marquee: one whole glyph every 480 ms. The selected
- * setting pauses at the beginning before it starts moving. */
-#define MARQUEE_STEP_MS 480u
-#define MARQUEE_GAP_CHARS 4u
-#define MARQUEE_HOLD_STEPS 6u
+/* Accessibility-first marquee. Only the selected setting can animate.
+ * Scroll a whole glyph every 240 ms, keep the beginning readable briefly,
+ * hold the fully visible end for two seconds, then snap directly back to the
+ * beginning instead of making the sentence travel through a carousel gap. */
+#define MARQUEE_STEP_MS 240u
+#define MARQUEE_START_HOLD_MS 1500u
+#define MARQUEE_END_HOLD_MS 2000u
 
 #define VSYNC_TIMEOUT_MS 250u
 #define GIF_TIMEOUT_MS 250u
@@ -338,25 +340,46 @@ static qword_t *text_marquee_box(qword_t *q, float x, float y,
 {
     size_t length = strcspn(value, "\r\n");
     unsigned int cells = max_x > x ? (unsigned int)((max_x - x) / GLYPH_W) : 0u;
-    unsigned int ring;
-    unsigned int step;
-    unsigned int phase;
+    unsigned int max_offset;
     unsigned int offset;
     unsigned int i;
+    u64 elapsed;
+    u64 step_ticks;
+    u64 start_hold_ticks;
+    u64 end_hold_ticks;
+    u64 scroll_ticks;
+    u64 cycle_ticks;
+    u64 phase;
     color_t color;
 
     if (cells == 0u || length == 0u)
         return q;
+    if (length <= cells)
+        return q;
+
     color_set(&color, rgb);
     MarqueeNeeded = 1;
-    ring = (unsigned int)length + MARQUEE_GAP_CHARS;
-    step = (unsigned int)((GetTimerSystemTime() - MarqueeEpoch) /
-                          MSec2TimerBusClock(MARQUEE_STEP_MS));
-    phase = step % (MARQUEE_HOLD_STEPS + ring);
-    offset = phase < MARQUEE_HOLD_STEPS ? 0u : phase - MARQUEE_HOLD_STEPS;
+    max_offset = (unsigned int)length - cells;
+    elapsed = GetTimerSystemTime() - MarqueeEpoch;
+    step_ticks = MSec2TimerBusClock(MARQUEE_STEP_MS);
+    start_hold_ticks = MSec2TimerBusClock(MARQUEE_START_HOLD_MS);
+    end_hold_ticks = MSec2TimerBusClock(MARQUEE_END_HOLD_MS);
+    scroll_ticks = (u64)max_offset * step_ticks;
+    cycle_ticks = start_hold_ticks + scroll_ticks + end_hold_ticks;
+    phase = cycle_ticks != 0u ? elapsed % cycle_ticks : 0u;
+
+    if (phase < start_hold_ticks) {
+        offset = 0u;
+    } else if (phase < start_hold_ticks + scroll_ticks) {
+        offset = (unsigned int)((phase - start_hold_ticks) / step_ticks);
+        if (offset > max_offset)
+            offset = max_offset;
+    } else {
+        offset = max_offset;
+    }
 
     for (i = 0; i < cells; i++) {
-        unsigned int pos = (offset + i) % ring;
+        unsigned int pos = offset + i;
         unsigned char ch = pos < length ? (unsigned char)value[pos] : ' ';
         q = glyph(q, x + (float)(i * GLYPH_W), y, ch, &color);
     }
