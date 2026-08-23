@@ -57,6 +57,41 @@ void MciSessionResetShim(void)
     AllowRealMcserv = 0;
 }
 
+static void PrimeNormalCardSlot(int port)
+{
+    int attempt;
+
+    /*
+     * XMCMAN loses all card-detection state when the IOP is rebuilt after the
+     * temporary MagicGate personality. File operations issued immediately after
+     * mcInit can therefore fail with sceMcResFailDetect (-12), even though the
+     * same card passed the pre-MagicGate filesystem test. Re-run the normal
+     * GetInfo handshake here. A first -1 is the expected "changed card" result;
+     * the second pass settles the freshly initialized driver on the same card.
+     *
+     * Empty slots and genuinely failing cards are intentionally ignored here.
+     * Normal callers still perform their own validation and will report them.
+     */
+    for (attempt = 0; attempt < 2; attempt++) {
+        int card_type = MC_TYPE_NONE;
+        int free_clusters = 0;
+        int formatted = 0;
+        int result = -999;
+        int issue_rc;
+        int sync_rc;
+
+        issue_rc = __real_mcGetInfo(port, 0, &card_type, &free_clusters,
+                                    &formatted);
+        if (issue_rc < 0)
+            return;
+        sync_rc = __real_mcSync(MC_WAIT, NULL, &result);
+        if (sync_rc < 0)
+            return;
+        if (result != sceMcResChangedCard)
+            return;
+    }
+}
+
 int __wrap_SifExecModuleBuffer(void *ptr, u32 size, u32 arg_len,
                                const char *args, int *mod_res)
 {
@@ -77,6 +112,8 @@ int __wrap_SifExecModuleBuffer(void *ptr, u32 size, u32 arg_len,
 
 int __wrap_mcInit(int type)
 {
+    int rc;
+
     if (IsolatedNoMcserv && !FakeMcInitDone) {
         FakeMcInitDone = 1;
         return 0;
@@ -87,7 +124,12 @@ int __wrap_mcInit(int type)
         FakeMcPending = 0;
     }
 
-    return __real_mcInit(type);
+    rc = __real_mcInit(type);
+    if (rc >= 0 && type == MC_TYPE_XMC) {
+        PrimeNormalCardSlot(0);
+        PrimeNormalCardSlot(1);
+    }
+    return rc;
 }
 
 int __wrap_mcGetInfo(int port, int slot, int *type, int *free_clusters,
