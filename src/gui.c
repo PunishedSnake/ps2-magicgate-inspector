@@ -62,7 +62,9 @@
 #define GS_PAGE_WORDS 2048u
 #define PSMCT32_PAGE_W 64u
 #define PSMCT32_PAGE_H 32u
-#define MARQUEE_STEP_MS 120u
+/* Accessibility-first marquee: one whole glyph every 480 ms. The selected
+ * setting pauses at the beginning before it starts moving. */
+#define MARQUEE_STEP_MS 480u
 #define MARQUEE_GAP_CHARS 4u
 #define MARQUEE_HOLD_STEPS 6u
 
@@ -177,6 +179,8 @@ static MciUiLayout Layout;
 static int FilteredPresentation = 1;
 static u64 MarqueeEpoch;
 static int MarqueeNeeded;
+static int LastSettingsMarqueeRow = -1;
+static unsigned int LastSettingsMarqueeState = ~0u;
 
 static int wait_gif_idle(unsigned int timeout_ms)
 {
@@ -371,12 +375,6 @@ static qword_t *text_box(qword_t *q, float x, float y,
     if (p == NULL)
         return q;
     color_set(&color, rgb);
-    if (max_y - y <= GLYPH_H + 1.0f) {
-        size_t length = strcspn(value, "\r\n");
-        unsigned int cells = max_x > x ? (unsigned int)((max_x - x) / GLYPH_W) : 0u;
-        if (length > cells)
-            return text_marquee_box(q, x, y, max_x, value, rgb);
-    }
 
     while (*p != '\0' && cy + GLYPH_H <= max_y) {
         unsigned char ch = (unsigned char)*p;
@@ -435,6 +433,22 @@ static qword_t *text_box(qword_t *q, float x, float y,
         cx += GLYPH_W;
     }
     return q;
+}
+
+static qword_t *selected_single_line(qword_t *q, float x, float y,
+                                     float max_x, float max_y,
+                                     const char *value, UiRgb rgb)
+{
+    size_t length;
+    unsigned int cells;
+
+    if (value == NULL)
+        return q;
+    length = strcspn(value, "\r\n");
+    cells = max_x > x ? (unsigned int)((max_x - x) / GLYPH_W) : 0u;
+    if (length > cells)
+        return text_marquee_box(q, x, y, max_x, value, rgb);
+    return text_box(q, x, y, max_x, max_y, value, rgb);
 }
 
 static qword_t *text(qword_t *q, float x, float y,
@@ -1299,8 +1313,15 @@ static qword_t *settings_row(qword_t *q, int row, int selected,
     if (row == selected)
         q = rect_fill(q, 24, y0, 29, y0 + 26, Theme.accent);
     q = text_box(q, 38, y0 + 4, 310, y0 + 12, name, Theme.text);
-    q = text_box(q, 322, y0 + 4, 604, y0 + 12, value, Theme.accent);
-    q = text_box(q, 38, y0 + 15, 604, y0 + 23, hint, Theme.muted);
+    if (row == selected) {
+        q = selected_single_line(q, 322, y0 + 4, 604, y0 + 12,
+                                 value, Theme.accent);
+        q = selected_single_line(q, 38, y0 + 15, 604, y0 + 23,
+                                 hint, Theme.muted);
+    } else {
+        q = text_box(q, 322, y0 + 4, 604, y0 + 12, value, Theme.accent);
+        q = text_box(q, 38, y0 + 15, 604, y0 + 23, hint, Theme.muted);
+    }
     return q;
 }
 
@@ -1310,6 +1331,18 @@ static qword_t *render_settings(qword_t *q,
 {
     char video[96];
     char footer[96];
+    unsigned int state;
+
+    state = ((unsigned int)settings->video_mode & 0xffu) |
+            (((unsigned int)settings->fs_profile & 0xffu) << 8) |
+            ((settings->preserve_existing_cnfs ? 1u : 0u) << 16) |
+            (((unsigned int)settings->install_verify_mode & 0xffu) << 17);
+    if (selected_row != LastSettingsMarqueeRow ||
+        state != LastSettingsMarqueeState) {
+        MarqueeEpoch = GetTimerSystemTime();
+        LastSettingsMarqueeRow = selected_row;
+        LastSettingsMarqueeState = state;
+    }
 
     q = panel_title(q, 12, 55, 628, 69, "SETTINGS", Theme.accent);
     snprintf(video, sizeof(video), "%s%s",
@@ -1423,6 +1456,10 @@ void MciGuiRenderDashboard(int selected,
         selected = 0;
     if ((unsigned int)page >= MCI_GUI_PAGE_COUNT)
         page = MCI_GUI_CARD;
+    if (page != MCI_GUI_SETTINGS) {
+        LastSettingsMarqueeRow = -1;
+        LastSettingsMarqueeState = ~0u;
+    }
 
     q = frame_begin(&packet);
     q = shell(q, page, selected);
