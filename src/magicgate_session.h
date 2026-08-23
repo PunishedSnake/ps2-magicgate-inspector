@@ -8,4 +8,12 @@
  */
 void MciSessionAllowRealMcserv(int allowed);
 
+/*
+ * IOP resets do not reset these EE-side wrapper flags. Card Tools must clear
+ * any synthetic MagicGate mcInit/mcSync state before binding a real MCSERV, or
+ * the first raw mcInit can be swallowed by a stale fake session and subsequent
+ * mcReadPage calls never acquire a live libmc command.
+ */
+void MciSessionResetShim(void);
+
 #endif /* MCI_MAGICGATE_SESSION_H */
