@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Patch PS2SDK legacy MCSERV for Drebin raw-page access.
 
+Port-numbering source of truth: docs/MEMORY_CARD_PORT_DOMAINS.md and
+src/mc_port.h. The rule is not "always add 2" or "never add 2"; conversion
+belongs exactly at the layer that crosses from logical card identity to a raw
+SIO2 channel. Raw MCSERV is not that layer in Drebin.
+
 PS2SDK's legacy MCSERV receives logical EE memory-card ports 0/1. Its normal
 GetInfo path initializes the complete MCMAN device state (card type, page size,
 block size, flags and filesystem geometry) under those logical indices.
