@@ -77,7 +77,7 @@ static int WritePage(int port, u32 page, const unsigned char data[IMAGE_PAGE_DAT
 static int EraseBlock(int port, u32 block)
 {
     int rc;
-    mcEraseBlock(port, 0, (int)block, 0);
+    mcEraseBlock(port, 0, (int)block, -1);
     rc = McResult();
     return rc;
 }

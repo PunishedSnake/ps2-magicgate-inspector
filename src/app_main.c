@@ -676,9 +676,10 @@ static void RunCardImageVerifyLatest(int port, MciCardImageFormat format)
     int rc;
 
     rc = MciCardImageFindLatest(port, format, path, sizeof(path));
-    if (rc == 0)
+    if (rc == 0) {
         rc = MciCardImageVerifyFile(path, format, &report);
-    else {
+        report.port = port;
+    } else {
         MciCardImageResetReport(&report, port, format);
         report.result = MCI_CARD_IMAGE_USB_ERROR;
     }
