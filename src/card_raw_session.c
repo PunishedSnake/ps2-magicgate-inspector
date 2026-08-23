@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "card_raw_session.h"
+#include "diag_log.h"
 #include "magicgate_session.h"
 #include "progress.h"
 
@@ -89,6 +90,11 @@ int MciRawCardSessionStart(MciRawCardSessionStatus *status)
     if (status == NULL)
         return -1;
     MciRawCardSessionReset(status);
+
+    /* The caller normally detached the normal mass backend already. Repeat the
+     * transition here defensively so no progress callback can ever try to use a
+     * stale fileXio client across the IOP reset below. Detach itself is RAM-only. */
+    MciDiagLogSetIoAvailable(0);
 
     /* MagicGate's fake-MCSERV state lives on the EE and survives an IOP reset.
      * Clear it before the real raw personality so mcInit cannot be swallowed. */
@@ -181,7 +187,11 @@ out:
     if (status->filexio_init_rc < 0)
         return status->filexio_init_rc;
 
+    /* USBHDFSD enumerates asynchronously. Do not let diagnostic code touch the
+     * new mass: service until the same settling delay used by the image engine
+     * has elapsed. This is the lifecycle boundary the failed trace build lacked. */
     DelayThread(350000);
+    MciDiagLogSetIoAvailable(1);
     status->ready = 1;
     MciProgressUpdate(MCI_PROGRESS_CARD_TOOLS, 100,
                       "Raw card mode ready",
@@ -191,6 +201,9 @@ out:
 
 void MciRawCardSessionStop(MciRawCardSessionStatus *status)
 {
+    /* Detach before fileXioExit. This only changes EE logger state and queues a
+     * marker, so it is safe even if the raw operation already damaged the RPC. */
+    MciDiagLogSetIoAvailable(0);
     if (status != NULL && status->ready)
         fileXioExit();
     if (status != NULL)
