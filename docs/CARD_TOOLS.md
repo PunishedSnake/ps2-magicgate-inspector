@@ -43,6 +43,37 @@ An export is not reported as successful after the last write alone. Drebin close
 
 A small `<image>.mci.txt` sidecar records geometry, format, CRC32 and verification state without modifying the standard `.ps2` or `.vmc` file itself.
 
+## Persistent logger isolation during image I/O
+
+Real-hardware testing on 2026-08-24 established that USBHDFSD/fileXio must not be treated as safely supporting Drebin's previous logging pattern while a card-image file descriptor remains open.
+
+The diagnostic logger previously opened `DREBIN.LOG`, appended one progress line, closed it and synced `mass:` while the image exporter or verifier simultaneously kept another file on the same USB filesystem open. Two independent 64 MiB dumps proved that those logger writes could land inside the image stream itself.
+
+Observed corruption included:
+
+- literal progress/logger text appearing inside logical memory-card pages;
+- a damaged VMC superblock magic string;
+- corrupted `.ps2` spare/ECC bytes;
+- image CRC mismatches despite the raw card-read CRC remaining stable;
+- image-browser rejection caused by corruption introduced by the diagnostic path, not by the card filesystem.
+
+The two independently captured logical streams differed on only five pages. Selecting the uncorrupted copy of each differing page reconstructed the exact raw-card CRC reported during acquisition, proving that the card reads were sound and the corruption occurred in USB image-file handling while persistent logging was active.
+
+Drebin therefore treats a card-image stream as an exclusive `mass:` critical section:
+
+```text
+log operation start durably
+  -> pause DREBIN.LOG USB writes
+  -> keep trace lines in EE RAM
+  -> export / verify / browse / selective import / exact restore
+  -> close every image descriptor
+  -> resume logger USB writes
+  -> flush queued trace
+  -> log operation result durably
+```
+
+Do not reintroduce per-progress durable logging while an image file is open. If persistent mid-stream crash checkpoints become necessary, the image itself must first be closed/synced before the logger touches `mass:` and then reopened explicitly; concurrent long-lived image I/O plus logger append traffic is not an accepted design.
+
 ## Exact restore
 
 Exact restore is intentionally strict:
