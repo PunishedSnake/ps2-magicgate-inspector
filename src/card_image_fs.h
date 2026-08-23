@@ -25,6 +25,9 @@ typedef enum MciImageFsResult {
 typedef struct MciImageSaveEntry {
     char name[MCI_IMAGE_SAVE_NAME_MAX];
     u16 mode;
+    u8 created[8];
+    u8 modified[8];
+    u32 attr;
     u32 start_cluster;
     u32 entry_count;
     u32 total_bytes;
