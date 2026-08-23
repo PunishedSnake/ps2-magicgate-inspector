@@ -306,15 +306,15 @@ void CardInspectSized(int port, CardReport *r, unsigned int test_bytes)
     r->health = CARD_UNKNOWN;
     r->test_bytes = test_bytes;
 
-    CardProgress(port, 4, "Querying memory-card metadata",
-                 "Calling mcGetInfo to identify the card type, format state and free clusters.");
+    CardProgress(port, 4, "Checking the memory card",
+                 "Reading the card type, formatting state and available space.");
     r->info_rc = GetInitialInfoStable(port, &r->type,
                                       &r->free_clusters, &r->formatted);
 
     if (r->info_rc == sceMcResFailAuth) {
         r->health = CARD_AUTH_FAILURE;
         CardProgress(port, 100, "Filesystem inspection stopped",
-                     "mcGetInfo reported a card authentication failure.");
+                     "The card information check reported an authentication failure.");
         return;
     }
     if (r->info_rc <= sceMcResFailDetect) {
@@ -340,7 +340,7 @@ void CardInspectSized(int port, CardReport *r, unsigned int test_bytes)
     snprintf(detail, sizeof(detail),
              "PS2 card detected; formatted=%d, free clusters=%d. Checking the root directory before a %u KiB integrity test.",
              r->formatted, r->free_clusters, test_bytes / 1024u);
-    CardProgress(port, 15, "Checking the root directory", detail);
+    CardProgress(port, 15, "Checking the card filesystem", detail);
     memset(&DirEntry, 0, sizeof(DirEntry));
     mcGetDir(port, 0, "/*", 0, 1, &DirEntry);
     r->root_rc = McSyncResult();

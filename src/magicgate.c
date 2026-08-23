@@ -31,6 +31,7 @@
 
 #include "magicgate.h"
 #include "progress.h"
+#include "usb_search.h"
 
 #define MG_RPC_RETRIES 300
 #define MG_RPC_RETRY_USEC 1000
@@ -56,12 +57,6 @@ static SifRpcClientData_t RpcGetKc;
 static SifRpcClientData_t RpcGetIcvps2;
 static unsigned char RpcBuffer[0x1000] __attribute__((aligned(64)));
 
-static const char *RawKelfCandidates[] = {
-    "mass:/FMCB/SYSTEM/FMCB.XLF",
-    "mass0:/FMCB/SYSTEM/FMCB.XLF",
-    "mass1:/FMCB/SYSTEM/FMCB.XLF"
-};
-
 static void MgProgress(const MagicGateReport *report, int percent,
                        const char *action, const char *detail)
 {
@@ -74,6 +69,22 @@ static void MgProgress(const MagicGateReport *report, int percent,
     } else {
         MciProgressUpdate(MCI_PROGRESS_MAGICGATE, percent, action, detail);
     }
+}
+
+static void RawKelfSearchProgress(const char *path,
+                                  unsigned int directories_scanned,
+                                  void *userdata)
+{
+    MagicGateReport *report = (MagicGateReport *)userdata;
+    char detail[224];
+    int percent = 2 + (int)(directories_scanned / 8u);
+
+    if (percent > 7)
+        percent = 7;
+    snprintf(detail, sizeof(detail),
+             "Searched %u folders; checking %.150s",
+             directories_scanned, path != NULL ? path : "USB storage");
+    MgProgress(report, percent, "Searching USB storage for FMCB.XLF", detail);
 }
 
 static int McSyncResult(void)
@@ -296,34 +307,33 @@ static int DownloadGetIcvps2(unsigned char icvps2[8])
 static int FindRawKelfSource(MagicGateReport *report)
 {
     iox_stat_t stat;
-    char detail[192];
-    unsigned int i;
-    int rc = -1;
+    char path[MCI_USB_SEARCH_PATH_MAX];
+    char detail[224];
+    int rc;
 
-    for (i = 0; i < sizeof(RawKelfCandidates) / sizeof(RawKelfCandidates[0]); i++) {
-        snprintf(detail, sizeof(detail),
-                 "Looking for a raw FMCB.XLF at %s.", RawKelfCandidates[i]);
-        MgProgress(report, 2 + (int)i * 2,
-                   "Locating the raw KELF source", detail);
+    MgProgress(report, 2, "Searching USB storage for FMCB.XLF",
+               "Scanning folders recursively. FMCB.XLF can be stored anywhere on the USB drive.");
+    rc = MciUsbFindFmcbXlf(path, sizeof(path), 0,
+                           RawKelfSearchProgress, report);
+    report->source_io_rc = rc;
+    if (rc < 0)
+        return sceMcResNoEntry;
 
-        memset(&stat, 0, sizeof(stat));
-        rc = fileXioGetStat(RawKelfCandidates[i], &stat);
-        report->source_io_rc = rc;
-        if (rc >= 0 && stat.size >= sizeof(SecrKELFHeader_t) &&
-            stat.size <= MG_MAX_KELF_SIZE) {
-            report->source_port = MG_RAW_SOURCE_PORT;
-            report->source_size = (int)stat.size;
-            snprintf(report->source_path, sizeof(report->source_path),
-                     "RAW %s", RawKelfCandidates[i]);
-            snprintf(detail, sizeof(detail),
-                     "Found %s (%d bytes).", RawKelfCandidates[i],
-                     report->source_size);
-            MgProgress(report, 8, "Raw KELF source found", detail);
-            return 0;
-        }
-    }
+    memset(&stat, 0, sizeof(stat));
+    rc = fileXioGetStat(path, &stat);
+    report->source_io_rc = rc;
+    if (rc < 0)
+        return rc;
+    if (stat.size < sizeof(SecrKELFHeader_t) || stat.size > MG_MAX_KELF_SIZE)
+        return MG_INVALID_LAYOUT;
 
-    return rc < 0 ? rc : sceMcResNoEntry;
+    report->source_port = MG_RAW_SOURCE_PORT;
+    report->source_size = (int)stat.size;
+    snprintf(report->source_path, sizeof(report->source_path), "RAW %s", path);
+    snprintf(detail, sizeof(detail), "Found %.160s (%d bytes).",
+             path, report->source_size);
+    MgProgress(report, 8, "FMCB.XLF found", detail);
+    return 0;
 }
 
 static const char *RawPathFromReport(const MagicGateReport *report)

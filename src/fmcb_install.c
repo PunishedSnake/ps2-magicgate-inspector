@@ -23,6 +23,7 @@
 
 #include "fmcb_install.h"
 #include "progress.h"
+#include "usb_search.h"
 
 extern unsigned char iomanX_irx[];
 extern unsigned int size_iomanX_irx;
@@ -48,12 +49,6 @@ static const FmcbPackageEntry NormalInstallManifest[] = {
     {"SYS-CONF/SYSCONF.ICN",  "SYS-CONF/sysconf.icn",   FMCB_FILE_REQUIRED | FMCB_FILE_RESOURCE},
     {"SYS-CONF/USBD.IRX",     "SYS-CONF/USBD.IRX",      FMCB_FILE_REQUIRED},
     {"SYS-CONF/USBHDFSD.IRX", "SYS-CONF/USBHDFSD.IRX",  FMCB_FILE_REQUIRED}
-};
-
-static const char *MassRoots[] = {
-    "mass:/FMCB",
-    "mass0:/FMCB",
-    "mass1:/FMCB"
 };
 
 static int ExecEmbedded(const unsigned char *module, unsigned int size,
@@ -271,6 +266,23 @@ static void ResolveSourcePath(const FmcbPackageEntry *entry, char region,
     }
 }
 
+static void PackageSearchProgress(const char *path,
+                                  unsigned int directories_scanned,
+                                  void *userdata)
+{
+    char detail[224];
+    int percent = 8 + (int)(directories_scanned / 10u);
+
+    (void)userdata;
+    if (percent > 15)
+        percent = 15;
+    snprintf(detail, sizeof(detail),
+             "Searched %u folders; checking %.150s",
+             directories_scanned, path != NULL ? path : "USB storage");
+    MciProgressUpdate(MCI_PROGRESS_FMCB, percent,
+                      "Searching USB storage for a FreeMcBoot package", detail);
+}
+
 static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *report)
 {
     iox_stat_t stat;
@@ -376,36 +388,46 @@ static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *repor
 int FmcbProbeMassPackage(int target_port, const FmcbMassBackendStatus *backend,
                          FmcbPackageReport *report)
 {
-    iox_stat_t stat;
-    char detail[192];
-    unsigned int i;
+    char xlf_path[MCI_USB_SEARCH_PATH_MAX];
+    char package_root[FMCB_SOURCE_ROOT_MAX];
+    char detail[256];
     int rc;
 
     FmcbResetPackageReport(report, target_port);
-    MciProgressUpdate(MCI_PROGRESS_FMCB, 3, "Checking the USB package backend",
-                      "Verifying that fileXio and mass: are available before inspecting the install package.");
+    MciProgressUpdate(MCI_PROGRESS_FMCB, 3, "Checking USB storage",
+                      "Making sure the USB filesystem is available before looking for FreeMcBoot files.");
     if (backend == NULL || !backend->available) {
         report->status = FMCB_PACKAGE_SOURCE_UNAVAILABLE;
         report->source_probe_rc = -1;
-        MciProgressUpdate(MCI_PROGRESS_FMCB, 100, "FMCB package source unavailable",
-                          "The USB mass-storage backend is not active; no package files could be inspected.");
+        MciProgressUpdate(MCI_PROGRESS_FMCB, 100, "USB storage is not available",
+                          "Connect a readable USB drive containing the FreeMcBoot package, then run preflight again.");
         return -1;
     }
 
-    for (i = 0; i < sizeof(MassRoots) / sizeof(MassRoots[0]); i++) {
-        int percent = 8 + (int)i * 4;
-        snprintf(detail, sizeof(detail), "Looking for the package root at %s.", MassRoots[i]);
-        MciProgressUpdate(MCI_PROGRESS_FMCB, percent, "Locating the FMCB package", detail);
-        memset(&stat, 0, sizeof(stat));
-        rc = fileXioGetStat(MassRoots[i], &stat);
+    MciProgressUpdate(MCI_PROGRESS_FMCB, 7,
+                      "Searching USB storage for a FreeMcBoot package",
+                      "Looking recursively for SYSTEM/FMCB.XLF. The package folder may be placed anywhere on the USB drive.");
+    rc = MciUsbFindFmcbXlf(xlf_path, sizeof(xlf_path), 1,
+                           PackageSearchProgress, NULL);
+    report->source_probe_rc = rc;
+    if (rc == 0) {
+        rc = MciUsbPackageRootFromXlf(xlf_path, package_root,
+                                      sizeof(package_root));
+        if (rc == 0) {
+            snprintf(detail, sizeof(detail),
+                     "Found FreeMcBoot at %.170s. Checking the rest of the package now.",
+                     package_root);
+            MciProgressUpdate(MCI_PROGRESS_FMCB, 16,
+                              "FreeMcBoot package found", detail);
+            report->source_probe_rc = 0;
+            return ProbeRoot(package_root, target_port, report);
+        }
         report->source_probe_rc = rc;
-        if (rc >= 0)
-            return ProbeRoot(MassRoots[i], target_port, report);
     }
 
     report->status = FMCB_PACKAGE_NOT_FOUND;
-    MciProgressUpdate(MCI_PROGRESS_FMCB, 100, "FMCB package not found",
-                      "Checked mass:/FMCB, mass0:/FMCB and mass1:/FMCB; no readable package root was found.");
+    MciProgressUpdate(MCI_PROGRESS_FMCB, 100, "FreeMcBoot package not found",
+                      "No SYSTEM/FMCB.XLF was found within the bounded recursive USB scan. A standalone FMCB.XLF can still be used for the MagicGate test.");
     return -1;
 }
 

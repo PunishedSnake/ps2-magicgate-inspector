@@ -1156,24 +1156,39 @@ static qword_t *render_card(qword_t *q, int selected,
     char line[128];
 
     q = slot_summary(q, selected, cards, magicgate, packages);
-    q = panel_title(q, 158, 55, 628, 88, "FILESYSTEM HEALTH",
+    q = panel_title(q, 158, 55, 628, 88, "CARD & FILESYSTEM",
                     card_health_color(r->health));
     q = text_box(q, 170, 73, 615, 81, CardHealthText(r->health),
                  card_health_color(r->health));
 
     q = rect_fill(q, 158, 93, 628, 169, Theme.panel);
     q = rect_outline(q, 158, 93, 628, 169, Theme.border);
-    snprintf(line, sizeof(line), "%d (%s)", r->info_rc, CardResultText(r->info_rc));
-    q = value_line(q, 172, 101, "mcGetInfo", line, Theme.text);
-    snprintf(line, sizeof(line), "%d (%s)", r->type, CardTypeText(r->type));
+    snprintf(line, sizeof(line), "%s",
+             r->info_rc == 0 ? "Ready" : CardResultText(r->info_rc));
+    q = value_line(q, 172, 101, "Card status", line,
+                   r->info_rc == 0 ? Theme.success : Theme.text);
+    snprintf(line, sizeof(line), "%s", CardTypeText(r->type));
     q = value_line(q, 172, 113, "Card type", line, Theme.text);
-    snprintf(line, sizeof(line), "%d    free=%d", r->formatted, r->free_clusters);
-    q = value_line(q, 172, 125, "Formatted", line, Theme.text);
-    snprintf(line, sizeof(line), "%d (%s)", r->root_rc, CardResultText(r->root_rc));
-    q = value_line(q, 172, 137, "Root dir", line, Theme.text);
-    snprintf(line, sizeof(line), "%s  rc=%d cleanup=%d",
-             CardRwStageText(r->rw_stage), r->rw_rc, r->cleanup_rc);
-    q = value_line(q, 172, 149, "R/W verify", line,
+    if (r->formatted)
+        snprintf(line, sizeof(line), "Formatted, %d free clusters", r->free_clusters);
+    else
+        snprintf(line, sizeof(line), "Not formatted");
+    q = value_line(q, 172, 125, "Filesystem", line,
+                   r->formatted ? Theme.success : Theme.warning);
+    snprintf(line, sizeof(line), "%s",
+             r->root_rc == 0 ? "Readable" : CardResultText(r->root_rc));
+    q = value_line(q, 172, 137, "Root access", line,
+                   r->root_rc == 0 ? Theme.success : Theme.text);
+    if (r->rw_stage == RW_NOT_RUN)
+        snprintf(line, sizeof(line), "Not run");
+    else if (r->rw_rc == 0 && r->cleanup_rc == 0)
+        snprintf(line, sizeof(line), "Passed; temporary data removed");
+    else if (r->rw_rc == 0)
+        snprintf(line, sizeof(line), "Passed; cleanup warning");
+    else
+        snprintf(line, sizeof(line), "%s - %s",
+                 CardRwStageText(r->rw_stage), CardResultText(r->rw_rc));
+    q = value_line(q, 172, 149, "Integrity test", line,
                    r->rw_rc == 0 ? Theme.success : Theme.text);
 
     if (confirm_format) {
@@ -1189,8 +1204,8 @@ static qword_t *render_card(qword_t *q, int selected,
         else
             q = text(q, 172, 181, "Format locked for this card state", Theme.muted);
         if (last_format_rc != -999) {
-            snprintf(line, sizeof(line), "Last format rc: %d (%s)",
-                     last_format_rc, CardResultText(last_format_rc));
+            snprintf(line, sizeof(line), "Last format result: %s",
+                     CardResultText(last_format_rc));
             q = text_box(q, 172, 191, 615, 199, line,
                          last_format_rc == 0 ? Theme.success : Theme.danger);
         } else {
