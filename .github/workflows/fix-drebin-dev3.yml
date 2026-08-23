@@ -1,0 +1,44 @@
+name: Apply Drebin dev3 correctness fixes
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/0.4.0-dev3-drebin
+    paths:
+      - 'tools/fix_drebin_dev3.py'
+      - '.github/workflows/fix-drebin-dev3.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Drebin branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/0.4.0-dev3-drebin
+          fetch-depth: 0
+
+      - name: Apply correctness fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/fix_drebin_dev3.py
+          git diff --check
+
+      - name: Commit fixed sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'Drebin dev3 fixes are already applied.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/card_image.c src/app_main.c
+          git commit -m 'fix(drebin): harden raw restore and image verify UI'
+          git push origin HEAD:feat/0.4.0-dev3-drebin

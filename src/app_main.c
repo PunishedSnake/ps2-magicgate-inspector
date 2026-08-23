@@ -29,6 +29,8 @@
 #include <string.h>
 
 #include "card.h"
+#include "card_image.h"
+#include "card_raw_session.h"
 #include "magicgate.h"
 #include "fmcb_install.h"
 #include "fmcb_transaction.h"
@@ -60,6 +62,7 @@ static FmcbPackageReport FmcbReports[SLOT_COUNT];
 static FmcbInstallReport InstallReports[SLOT_COUNT];
 static FmcbRecoveryStatus RecoveryStatus;
 static MciSettings Settings;
+static MciRawCardSessionStatus RawCardStatus;
 static int PadActive;
 
 static int LoadRomModule(const char *path)
@@ -501,10 +504,13 @@ static int RunVerifiedInstaller(int target_port)
                             "CROSS or CIRCLE returns to the dashboard.", tone);
     } else {
         char result[420];
+        const char *failed_target =
+            (report->current_file >= 0 && report->current_file < FMCB_TX_MAX_FILES)
+                ? report->files[report->current_file].destination : "n/a";
         snprintf(result, sizeof(result),
-                 "Install failed at %s: %s. Files committed before failure: %d/%d. space rc=%d, recovery rc=%d, rollback rc=%d. If recovery remains present, do not start another install; restore the recorded transaction first.",
+                 "Install failed at %s: %s. Target: %s. Files committed before failure: %d/%d. space rc=%d, recovery rc=%d, rollback rc=%d. If recovery remains present, do not start another install; restore the recorded transaction first.",
                  FmcbInstallStageText(report->stage),
-                 FmcbInstallResultText(report->result),
+                 FmcbInstallResultText(report->result), failed_target,
                  report->files_committed, report->files_total,
                  report->space_rc, report->recovery_rc,
                  report->rollback_rc);
@@ -584,6 +590,221 @@ static u32 ReadPadPressed(u32 *held)
     return pressed;
 }
 
+static void WaitForModalDismiss(void)
+{
+    u32 held;
+    u32 pressed;
+    for (;;) {
+        pressed = ReadPadPressed(&held);
+        if (pressed & (PAD_CROSS | PAD_CIRCLE))
+            return;
+        DelayThread(16000);
+    }
+}
+
+static int RestoreAfterRawCardMode(void)
+{
+    int rc = RestoreNormalEnvironment();
+    if (rc < 0) {
+        MciGuiRenderFatal("Normal stack restore failed",
+                          "Card Tools ended, but the Sony ROM X card environment could not be reconstructed safely.", rc);
+        SleepThread();
+    }
+    return rc;
+}
+
+static int ConfirmCardToolsDestructive(const char *title, const char *body)
+{
+    u32 held;
+    u32 pressed;
+
+    MciGuiRenderMessage(title, body,
+                        "Hold L1 + R1 and press SQUARE to continue. CIRCLE cancels.",
+                        MCI_GUI_TONE_DANGER);
+    for (;;) {
+        pressed = ReadPadPressed(&held);
+        if (pressed & PAD_CIRCLE)
+            return 0;
+        if ((pressed & PAD_SQUARE) && (held & PAD_L1) && (held & PAD_R1))
+            return 1;
+        DelayThread(16000);
+    }
+}
+
+static void ShowCardImageResult(const char *title,
+                                const MciCardImageReport *report,
+                                int rc, int destructive)
+{
+    char message[560];
+    snprintf(message, sizeof(message),
+             "%s on mc%d\n\nResult: %s (rc=%d)\nPath: %s\nPages: %u/%u\nCRC32: %08X\nVerified: %s%s",
+             MciCardImageFormatName(report->format), report->port,
+             MciCardImageResultText(report->result), rc,
+             report->path[0] != '\0' ? report->path : "n/a",
+             report->pages_done, report->pages_total,
+             report->logical_crc32, report->verified ? "YES" : "NO",
+             destructive ? "\n\nThe card was modified only after the source/safety image passed verification." : "");
+    MciGuiRenderMessage(title, message,
+                        "CROSS or CIRCLE returns to Card Tools.",
+                        rc == 0 ? MCI_GUI_TONE_SUCCESS : MCI_GUI_TONE_DANGER);
+    WaitForModalDismiss();
+}
+
+static void RunCardImageExportAction(int port, MciCardImageFormat format)
+{
+    MciCardImageReport report;
+    int rc;
+
+    MciGuiRenderMessage("Card image export",
+                        "Switching to the page-level PS2SDK card personality. The image will not be accepted until the completed USB file is read back and verified.",
+                        NULL, MCI_GUI_TONE_INFO);
+    ShutdownNormalClients();
+    rc = MciRawCardSessionStart(&RawCardStatus);
+    if (rc == 0)
+        rc = MciCardImageExport(port, format, &report);
+    else
+        MciCardImageResetReport(&report, port, format);
+    MciRawCardSessionStop(&RawCardStatus);
+    (void)RestoreAfterRawCardMode();
+    ShowCardImageResult("Card image export", &report, rc, 0);
+}
+
+static void RunCardImageVerifyLatest(int port, MciCardImageFormat format)
+{
+    MciCardImageReport report;
+    char path[MCI_CARD_IMAGE_PATH_MAX];
+    int rc;
+
+    rc = MciCardImageFindLatest(port, format, path, sizeof(path));
+    if (rc == 0) {
+        rc = MciCardImageVerifyFile(path, format, &report);
+        report.port = port;
+    } else {
+        MciCardImageResetReport(&report, port, format);
+        report.result = MCI_CARD_IMAGE_USB_ERROR;
+    }
+    ShowCardImageResult("Verify latest card image", &report, rc, 0);
+}
+
+static void RunCardImageRestoreLatest(int port, MciCardImageFormat format)
+{
+    MciCardImageReport report;
+    char path[MCI_CARD_IMAGE_PATH_MAX];
+    char warning[480];
+    int rc;
+
+    rc = MciCardImageFindLatest(port, format, path, sizeof(path));
+    if (rc < 0) {
+        MciCardImageResetReport(&report, port, format);
+        report.result = MCI_CARD_IMAGE_USB_ERROR;
+        ShowCardImageResult("Exact restore unavailable", &report, rc, 1);
+        return;
+    }
+    snprintf(warning, sizeof(warning),
+             "Exact-restore %s to mc%d?\n\n%s\n\nThe complete destination card will be erased block-by-block. Image and destination page counts must match, and the restored card is read back in full before PASS.",
+             MciCardImageFormatName(format), port, path);
+    if (!ConfirmCardToolsDestructive("EXACT CARD RESTORE", warning))
+        return;
+
+    ShutdownNormalClients();
+    rc = MciRawCardSessionStart(&RawCardStatus);
+    if (rc == 0)
+        rc = MciCardImageRestoreExact(port, path, format, &report);
+    else
+        MciCardImageResetReport(&report, port, format);
+    MciRawCardSessionStop(&RawCardStatus);
+    (void)RestoreAfterRawCardMode();
+    if (rc == 0)
+        ResetSlotReports(port);
+    ShowCardImageResult("Exact card restore", &report, rc, 1);
+}
+
+static void RunForceFormatWithBackup(int port)
+{
+    MciCardImageReport report;
+    char warning[520];
+    int rc;
+
+    snprintf(warning, sizeof(warning),
+             "Force-format mc%d regardless of its current filesystem state?\n\nBefore mcFormat is allowed, Drebin will create a complete PCSX2 .ps2 recovery image on USB, reopen it, validate every ECC record and compare its CRC with the physical card capture. If that backup fails, formatting is blocked.",
+             port);
+    if (!ConfirmCardToolsDestructive("FORCE FORMAT + VERIFIED BACKUP", warning))
+        return;
+
+    ShutdownNormalClients();
+    rc = MciRawCardSessionStart(&RawCardStatus);
+    if (rc == 0)
+        rc = MciCardForceFormatWithBackup(port, &report);
+    else
+        MciCardImageResetReport(&report, port, MCI_CARD_IMAGE_PS2);
+    MciRawCardSessionStop(&RawCardStatus);
+    (void)RestoreAfterRawCardMode();
+    if (rc == 0)
+        ResetSlotReports(port);
+    ShowCardImageResult("Force format", &report, rc, 1);
+}
+
+static void RunCardToolsMenu(int port)
+{
+    enum { CARD_TOOLS_ROWS = 8 };
+    int row = 0;
+    u32 held;
+    u32 pressed;
+    char body[900];
+
+    for (;;) {
+        snprintf(body, sizeof(body),
+                 "Selected card: mc%d\n\n"
+                 "%c Create verified PCSX2 .ps2 image\n"
+                 "%c Create verified OPL .vmc image\n"
+                 "%c Verify latest .ps2 image\n"
+                 "%c Verify latest .vmc image\n"
+                 "%c Exact restore latest .ps2 image\n"
+                 "%c Exact restore latest .vmc image\n"
+                 "%c Force format + verified .ps2 backup\n"
+                 "%c Return\n\n"
+                 "Exports and restores use page-level PS2SDK MCMAN/MCSERV. Exact restore rejects different card geometry; smaller-to-larger migration remains a separate filesystem-aware operation.",
+                 port,
+                 row == 0 ? '>' : ' ', row == 1 ? '>' : ' ',
+                 row == 2 ? '>' : ' ', row == 3 ? '>' : ' ',
+                 row == 4 ? '>' : ' ', row == 5 ? '>' : ' ',
+                 row == 6 ? '>' : ' ', row == 7 ? '>' : ' ');
+        MciGuiRenderMessage("CARD TOOLS - Drebin", body,
+                            "UP/DOWN selects. CROSS runs. CIRCLE returns.",
+                            row >= 4 && row <= 6 ? MCI_GUI_TONE_WARNING : MCI_GUI_TONE_INFO);
+
+        for (;;) {
+            pressed = ReadPadPressed(&held);
+            if (pressed != 0u)
+                break;
+            DelayThread(16000);
+        }
+        if (pressed & PAD_CIRCLE)
+            return;
+        if (pressed & PAD_UP) {
+            row = row == 0 ? CARD_TOOLS_ROWS - 1 : row - 1;
+            continue;
+        }
+        if (pressed & PAD_DOWN) {
+            row = (row + 1) % CARD_TOOLS_ROWS;
+            continue;
+        }
+        if (!(pressed & PAD_CROSS))
+            continue;
+
+        switch (row) {
+            case 0: RunCardImageExportAction(port, MCI_CARD_IMAGE_PS2); break;
+            case 1: RunCardImageExportAction(port, MCI_CARD_IMAGE_VMC); break;
+            case 2: RunCardImageVerifyLatest(port, MCI_CARD_IMAGE_PS2); break;
+            case 3: RunCardImageVerifyLatest(port, MCI_CARD_IMAGE_VMC); break;
+            case 4: RunCardImageRestoreLatest(port, MCI_CARD_IMAGE_PS2); break;
+            case 5: RunCardImageRestoreLatest(port, MCI_CARD_IMAGE_VMC); break;
+            case 6: RunForceFormatWithBackup(port); break;
+            default: return;
+        }
+    }
+}
+
 static void RenderDashboard(int selected, MciGuiPage page,
                             int settings_row, int last_video_rc,
                             int confirm_format, int last_format_rc)
@@ -643,7 +864,7 @@ int main(int argc, char *argv[])
     init_scr();
     if (MciGuiInit() < 0) {
         scr_clear();
-        scr_printf("PS2 Memory Card Inspector 0.4.0-dev2\n\n");
+        scr_printf("PS2 Memory Card Inspector 0.4.0-dev3 Drebin\n\n");
         scr_printf("GS frontend initialization failed.\n");
         SleepThread();
     }
@@ -841,10 +1062,10 @@ int main(int argc, char *argv[])
                 }
             }
 
-            if ((pressed & PAD_TRIANGLE) &&
-                page != MCI_GUI_SETTINGS && Reports[selected].format_allowed) {
-                confirm_format = 1;
-                page = MCI_GUI_CARD;
+            if ((pressed & PAD_TRIANGLE) && page != MCI_GUI_SETTINGS) {
+                RunCardToolsMenu(selected);
+                confirm_format = 0;
+                last_format_rc = -999;
                 dirty = 1;
             }
         }
