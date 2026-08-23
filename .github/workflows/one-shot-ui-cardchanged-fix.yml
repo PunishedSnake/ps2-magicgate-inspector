@@ -1,0 +1,177 @@
+name: Apply banner and mcGetInfo stabilization
+
+on:
+  pull_request:
+    branches: [ feat/0.4.0 ]
+    paths:
+      - 'tools/APPLY_UI_CARDCHANGED_FIX'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout 0.4 branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/0.4.0
+          fetch-depth: 0
+
+      - name: Apply UI banner and first mcGetInfo fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # Core renderer: use one identity banner everywhere.
+          p = Path('src/gui_core.inc')
+          s = p.read_text()
+
+          old = '''static int LastSettingsMarqueeRow = -1;
+static unsigned int LastSettingsMarqueeState = ~0u;
+'''
+          new = '''static int LastSettingsMarqueeRow = -1;
+static unsigned int LastSettingsMarqueeState = ~0u;
+static int HeaderSelectedPort = 0;
+'''
+          if s.count(old) != 1:
+              raise SystemExit('gui globals anchor mismatch')
+          s = s.replace(old, new, 1)
+
+          old = '''static qword_t *shell(qword_t *q, MciGuiPage page, int selected)
+{
+    static const char *const tabs[MCI_GUI_PAGE_COUNT] = {
+        "CARD", "MAGICGATE", "FMCB PREFLIGHT", "SETTINGS"
+    };
+    static const float tab_x[MCI_GUI_PAGE_COUNT + 1] = {
+        14.0f, 126.0f, 270.0f, 472.0f, 626.0f
+    };
+    char version[80];
+    unsigned int i;
+
+    q = rect_fill(q, 0, 0, UI_W, UI_H, Theme.background);
+    q = rect_fill(q, 0, 0, UI_W, 4, Theme.accent);
+    q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
+    q = rect_outline(q, 12, 8, 628, 31, Theme.border);
+    q = text(q, 22, 14, "PS2 Memory Card Inspector", Theme.text);
+    snprintf(version, sizeof(version), "v0.4.0-dev1  mc%d", selected);
+    q = text_box(q, 462, 14, 618, 23, version, Theme.accent);
+'''
+          new = '''static qword_t *top_banner(qword_t *q, int selected)
+{
+    char version[80];
+
+    q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
+    q = rect_outline(q, 12, 8, 628, 31, Theme.border);
+    q = text(q, 22, 14, "PS2 Memory Card Inspector", Theme.text);
+    snprintf(version, sizeof(version), "v0.4.0-dev1  mc%d", selected);
+    q = text_box(q, 462, 14, 618, 23, version, Theme.accent);
+    return q;
+}
+
+static qword_t *shell(qword_t *q, MciGuiPage page, int selected)
+{
+    static const char *const tabs[MCI_GUI_PAGE_COUNT] = {
+        "CARD", "MAGICGATE", "FMCB PREFLIGHT", "SETTINGS"
+    };
+    static const float tab_x[MCI_GUI_PAGE_COUNT + 1] = {
+        14.0f, 126.0f, 270.0f, 472.0f, 626.0f
+    };
+    unsigned int i;
+
+    q = rect_fill(q, 0, 0, UI_W, UI_H, Theme.background);
+    q = rect_fill(q, 0, 0, UI_W, 4, Theme.accent);
+    q = top_banner(q, selected);
+'''
+          if s.count(old) != 1:
+              raise SystemExit('shell banner anchor mismatch')
+          s = s.replace(old, new, 1)
+
+          old = '''    q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
+    q = rect_outline(q, 12, 8, 628, 31, Theme.border);
+    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.4.0-dev1", Theme.text);
+'''
+          if s.count(old) != 2:
+              raise SystemExit(f'message/progress banner anchor mismatch: {s.count(old)}')
+          s = s.replace(old, '    q = top_banner(q, HeaderSelectedPort);\n', 2)
+          p.write_text(s)
+
+          # Active composition wrapper owns the real dashboard entry point.
+          p = Path('src/gui.c')
+          s = p.read_text()
+          old = '''    if (selected < 0 || selected > 1)
+        selected = 0;
+    if ((unsigned int)page >= MCI_GUI_PAGE_COUNT)
+        page = MCI_GUI_CARD;
+
+    if (page != MCI_GUI_SETTINGS) {
+'''
+          new = '''    if (selected < 0 || selected > 1)
+        selected = 0;
+    HeaderSelectedPort = selected;
+    if ((unsigned int)page >= MCI_GUI_PAGE_COUNT)
+        page = MCI_GUI_CARD;
+
+    if (page != MCI_GUI_SETTINGS) {
+'''
+          if s.count(old) != 1:
+              raise SystemExit('active dashboard selection anchor mismatch')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          # Filesystem scan: the first mcGetInfo after card/driver generation can
+          # legitimately report ChangedCard while also returning valid metadata.
+          # Consume that edge notification once, then report the stable query.
+          p = Path('src/card.c')
+          s = p.read_text()
+          old = '''static unsigned int NormalizeTestBytes(unsigned int bytes)
+{'''
+          new = '''static int GetInitialInfoStable(int port, int *type,
+                                int *free_clusters, int *formatted)
+{
+    int rc;
+    int attempts = 0;
+
+    do {
+        mcGetInfo(port, 0, type, free_clusters, formatted);
+        rc = McSyncResult();
+        attempts++;
+    } while (rc == sceMcResChangedCard && attempts < 3);
+
+    return rc;
+}
+
+static unsigned int NormalizeTestBytes(unsigned int bytes)
+{'''
+          if s.count(old) != 1:
+              raise SystemExit('card helper anchor mismatch')
+          s = s.replace(old, new, 1)
+
+          old = '''    mcGetInfo(port, 0, &r->type, &r->free_clusters, &r->formatted);
+    r->info_rc = McSyncResult();
+'''
+          new = '''    r->info_rc = GetInitialInfoStable(port, &r->type,
+                                      &r->free_clusters, &r->formatted);
+'''
+          if s.count(old) != 1:
+              raise SystemExit('initial mcGetInfo anchor mismatch')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+
+          git diff --check
+          git diff -- src/gui_core.inc src/gui.c src/card.c
+
+      - name: Commit to feat/0.4.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/gui_core.inc src/gui.c src/card.c
+          git commit -m 'fix(ui): keep banner identity and stabilize first card query'
+          git push origin HEAD:feat/0.4.0
