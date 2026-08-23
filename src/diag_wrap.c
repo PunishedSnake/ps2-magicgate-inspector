@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "card_image.h"
+#include "card_image_fs.h"
 #include "card_raw_session.h"
 #include "diag_log.h"
 #include "fmcb_transaction.h"
@@ -22,6 +23,10 @@ int __real_MciCardImageRestoreExact(int port, const char *path,
                                     MciCardImageFormat format,
                                     MciCardImageReport *report);
 int __real_MciCardForceFormatWithBackup(int port, MciCardImageReport *report);
+int __real_MciImageFsScan(const char *path, MciCardImageFormat format,
+                          MciImageSaveList *list);
+int __real_MciImageFsImportSelected(int target_port, MciImageSaveList *list,
+                                    MciImageImportReport *report);
 int __real_MciRawCardSessionStart(MciRawCardSessionStatus *status);
 void __real_MciRawCardSessionStop(MciRawCardSessionStatus *status);
 int __real_FmcbInitMassBackend(FmcbMassBackendStatus *status);
@@ -110,8 +115,6 @@ int __wrap_FmcbInitMassBackend(FmcbMassBackendStatus *status)
 
 void __wrap_FmcbShutdownMassBackend(FmcbMassBackendStatus *status)
 {
-    /* Detach is strictly RAM-only, so no logger RPC can survive fileXioExit or
-     * the IOP personality switch that usually follows this function. */
     MciDiagLogSetIoAvailable(0);
     __real_FmcbShutdownMassBackend(status);
 }
@@ -152,11 +155,6 @@ void __wrap_MciRawCardSessionStop(MciRawCardSessionStatus *status)
                      status != NULL ? status->ready : -1);
 }
 
-/* Unlike Drebin's own geometry helper, libmc is in a separate object/library,
- * so --wrap=mcReadPage observes the real issue-call boundary even when
- * MciCardImageExport calls its geometry helper from the same card_image.o.
- * Only the first few page issues are traced; logging all 16k+ pages would turn
- * the diagnostic path into the workload. */
 int __wrap_mcReadPage(int port, int slot, int page, void *buffer)
 {
     int rc;
@@ -196,6 +194,15 @@ int __wrap_MciCardImageProbeGeometry(int port, MciCardGeometry *geometry)
     return rc;
 }
 
+/*
+ * USBHDFSD/fileXio hardware finding (2026-08-24): repeatedly opening, appending
+ * and closing DREBIN.LOG while a long-lived image fd was open corrupted the
+ * image stream itself. Real dumps contained literal diagnostic text inside
+ * logical card pages and, for .ps2, inside spare/ECC bytes. Therefore the
+ * persistent logger must never perform mass: writes while an image stream is
+ * open. Trace remains in the EE ring and is flushed only after the operation
+ * closes every image descriptor.
+ */
 int __wrap_MciCardImageExport(int port, MciCardImageFormat format,
                               MciCardImageReport *report)
 {
@@ -203,7 +210,9 @@ int __wrap_MciCardImageExport(int port, MciCardImageFormat format,
 
     MciDiagLogPrintf("IMAGE", "export begin port=mc%d format=%s",
                      port, MciCardImageFormatName(format));
+    MciDiagLogSetMassWritePaused(1);
     rc = __real_MciCardImageExport(port, format, report);
+    MciDiagLogSetMassWritePaused(0);
     LogImageReport("export", rc, report);
     return rc;
 }
@@ -214,14 +223,13 @@ int __wrap_MciCardImageVerifyFile(const char *path, MciCardImageFormat format,
     int rc;
     int sync_rc;
 
-    /* Export closes the image immediately before calling verify. Publish that
-     * one file's FAT/data state here instead of wrapping every fileXioClose in
-     * the entire application. */
     sync_rc = SyncPathDevice(path);
     MciDiagLogPrintf("IMAGE", "verify begin format=%s path=%s preverify_sync=%d",
                      MciCardImageFormatName(format), path != NULL ? path : "NULL",
                      sync_rc);
+    MciDiagLogSetMassWritePaused(1);
     rc = __real_MciCardImageVerifyFile(path, format, report);
+    MciDiagLogSetMassWritePaused(0);
     LogImageReport("verify", rc, report);
     return rc;
 }
@@ -235,7 +243,9 @@ int __wrap_MciCardImageRestoreExact(int port, const char *path,
     MciDiagLogPrintf("IMAGE", "exact restore begin port=mc%d format=%s path=%s",
                      port, MciCardImageFormatName(format),
                      path != NULL ? path : "NULL");
+    MciDiagLogSetMassWritePaused(1);
     rc = __real_MciCardImageRestoreExact(port, path, format, report);
+    MciDiagLogSetMassWritePaused(0);
     LogImageReport("exact restore", rc, report);
     return rc;
 }
@@ -245,8 +255,49 @@ int __wrap_MciCardForceFormatWithBackup(int port, MciCardImageReport *report)
     int rc;
 
     MciDiagLogPrintf("IMAGE", "force format begin port=mc%d", port);
+    MciDiagLogSetMassWritePaused(1);
     rc = __real_MciCardForceFormatWithBackup(port, report);
+    MciDiagLogSetMassWritePaused(0);
     LogImageReport("force format", rc, report);
+    return rc;
+}
+
+int __wrap_MciImageFsScan(const char *path, MciCardImageFormat format,
+                          MciImageSaveList *list)
+{
+    int rc;
+
+    MciDiagLogPrintf("IMAGE-FS", "scan begin format=%s path=%s",
+                     MciCardImageFormatName(format), path != NULL ? path : "NULL");
+    MciDiagLogSetMassWritePaused(1);
+    rc = __real_MciImageFsScan(path, format, list);
+    MciDiagLogSetMassWritePaused(0);
+    MciDiagLogPrintf("IMAGE-FS", "scan end rc=%d result=%s saves=%d",
+                     rc, list != NULL ? MciImageFsResultText(list->result) : "NULL",
+                     list != NULL ? list->save_count : -1);
+    return rc;
+}
+
+int __wrap_MciImageFsImportSelected(int target_port, MciImageSaveList *list,
+                                    MciImageImportReport *report)
+{
+    int rc;
+
+    MciDiagLogPrintf("IMAGE-FS", "import begin target=mc%d path=%s",
+                     target_port,
+                     list != NULL && list->path[0] != '\0' ? list->path : "NULL");
+    MciDiagLogSetMassWritePaused(1);
+    rc = __real_MciImageFsImportSelected(target_port, list, report);
+    MciDiagLogSetMassWritePaused(0);
+    MciDiagLogPrintf("IMAGE-FS",
+                     "import end rc=%d result=%s selected=%d restored=%d files=%u dirs=%u bytes=%u rollback=%d",
+                     rc, report != NULL ? MciImageFsResultText(report->result) : "NULL",
+                     report != NULL ? report->selected_saves : -1,
+                     report != NULL ? report->restored_saves : -1,
+                     report != NULL ? report->files_written : 0u,
+                     report != NULL ? report->directories_written : 0u,
+                     report != NULL ? report->bytes_written : 0u,
+                     report != NULL ? report->rollback_rc : -999);
     return rc;
 }
 
@@ -261,9 +312,6 @@ int __wrap_FmcbInstallNormalTransactional(int target_port,
     int rc;
     int i;
 
-    /* Revalidation has already exercised mass: successfully by the time the
-     * transaction starts. This is a safe, user-triggered attach point even if
-     * no earlier MagicGate/raw restore attached the persistent trace. */
     MciDiagLogSetIoAvailable(1);
     MciDiagLogPrintf("FMCB",
                      "transaction begin target=mc%d package=%s root=%s entries=%d verify_mode=%d preserve_cnfs=%d recovery_present=%d recovery_valid=%d",
