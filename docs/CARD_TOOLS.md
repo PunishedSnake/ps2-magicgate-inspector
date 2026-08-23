@@ -2,6 +2,21 @@
 
 0.4.0 "Drebin" moves destructive and image-management operations out of the ordinary diagnostic path. `Triangle` opens Card Tools for the selected slot; a normal filesystem test never formats or raw-writes a card.
 
+## Port-numbering contract
+
+Card Tools uses **logical libmc/MCMAN ports only**:
+
+```text
+mc0 = 0
+mc1 = 1
+```
+
+Do not convert Card Tools page reads/writes/erases to physical SIO2 channels `2/3`. The MCMAN used by Drebin owns that conversion internally when it builds the actual SIO2 transfer. Pre-shifting the port changes which MCMAN device-state entry is consulted and previously broke raw imaging on real hardware.
+
+The superficially similar `+2` used by MagicGate/FMCB security binding is correct for a different reason: SECRMAN/CardAuth directly consumes physical SIO2 memory-card channels. That conversion belongs only at the SECR boundary.
+
+The complete rule, failure history and code-review checklist are documented in [Memory-card port domains](MEMORY_CARD_PORT_DOMAINS.md). Shared source-level vocabulary and conversion helpers live in `src/mc_port.h`.
+
 ## Image formats
 
 Drebin supports two interoperable raw image layouts.
