@@ -1,0 +1,156 @@
+/* SPDX-License-Identifier: MIT */
+/* High-value operation wrappers for the persistent Drebin trace. */
+
+#include <stdio.h>
+
+#include "card_image.h"
+#include "diag_log.h"
+#include "fmcb_transaction.h"
+
+int __real_MciCardImageExport(int port, MciCardImageFormat format,
+                              MciCardImageReport *report);
+int __real_MciCardImageVerifyFile(const char *path, MciCardImageFormat format,
+                                  MciCardImageReport *report);
+int __real_MciCardImageRestoreExact(int port, const char *path,
+                                    MciCardImageFormat format,
+                                    MciCardImageReport *report);
+int __real_MciCardForceFormatWithBackup(int port, MciCardImageReport *report);
+int __real_FmcbInstallNormalTransactional(int target_port,
+                                          const FmcbPackageReport *package,
+                                          const FmcbInstallOptions *options,
+                                          FmcbBindKelfCallback bind_kelf,
+                                          void *bind_userdata,
+                                          FmcbRecoveryStatus *recovery,
+                                          FmcbInstallReport *report);
+
+static void LogImageReport(const char *operation, int rc,
+                           const MciCardImageReport *report)
+{
+    if (report == NULL) {
+        MciDiagLogPrintf("IMAGE", "%s end rc=%d report=NULL", operation, rc);
+        return;
+    }
+
+    MciDiagLogPrintf("IMAGE",
+                     "%s end rc=%d result=%s port=mc%d format=%s path=%s pages=%u/%u bytes=%llu crc=%08X verified=%d verify_rc=%d format_rc=%d geometry=%u/%u/%u clusters=%u superblock=%d",
+                     operation, rc, MciCardImageResultText(report->result),
+                     report->port, MciCardImageFormatName(report->format),
+                     report->path[0] != '\0' ? report->path : "n/a",
+                     report->pages_done, report->pages_total,
+                     (unsigned long long)report->output_bytes,
+                     report->logical_crc32, report->verified,
+                     report->verify_rc, report->format_rc,
+                     report->geometry.page_size,
+                     report->geometry.pages_per_cluster,
+                     report->geometry.pages_per_block,
+                     report->geometry.clusters_per_card,
+                     report->geometry.from_superblock);
+}
+
+int __wrap_MciCardImageExport(int port, MciCardImageFormat format,
+                              MciCardImageReport *report)
+{
+    int rc;
+
+    MciDiagLogPrintf("IMAGE", "export begin port=mc%d format=%s",
+                     port, MciCardImageFormatName(format));
+    rc = __real_MciCardImageExport(port, format, report);
+    LogImageReport("export", rc, report);
+    return rc;
+}
+
+int __wrap_MciCardImageVerifyFile(const char *path, MciCardImageFormat format,
+                                  MciCardImageReport *report)
+{
+    int rc;
+
+    MciDiagLogPrintf("IMAGE", "verify begin format=%s path=%s",
+                     MciCardImageFormatName(format), path != NULL ? path : "NULL");
+    rc = __real_MciCardImageVerifyFile(path, format, report);
+    LogImageReport("verify", rc, report);
+    return rc;
+}
+
+int __wrap_MciCardImageRestoreExact(int port, const char *path,
+                                    MciCardImageFormat format,
+                                    MciCardImageReport *report)
+{
+    int rc;
+
+    MciDiagLogPrintf("IMAGE", "exact restore begin port=mc%d format=%s path=%s",
+                     port, MciCardImageFormatName(format),
+                     path != NULL ? path : "NULL");
+    rc = __real_MciCardImageRestoreExact(port, path, format, report);
+    LogImageReport("exact restore", rc, report);
+    return rc;
+}
+
+int __wrap_MciCardForceFormatWithBackup(int port, MciCardImageReport *report)
+{
+    int rc;
+
+    MciDiagLogPrintf("IMAGE", "force format begin port=mc%d", port);
+    rc = __real_MciCardForceFormatWithBackup(port, report);
+    LogImageReport("force format", rc, report);
+    return rc;
+}
+
+int __wrap_FmcbInstallNormalTransactional(int target_port,
+                                          const FmcbPackageReport *package,
+                                          const FmcbInstallOptions *options,
+                                          FmcbBindKelfCallback bind_kelf,
+                                          void *bind_userdata,
+                                          FmcbRecoveryStatus *recovery,
+                                          FmcbInstallReport *report)
+{
+    int rc;
+    int i;
+
+    MciDiagLogPrintf("FMCB",
+                     "transaction begin target=mc%d package=%s root=%s entries=%d verify_mode=%d preserve_cnfs=%d recovery_present=%d recovery_valid=%d",
+                     target_port,
+                     package != NULL ? FmcbPackageStatusText(package->status) : "NULL",
+                     package != NULL && package->source_root[0] != '\0'
+                         ? package->source_root : "n/a",
+                     package != NULL ? package->entry_count : -1,
+                     options != NULL ? (int)options->verify_mode : -1,
+                     options != NULL ? options->preserve_existing_cnfs : -1,
+                     recovery != NULL ? recovery->present : -1,
+                     recovery != NULL ? recovery->valid : -1);
+
+    rc = __real_FmcbInstallNormalTransactional(target_port, package, options,
+                                                bind_kelf, bind_userdata,
+                                                recovery, report);
+
+    if (report == NULL) {
+        MciDiagLogPrintf("FMCB", "transaction end rc=%d report=NULL", rc);
+        return rc;
+    }
+
+    MciDiagLogPrintf("FMCB",
+                     "transaction end rc=%d stage=%s result=%s current_file=%d committed=%d/%d space_rc=%d free=%d minimum=%d recovery_rc=%d rollback_rc=%d",
+                     rc, FmcbInstallStageText(report->stage),
+                     FmcbInstallResultText(report->result), report->current_file,
+                     report->files_committed, report->files_total,
+                     report->space_rc, report->free_clusters,
+                     report->minimum_remaining_clusters,
+                     report->recovery_rc, report->rollback_rc);
+
+    for (i = 0; i < FMCB_TX_MAX_FILES; i++) {
+        const FmcbInstallFileReport *file = &report->files[i];
+        if (!file->selected && file->inventory_exact_rc == -999 &&
+            file->backup_rc == -999 && file->write_rc == -999)
+            continue;
+        MciDiagLogPrintf("FMCB-FILE",
+                         "index=%d selected=%d skipped=%d existed=%d src=%s dst=%s size=%u previous=%u inv=%d/%d/%d backup=%d bind=%d write=%d verify=%d verify_skipped=%d",
+                         i, file->selected, file->skipped, file->existed,
+                         file->source[0] != '\0' ? file->source : "n/a",
+                         file->destination[0] != '\0' ? file->destination : "n/a",
+                         file->size, file->previous_size,
+                         file->inventory_exact_rc, file->inventory_parent_rc,
+                         file->inventory_open_rc, file->backup_rc,
+                         file->bind_rc, file->write_rc, file->verify_rc,
+                         file->verify_skipped);
+    }
+    return rc;
+}
