@@ -8,18 +8,35 @@
  * GS backend that was already hardware-validated.
  */
 
-/* Keep the original dashboard/FMCB renderer available as internal fallbacks
- * while replacing only the page composition below. The include remains the
- * same translation unit, so its static renderer helpers and state stay private
- * and directly reusable here. */
+/* Keep selected core renderers available as internal fallbacks while replacing
+ * only the page composition and operation-screen identity banner below. The
+ * include remains the same translation unit, so its static renderer helpers
+ * and state stay private and directly reusable here. */
 #define render_fmcb render_fmcb_base
 #define MciGuiRenderDashboard MciGuiRenderDashboard_base
+#define MciGuiRenderMessage MciGuiRenderMessage_base
+#define MciGuiRenderProgress MciGuiRenderProgress_base
 #include "gui_core.inc"
+#undef MciGuiRenderProgress
+#undef MciGuiRenderMessage
 #undef MciGuiRenderDashboard
 #undef render_fmcb
 
 static int LastFmcbMarqueeSlot = -1;
 static int LastFmcbMarqueeStatus = -1;
+static int ActiveHeaderSlot = 0;
+
+static qword_t *identity_banner(qword_t *q)
+{
+    char version[80];
+
+    q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
+    q = rect_outline(q, 12, 8, 628, 31, Theme.border);
+    q = text(q, 22, 14, "PS2 Memory Card Inspector", Theme.text);
+    snprintf(version, sizeof(version), "v0.4.0-dev1  mc%d", ActiveHeaderSlot);
+    q = text_box(q, 462, 14, 618, 23, version, Theme.accent);
+    return q;
+}
 
 static qword_t *render_fmcb(qword_t *q, int selected,
                             const CardReport cards[2],
@@ -128,6 +145,7 @@ void MciGuiRenderDashboard(int selected,
         return;
     if (selected < 0 || selected > 1)
         selected = 0;
+    ActiveHeaderSlot = selected;
     if ((unsigned int)page >= MCI_GUI_PAGE_COUNT)
         page = MCI_GUI_CARD;
 
@@ -152,5 +170,87 @@ void MciGuiRenderDashboard(int selected,
         q = render_card(q, selected, cards, magicgate, packages,
                         confirm_format, last_format_rc);
     q = footer(q, page, confirm_format);
+    frame_end(packet, q);
+}
+
+void MciGuiRenderMessage(const char *title,
+                         const char *body,
+                         const char *footer_text,
+                         MciGuiTone tone)
+{
+    packet_t *packet;
+    qword_t *q;
+    UiRgb accent;
+    float body_bottom;
+
+    if (!RendererReady)
+        return;
+    accent = tone_color(tone);
+    body_bottom = footer_text != NULL && footer_text[0] != '\0' ? 196.0f : 212.0f;
+
+    q = frame_begin(&packet);
+    q = rect_fill(q, 0, 0, UI_W, UI_H, Theme.background);
+    q = rect_fill(q, 0, 0, UI_W, 4, accent);
+    q = identity_banner(q);
+    q = text_box(q, 20, 39, 620, 48, title != NULL ? title : "Status", accent);
+    q = rect_fill(q, 16, 53, 624, body_bottom, Theme.panel);
+    q = rect_outline(q, 16, 53, 624, body_bottom, Theme.border);
+    q = text_box(q, 30, 64, 610, body_bottom - 8.0f,
+                 body != NULL ? body : "", Theme.text);
+    if (footer_text != NULL && footer_text[0] != '\0') {
+        q = rect_fill(q, 0, 202, UI_W, UI_H, Theme.panel_alt);
+        q = text_box(q, 20, 211, 620, 220, footer_text, Theme.muted);
+    }
+    frame_end(packet, q);
+}
+
+void MciGuiRenderProgress(const char *title,
+                          const char *action,
+                          const char *detail,
+                          int percent,
+                          const char *footer_text,
+                          MciGuiTone tone)
+{
+    packet_t *packet;
+    qword_t *q;
+    UiRgb accent;
+    char pct[16];
+    float inner_x0 = 32.0f;
+    float inner_x1 = 608.0f;
+    float fill_x;
+
+    if (!RendererReady)
+        return;
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+
+    accent = tone_color(tone);
+    fill_x = inner_x0 + (inner_x1 - inner_x0) * ((float)percent / 100.0f);
+    snprintf(pct, sizeof(pct), "%3d%%", percent);
+
+    q = frame_begin(&packet);
+    q = rect_fill(q, 0, 0, UI_W, UI_H, Theme.background);
+    q = rect_fill(q, 0, 0, UI_W, 4, accent);
+    q = identity_banner(q);
+    q = text_box(q, 20, 39, 620, 48, title != NULL ? title : "Working", accent);
+    q = rect_fill(q, 16, 53, 624, 196, Theme.panel);
+    q = rect_outline(q, 16, 53, 624, 196, Theme.border);
+    q = text_box(q, 30, 65, 610, 75,
+                 action != NULL ? action : "Working...", Theme.text);
+    q = text_box(q, 30, 84, 610, 121, detail != NULL ? detail : "", Theme.muted);
+    q = text(q, 30, 130, "PROGRESS", Theme.muted);
+    q = text_box(q, 566, 130, 610, 138, pct, accent);
+    q = rect_fill(q, 30, 145, 610, 164, Theme.panel_alt);
+    q = rect_outline(q, 30, 145, 610, 164, Theme.border);
+    if (percent > 0)
+        q = rect_fill(q, inner_x0, 148, fill_x, 161, accent);
+    q = text_box(q, 30, 176, 610, 187,
+                 percent >= 100 ? "Operation complete; returning to the dashboard."
+                                : "Working synchronously; controls resume when this step completes.",
+                 percent >= 100 ? Theme.success : Theme.muted);
+    if (footer_text != NULL && footer_text[0] != '\0') {
+        q = rect_fill(q, 0, 202, UI_W, UI_H, Theme.panel_alt);
+        q = text_box(q, 20, 211, 620, 220, footer_text, Theme.muted);
+    }
     frame_end(packet, q);
 }
