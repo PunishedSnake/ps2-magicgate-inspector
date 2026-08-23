@@ -3,7 +3,7 @@
 
 #include <tamtypes.h>
 
-/* Interoperable image formats used by the real Drebin Card Tools backend. */
+/* Interoperable image formats used by Drebin's hardware-facing Card Tools. */
 #define MCI_CARD_IMAGE_PATH_MAX 256
 
 typedef enum MciCardImageFormat {
