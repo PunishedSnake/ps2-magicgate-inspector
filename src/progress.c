@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* Live progress adapter for the native GS frontend. */
 
+#include <stdio.h>
 #include <string.h>
 
 #include "diag_log.h"
