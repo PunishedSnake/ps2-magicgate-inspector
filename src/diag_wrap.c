@@ -4,6 +4,7 @@
 #define NEWLIB_PORT_AWARE
 
 #include <fileXio_rpc.h>
+#include <libmc.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -32,8 +33,10 @@ int __real_FmcbInstallNormalTransactional(int target_port,
                                           void *bind_userdata,
                                           FmcbRecoveryStatus *recovery,
                                           FmcbInstallReport *report);
+int __real_mcReadPage(int port, int slot, int page, void *buffer);
 
 static unsigned int MassBackendInitCalls;
+static unsigned int RawReadTraceBudget;
 
 static void LogImageReport(const char *operation, int rc,
                            const MciCardImageReport *report)
@@ -117,6 +120,7 @@ int __wrap_MciRawCardSessionStart(MciRawCardSessionStatus *status)
 {
     int rc;
 
+    RawReadTraceBudget = 0u;
     MciDiagLogPrintf("RAW", "session start begin");
     rc = __real_MciRawCardSessionStart(status);
     if (status == NULL) {
@@ -133,16 +137,43 @@ int __wrap_MciRawCardSessionStart(MciRawCardSessionStatus *status)
                      status->mcinfo_result, status->card_type,
                      status->free_clusters, status->formatted,
                      status->filexio_init_rc);
+    if (rc == 0 && status->ready)
+        RawReadTraceBudget = 4u;
     return rc;
 }
 
 void __wrap_MciRawCardSessionStop(MciRawCardSessionStatus *status)
 {
+    RawReadTraceBudget = 0u;
     MciDiagLogPrintf("RAW", "session stop begin ready=%d",
                      status != NULL ? status->ready : -1);
     __real_MciRawCardSessionStop(status);
     MciDiagLogPrintf("RAW", "session stop end ready=%d",
                      status != NULL ? status->ready : -1);
+}
+
+/* Unlike Drebin's own geometry helper, libmc is in a separate object/library,
+ * so --wrap=mcReadPage observes the real issue-call boundary even when
+ * MciCardImageExport calls its geometry helper from the same card_image.o.
+ * Only the first few page issues are traced; logging all 16k+ pages would turn
+ * the diagnostic path into the workload. */
+int __wrap_mcReadPage(int port, int slot, int page, void *buffer)
+{
+    int rc;
+    int trace = RawReadTraceBudget > 0u;
+
+    if (trace) {
+        RawReadTraceBudget--;
+        MciDiagLogPrintf("RAW-RPC",
+                         "mcReadPage issue begin port=%d slot=%d page=%d buffer=%p budget_after=%u",
+                         port, slot, page, buffer, RawReadTraceBudget);
+    }
+    rc = __real_mcReadPage(port, slot, page, buffer);
+    if (trace)
+        MciDiagLogPrintf("RAW-RPC",
+                         "mcReadPage issue end port=%d slot=%d page=%d rc=%d",
+                         port, slot, page, rc);
+    return rc;
 }
 
 int __wrap_MciCardImageProbeGeometry(int port, MciCardGeometry *geometry)
