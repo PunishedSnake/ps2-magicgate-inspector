@@ -55,6 +55,16 @@ void MciProgressUpdate(MciProgressDomain domain,
     if (percent > 100)
         percent = 100;
 
+    /* card_image.c historically used one detail string for both formats and
+     * claimed that OPL .vmc verification was checking .ps2 ECC records. Keep
+     * the progress UI format-neutral here until the image engine owns separate
+     * per-format status text. .ps2 ECC validation still happens in the verifier. */
+    if (strcmp(safe_action, "Verifying memory-card image") == 0 &&
+        strcmp(safe_detail,
+               "Reading the image back and validating logical data plus .ps2 ECC records.") == 0) {
+        safe_detail = "Reading the image back and validating the complete logical image stream.";
+    }
+
     /* The GS can update much more frequently than a crash log needs. Keep one
      * durable line per visible percent/action transition so raw imaging does
      * not turn USB sync traffic into the workload we are trying to diagnose. */
@@ -70,6 +80,6 @@ void MciProgressUpdate(MciProgressDomain domain,
     if (!MciGuiReady())
         return;
 
-    MciGuiRenderProgress(ProgressTitle(domain), action, detail, percent,
+    MciGuiRenderProgress(ProgressTitle(domain), safe_action, safe_detail, percent,
                          ProgressFooter(domain), MCI_GUI_TONE_INFO);
 }
