@@ -21,6 +21,7 @@ on:
       - main
       - feat/0.4.0
       - feat/0.4.0-dev3-drebin
+      - feat/0.4.0-dev4-drebin-browser
     paths:
       - 'src/**'
       - 'tools/**'
@@ -88,10 +89,11 @@ jobs:
           cp README.md artifacts/README.md
           cp licenses/PS2SDK-AFL-2.0.txt artifacts/licenses/PS2SDK-AFL-2.0.txt
           {
-            echo "PS2 Memory Card Inspector 0.4.0-dev3 - Drebin"
+            echo "PS2 Memory Card Inspector 0.4.0-dev4 - Drebin"
             echo "Project revision: $GITHUB_SHA"
             echo "Frontend: configurable Native / 480p / 576p / 720p / 1080i GS dashboard"
-            echo "Card Tools: verified PCSX2 .ps2 and OPL .vmc export/verify/exact-restore plus backup-before-force-format"
+            echo "Card Tools: verified PCSX2 .ps2 and OPL .vmc image engine with filesystem-aware browser/selective restore backend"
+            echo "Selective restore: source geometry is never copied; saves are streamed through PS2 filesystem/FAT parsing into the destination card"
             echo "MagicGate: immutable raw FMCB.XLF cache in EE RAM with disposable per-bind clones"
             echo "Installer: protected-target inventory fallback, configurable read-back policy and persistent USB recovery journal"
             echo "Region policy: ROMVER + read-only MechaCon/MechaPwn profiling; unsafe Deckard CEX one-region installs are blocked"
@@ -110,7 +112,7 @@ jobs:
       - name: Upload development build
         uses: actions/upload-artifact@v4
         with:
-          name: PS2-Memory-Card-Inspector-0.4.0-dev3-Drebin-${{ github.sha }}
+          name: PS2-Memory-Card-Inspector-0.4.0-dev4-Drebin-${{ github.sha }}
           path: artifacts/
           if-no-files-found: error
           retention-days: 30
