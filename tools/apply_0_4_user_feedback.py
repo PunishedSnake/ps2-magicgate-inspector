@@ -491,8 +491,9 @@ static int FindRawKelfSource(MagicGateReport *report)
     /* A complete FMCB package that already passed preflight is the preferred
      * source. This avoids recursively walking the USB tree on every scan. */
     if (MciUsbGetVerifiedPackageRoot(package_root, sizeof(package_root)) == 0) {
-        if (snprintf(path, sizeof(path), "%s/SYSTEM/FMCB.XLF",
-                     package_root) > 0 && strlen(path) < sizeof(path)) {
+        int written = snprintf(path, sizeof(path), "%s/SYSTEM/FMCB.XLF",
+                               package_root);
+        if (written > 0 && (unsigned int)written < sizeof(path)) {
             rc = UseRawKelfPath(report, path, "Using verified installer package");
             if (rc == 0)
                 return 0;
@@ -647,7 +648,8 @@ new = r'''    q = rect_fill(q, 158, 93, 628, 123, Theme.panel);
         q = text_box(q, 236, 111, 615, 119, "No FMCB.XLF selected", Theme.muted);
     }
 '''
-s = replace_once(s, old, new, "magicgate summary block")\n
+s = replace_once(s, old, new, "magicgate summary block")
+
 # Settings page no longer burns a strip on an internal return code/current mode.
 s = s.replace('    char footer[96];\n', '')
 old = r'''    q = rect_fill(q, 24, 190, 616, 202, Theme.panel_alt);
