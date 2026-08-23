@@ -13,6 +13,7 @@
 #include "card_raw_session.h"
 #include "diag_log.h"
 #include "fmcb_transaction.h"
+#include "image_read_ahead.h"
 
 int __real_MciCardImageProbeGeometry(int port, MciCardGeometry *geometry);
 int __real_MciCardImageExport(int port, MciCardImageFormat format,
@@ -86,11 +87,6 @@ static int SyncPathDevice(const char *path)
     return fileXioSync(device, 0);
 }
 
-/* The very first mass-backend initialization is the boot path. The previous
- * trace build hung there because logging itself probed mass: before USBHDFSD
- * had completed enumeration. Never attach the logger during that first call.
- * Later calls are environment restores after a user operation; FmcbInit already
- * waited for USB enumeration, so that is a safe point to flush the EE ring. */
 int __wrap_FmcbInitMassBackend(FmcbMassBackendStatus *status)
 {
     int rc = __real_FmcbInitMassBackend(status);
@@ -211,7 +207,9 @@ int __wrap_MciCardImageExport(int port, MciCardImageFormat format,
     MciDiagLogPrintf("IMAGE", "export begin port=mc%d format=%s",
                      port, MciCardImageFormatName(format));
     MciDiagLogSetMassWritePaused(1);
+    MciImageReadAheadSetEnabled(1);
     rc = __real_MciCardImageExport(port, format, report);
+    MciImageReadAheadSetEnabled(0);
     MciDiagLogSetMassWritePaused(0);
     LogImageReport("export", rc, report);
     return rc;
@@ -228,7 +226,9 @@ int __wrap_MciCardImageVerifyFile(const char *path, MciCardImageFormat format,
                      MciCardImageFormatName(format), path != NULL ? path : "NULL",
                      sync_rc);
     MciDiagLogSetMassWritePaused(1);
+    MciImageReadAheadSetEnabled(1);
     rc = __real_MciCardImageVerifyFile(path, format, report);
+    MciImageReadAheadSetEnabled(0);
     MciDiagLogSetMassWritePaused(0);
     LogImageReport("verify", rc, report);
     return rc;
@@ -244,7 +244,9 @@ int __wrap_MciCardImageRestoreExact(int port, const char *path,
                      port, MciCardImageFormatName(format),
                      path != NULL ? path : "NULL");
     MciDiagLogSetMassWritePaused(1);
+    MciImageReadAheadSetEnabled(1);
     rc = __real_MciCardImageRestoreExact(port, path, format, report);
+    MciImageReadAheadSetEnabled(0);
     MciDiagLogSetMassWritePaused(0);
     LogImageReport("exact restore", rc, report);
     return rc;
@@ -256,7 +258,9 @@ int __wrap_MciCardForceFormatWithBackup(int port, MciCardImageReport *report)
 
     MciDiagLogPrintf("IMAGE", "force format begin port=mc%d", port);
     MciDiagLogSetMassWritePaused(1);
+    MciImageReadAheadSetEnabled(1);
     rc = __real_MciCardForceFormatWithBackup(port, report);
+    MciImageReadAheadSetEnabled(0);
     MciDiagLogSetMassWritePaused(0);
     LogImageReport("force format", rc, report);
     return rc;
