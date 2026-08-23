@@ -47,6 +47,9 @@ static int PathReady;
 static int Initialized;
 static int InWrite;
 
+int __real_fileXioInit(void);
+void __real_fileXioExit(void);
+
 static int WriteAll(int fd, const char *text, unsigned int length)
 {
     unsigned int done = 0u;
@@ -159,15 +162,18 @@ static void EnsureInitialized(void)
     if (Initialized)
         return;
     Initialized = 1;
-    Sequence = 0u;
+    Sequence = 1u;
     PendingHead = 0u;
-    PendingCount = 0u;
+    PendingCount = 1u;
     DroppedLines = 0u;
     LogPath[0] = '\0';
     LogDevice[0] = '\0';
     IoAvailable = 0;
     PathReady = 0;
     InWrite = 0;
+    snprintf(Pending[0], sizeof(Pending[0]),
+             "#%06u [SESSION] ========== Drebin diagnostic session start ==========",
+             Sequence);
 }
 
 static void FlushPending(void)
@@ -284,4 +290,25 @@ const char *MciDiagLogPath(void)
 {
     EnsureInitialized();
     return PathReady ? LogPath : "mass?:/MCI/DREBIN.LOG";
+}
+
+int __wrap_fileXioInit(void)
+{
+    int rc;
+
+    EnsureInitialized();
+    rc = __real_fileXioInit();
+    if (rc >= 0) {
+        MciDiagLogSetIoAvailable(1);
+        MciDiagLogPrintf("LOGGER", "fileXioInit completed rc=%d", rc);
+    } else {
+        MciDiagLogPrintf("LOGGER", "fileXioInit failed rc=%d", rc);
+    }
+    return rc;
+}
+
+void __wrap_fileXioExit(void)
+{
+    MciDiagLogSetIoAvailable(0);
+    __real_fileXioExit();
 }
