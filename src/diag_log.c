@@ -23,6 +23,8 @@
 
 #define DIAG_LINE_MAX 320u
 #define DIAG_PENDING_LINES 32u
+#define DIAG_ATTACH_ATTEMPTS 10u
+#define DIAG_ATTACH_DELAY_USEC 50000u
 
 typedef struct MciDiagRoot {
     const char *root;
@@ -49,6 +51,7 @@ static int InWrite;
 
 int __real_fileXioInit(void);
 void __real_fileXioExit(void);
+int __real_fileXioClose(int fd);
 
 static int WriteAll(int fd, const char *text, unsigned int length)
 {
@@ -228,6 +231,8 @@ void MciDiagLogReset(void)
 
 void MciDiagLogSetIoAvailable(int available)
 {
+    unsigned int attempt;
+
     EnsureInitialized();
 
     if (!available) {
@@ -238,15 +243,21 @@ void MciDiagLogSetIoAvailable(int available)
         return;
     }
 
-    IoAvailable = 1;
-    PathReady = 0;
-    if (EnsurePath() < 0) {
+    for (attempt = 0u; attempt < DIAG_ATTACH_ATTEMPTS; attempt++) {
+        IoAvailable = 1;
+        PathReady = 0;
+        if (EnsurePath() == 0) {
+            FlushPending();
+            if (IoAvailable)
+                MciDiagLogPrintf("LOGGER",
+                                 "mass/fileXio resumed after %u attempt(s); path=%s",
+                                 attempt + 1u, LogPath);
+            return;
+        }
         IoAvailable = 0;
-        return;
+        if (attempt + 1u < DIAG_ATTACH_ATTEMPTS)
+            DelayThread(DIAG_ATTACH_DELAY_USEC);
     }
-    FlushPending();
-    if (IoAvailable)
-        MciDiagLogPrintf("LOGGER", "mass/fileXio resumed; path=%s", LogPath);
 }
 
 void MciDiagLogPrintf(const char *component, const char *format, ...)
@@ -311,4 +322,20 @@ void __wrap_fileXioExit(void)
 {
     MciDiagLogSetIoAvailable(0);
     __real_fileXioExit();
+}
+
+int __wrap_fileXioClose(int fd)
+{
+    int rc = __real_fileXioClose(fd);
+
+    /* For non-logger handles, publish FAT/data state immediately. This is
+     * intentionally conservative in the diagnostic build and makes a completed
+     * image close durable before the subsequent verify pass begins. */
+    if (!InWrite && IoAvailable && LogDevice[0] != '\0') {
+        int sync_rc = fileXioSync(LogDevice, 0);
+        if (rc < 0 || sync_rc < 0)
+            MciDiagLogPrintf("USB", "fileXioClose fd=%d rc=%d sync_rc=%d",
+                             fd, rc, sync_rc);
+    }
+    return rc;
 }
