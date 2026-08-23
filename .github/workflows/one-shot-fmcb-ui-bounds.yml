@@ -6,6 +6,10 @@ on:
       - feat/0.4.0
     paths:
       - 'tools/APPLY_FMCB_UI_BOUNDS'
+  pull_request:
+    branches: [ feat/0.4.0 ]
+    paths:
+      - 'tools/APPLY_FMCB_UI_BOUNDS'
 
 permissions:
   contents: write
