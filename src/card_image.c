@@ -21,7 +21,9 @@
 #include <string.h>
 
 #include "card_image.h"
+#include "card_math.h"
 #include "progress.h"
+#include "r5900_memops.h"
 
 #define IMAGE_PAGE_DATA 512u
 #define IMAGE_PAGE_SPARE 16u
@@ -84,80 +86,12 @@ static int EraseBlock(int port, u32 block)
     return CompleteMcCommand(mcEraseBlock(port, 0, (int)block, -1));
 }
 
-static u32 Crc32Update(u32 crc, const unsigned char *data, unsigned int size)
-{
-    unsigned int i;
-    unsigned int bit;
-
-    crc = ~crc;
-    for (i = 0; i < size; i++) {
-        crc ^= data[i];
-        for (bit = 0; bit < 8; bit++)
-            crc = (crc >> 1) ^ ((0u - (crc & 1u)) & 0xEDB88320u);
-    }
-    return ~crc;
-}
-
-static unsigned char Parity8(unsigned char value)
-{
-    value ^= value >> 4;
-    value ^= value >> 2;
-    value ^= value >> 1;
-    return value & 1u;
-}
-
-static unsigned char ColumnMask(unsigned char value)
-{
-    static const unsigned char BitMasks[8] = {
-        0x07, 0x16, 0x25, 0x34, 0x43, 0x52, 0x61, 0x70
-    };
-    unsigned char mask = 0;
-    unsigned int bit;
-
-    for (bit = 0; bit < 8; bit++) {
-        if (value & (1u << bit))
-            mask ^= BitMasks[bit];
-    }
-    return mask;
-}
-
-static u32 CalculateEcc128(const unsigned char *data)
-{
-    unsigned char column = 0x77;
-    unsigned char line0 = 0x7F;
-    unsigned char line1 = 0x7F;
-    unsigned int i;
-
-    for (i = 0; i < 128; i++) {
-        unsigned char value = data[i];
-        column ^= ColumnMask(value);
-        if (Parity8(value)) {
-            line0 ^= (unsigned char)(~i);
-            line1 ^= (unsigned char)i;
-        }
-    }
-    return (u32)column | ((u32)line0 << 8) | ((u32)line1 << 16);
-}
-
-static void BuildSpare(const unsigned char data[IMAGE_PAGE_DATA],
-                       unsigned char spare[IMAGE_PAGE_SPARE])
-{
-    unsigned int chunk;
-
-    memset(spare, 0, IMAGE_PAGE_SPARE);
-    for (chunk = 0; chunk < 4; chunk++) {
-        u32 ecc = CalculateEcc128(data + chunk * 128u);
-        spare[chunk * 3u + 0u] = (unsigned char)(ecc & 0xFFu);
-        spare[chunk * 3u + 1u] = (unsigned char)((ecc >> 8) & 0xFFu);
-        spare[chunk * 3u + 2u] = (unsigned char)((ecc >> 16) & 0xFFu);
-    }
-}
-
 static int SpareMatches(const unsigned char data[IMAGE_PAGE_DATA],
                         const unsigned char spare[IMAGE_PAGE_SPARE])
 {
-    unsigned char expected[IMAGE_PAGE_SPARE];
-    BuildSpare(data, expected);
+    unsigned char expected[IMAGE_PAGE_SPARE] __attribute__((aligned(16)));
+
+    MciCardMathBuildSpare(data, expected);
     return memcmp(spare, expected, 12u) == 0;
 }
 
@@ -450,7 +384,7 @@ int MciCardImageVerifyFile(const char *path, MciCardImageFormat format,
             report->verify_rc = -5;
             return -5;
         }
-        crc = Crc32Update(crc, raw, IMAGE_PAGE_DATA);
+        crc = MciCardMathCrc32Update(crc, raw, IMAGE_PAGE_DATA);
         if ((page % IMAGE_PROGRESS_INTERVAL) == 0u) {
             int percent = (int)(((u64)page * 100u) / pages);
             MciProgressUpdate(MCI_PROGRESS_CARD_TOOLS, percent,
@@ -526,10 +460,10 @@ int MciCardImageExport(int port, MciCardImageFormat format,
             report->result = MCI_CARD_IMAGE_READ_ERROR;
             return rc;
         }
-        crc = Crc32Update(crc, page_data, sizeof(page_data));
+        crc = MciCardMathCrc32Update(crc, page_data, sizeof(page_data));
         if (format == MCI_CARD_IMAGE_PS2) {
-            memcpy(raw, page_data, IMAGE_PAGE_DATA);
-            BuildSpare(page_data, raw + IMAGE_PAGE_DATA);
+            MciFastCopy(raw, page_data, IMAGE_PAGE_DATA);
+            MciCardMathBuildSpare(page_data, raw + IMAGE_PAGE_DATA);
             rc = WriteExact(fd, raw, sizeof(raw));
         } else {
             rc = WriteExact(fd, page_data, sizeof(page_data));
@@ -716,7 +650,7 @@ int MciCardImageRestoreExact(int port, const char *path,
             report->verify_rc = rc;
             return rc;
         }
-        actual_crc = Crc32Update(actual_crc, readback, sizeof(readback));
+        actual_crc = MciCardMathCrc32Update(actual_crc, readback, sizeof(readback));
         if ((page % IMAGE_PROGRESS_INTERVAL) == 0u) {
             int percent = 82 + (int)(((u64)(page + 1u) * 18u) / pages);
             MciProgressUpdate(MCI_PROGRESS_CARD_TOOLS, percent,
