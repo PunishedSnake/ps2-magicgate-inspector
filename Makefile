@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := MC_INSPECTOR.ELF
 
 EE_BIN = MC_INSPECTOR.ELF
-EE_OBJS = src/app_main.o src/gui.o src/progress.o src/diag_log.o src/diag_wrap.o src/image_read_ahead.o src/save_transfer.o src/card.o src/magicgate.o src/fmcb_install.o \
+EE_OBJS = src/app_main.o src/gui.o src/progress.o src/diag_log.o src/diag_wrap.o src/image_read_ahead.o src/save_transfer.o src/save_title.o src/image_save_title.o src/image_browser_titles.o src/usb_file_picker.o src/card_image_picker.o src/card.o src/magicgate.o src/fmcb_install.o \
 	src/usb_search.o src/fmcb_transaction.o src/fmcb_recovery.o src/fmcb_recovery_marker.o src/console_profile.o \
 	src/magicgate_session.o src/magicgate_diag.o src/video_mode.o src/ui_layout.o src/settings.o \
 	src/kelf_cache.o src/card_raw_session.o src/card_image.o src/card_image_fs.o
@@ -23,8 +23,10 @@ EE_LDFLAGS = -Wl,--gc-sections \
 	-Wl,--wrap=MciCardImageProbeGeometry \
 	-Wl,--wrap=MciCardImageExport \
 	-Wl,--wrap=MciCardImageVerifyFile \
+	-Wl,--wrap=MciCardImageFindLatest \
 	-Wl,--wrap=MciCardImageRestoreExact \
 	-Wl,--wrap=MciCardForceFormatWithBackup \
+	-Wl,--wrap=MciGuiRenderImageBrowser \
 	-Wl,--wrap=MciImageFsScan \
 	-Wl,--wrap=MciImageFsImportSelected \
 	-Wl,--wrap=FmcbInstallNormalTransactional \
