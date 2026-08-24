@@ -46,19 +46,16 @@ The next decision must be based on:
 `MTPS/MFPS/MTPC/MFPC` interface. It deliberately exposes 32-bit samples rather
 than pretending long operations cannot wrap the hardware counters.
 
-The first benchmark pair is:
+Three steady-state counter pairs are collected for each kernel:
 
 ```text
-PC0: processor cycles
-PC1: dual-instruction issue
+A: PC0 processor cycles        + PC1 dual-instruction issue
+B: PC0 instruction-cache miss  + PC1 data-cache miss
+C: PC0 branch issued           + PC1 branch mispredict
 ```
 
-The second steady-state pair is:
-
-```text
-PC0: instruction-cache miss
-PC1: data-cache miss
-```
+This directly covers the corpus' requested cycles/cache/branch dimensions while
+keeping each measurement window short enough for a 32-bit hardware counter.
 
 ### Workload-specific benchmark
 
@@ -69,14 +66,14 @@ million-add loops:
 - table CRC32 over 8 KiB;
 - PCSX2/card ECC generation over 512-byte pages.
 
-Each kernel receives an unmeasured warm-up first. The measured runs are bounded
-and deterministic and return a result hash. The first raw Card Tools session
-writes one `R5900-PERF` record to `DREBIN.LOG` before any long-lived image file
-descriptor is opened.
+Each kernel receives an unmeasured warm-up first. The measured runs are bounded,
+deterministic and return a repeatable result hash. The first raw Card Tools
+session writes one `R5900-PERF` record to `DREBIN.LOG` before any long-lived
+image file descriptor is opened.
 
 ### Static compiler report in CI
 
-Every development artifact now contains `R5900_STATIC_REPORT.txt` with:
+Every development artifact contains `R5900_STATIC_REPORT.txt` with:
 
 - compiler version and target triple;
 - reported `march`, `mtune` and `mfix-r5900` state;
@@ -87,8 +84,37 @@ Every development artifact now contains `R5900_STATIC_REPORT.txt` with:
 - symbol sizes and disassembly for production/O3/Os math kernels;
 - production R5900 memory-copy disassembly.
 
-The O3/Os objects are analysis candidates only. Production remains on the
-qualified O2 policy until hardware counters show a win.
+The first report found the following `card_math.c` text sizes:
+
+```text
+-O2   976 bytes
+-O3  1392 bytes
+-Os   828 bytes
+```
+
+That does not make O3 automatically worse. The CRC hot function remains 0x180
+bytes in both O2 and O3 and `MciCardMathEcc128` remains 0xB8 bytes. Most O3
+growth is in one-time table construction and an expanded four-chunk ECC builder.
+The generated O3 hot loops also make better use of several branch delay slots
+that remain `nop` in O2. `-Os`, meanwhile, shrinks CRC substantially but turns
+its byte operation into repeated calls, so size alone is not a speed verdict.
+
+### Hardware A/B compiler candidate
+
+CI builds two hardware-test ELFs from the same revision:
+
+```text
+MC_INSPECTOR.ELF
+    production O2 policy
+
+MC_INSPECTOR-cardmath-O3.ELF
+    identical build except card_math.c = -O3 -mtune=r5900
+```
+
+Both execute the same `R5900-PERF` benchmark and must produce the same result
+hash. O3 is promoted only if the retail EE shows a useful cycle win without an
+unacceptable cache/branch regression and normal image verification remains
+bit-identical.
 
 ## Still intentionally not enabled
 
@@ -150,11 +176,13 @@ static report:
 
 | Observation | Next experiment |
 | --- | --- |
-| CRC cycles high, low cache misses | Inspect O3 scheduling/unrolling; test O3 `card_math.o` only. |
+| O3 CRC/ECC cycles lower and cache/branch cost remains sane | Promote O3 only for `card_math.o`; leave the rest O2. |
+| O3 wins only cold/table setup but not steady-state math | Keep O2 production math; do not pay the extra text footprint. |
 | CRC cycles high, D-cache misses high | Reconsider table/layout size before increasing unroll/table footprint. |
 | ECC cycles high, good cache behavior, low dual issue | Inspect dependency chain; prototype a separately verified scheduled/MMI ECC kernel. |
 | Copy cycles high relative to bytes, low dual issue | A/B a hand-scheduled/unrolled `LQ/SQ` copy kernel. |
 | Copy dominated by D-cache misses | Test scratchpad/DMAC staging rather than adding arithmetic instructions. |
+| Branch mispredicts are material | Restructure the offending hot loop before adding more arithmetic optimization. |
 | Kernels cheap but export remains slow | Stop touching EE math and return to SIO2/SIF/USB pipeline overlap. |
 
 That last row is important: an optimization pass is allowed to conclude that the
