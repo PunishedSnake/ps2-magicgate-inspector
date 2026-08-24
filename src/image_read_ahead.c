@@ -2,11 +2,15 @@
 /*
  * Sequential USB image read-ahead for Drebin verification/restore.
  *
- * card_image.c intentionally uses tiny 512/528-byte logical-page reads. That is
- * simple, but on real PS2 USBHDFSD it turns a 64 MiB verification pass into
- * 131072 separate fileXioRead RPCs. This wrapper batches up to sixteen pages in
- * one underlying read while presenting the original exact-size read semantics
- * to the caller.
+ * card_image.c intentionally presents 512/528-byte logical-page reads. On real
+ * PS2 USBHDFSD, issuing one fileXioRead RPC per page makes a 64 MiB verification
+ * pass needlessly expensive. This wrapper batches thirty-two pages in one
+ * underlying read while preserving exact page-sized semantics to callers.
+ *
+ * 32 is intentional rather than arbitrary:
+ *   32 * 512 = 16384 bytes for VMC
+ *   32 * 528 = 16896 bytes = 33 * 512-byte sectors for PCSX2 raw images
+ * Thus both formats refill the cache on complete USB/FAT sector boundaries.
  *
  * The mode is explicitly enabled only around strictly sequential image readers.
  * It must remain disabled for the filesystem browser, which performs fileXioLseek
@@ -21,7 +25,7 @@
 #include "image_read_ahead.h"
 
 #define MCI_IMAGE_READ_AHEAD_MAX_STRIDE 528
-#define MCI_IMAGE_READ_AHEAD_PAGES 16
+#define MCI_IMAGE_READ_AHEAD_PAGES 32
 #define MCI_IMAGE_READ_AHEAD_BYTES (MCI_IMAGE_READ_AHEAD_MAX_STRIDE * MCI_IMAGE_READ_AHEAD_PAGES)
 
 static unsigned char Cache[MCI_IMAGE_READ_AHEAD_BYTES] __attribute__((aligned(64)));
