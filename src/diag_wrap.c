@@ -13,7 +13,10 @@
 #include "card_raw_session.h"
 #include "diag_log.h"
 #include "fmcb_transaction.h"
+#include "force_format_vmc.h"
+#include "image_quick_verify.h"
 #include "image_read_ahead.h"
+#include "image_write_behind.h"
 
 int __real_MciCardImageProbeGeometry(int port, MciCardGeometry *geometry);
 int __real_MciCardImageExport(int port, MciCardImageFormat format,
@@ -23,7 +26,6 @@ int __real_MciCardImageVerifyFile(const char *path, MciCardImageFormat format,
 int __real_MciCardImageRestoreExact(int port, const char *path,
                                     MciCardImageFormat format,
                                     MciCardImageReport *report);
-int __real_MciCardForceFormatWithBackup(int port, MciCardImageReport *report);
 int __real_MciImageFsScan(const char *path, MciCardImageFormat format,
                           MciImageSaveList *list);
 int __real_MciImageFsImportSelected(int target_port, MciImageSaveList *list,
@@ -43,6 +45,9 @@ int __real_mcReadPage(int port, int slot, int page, void *buffer);
 
 static unsigned int MassBackendInitCalls;
 static unsigned int RawReadTraceBudget;
+static int TrustedImportVerifyActive;
+static MciCardImageFormat TrustedImportFormat;
+static char TrustedImportPath[MCI_CARD_IMAGE_PATH_MAX];
 
 static void LogImageReport(const char *operation, int rc,
                            const MciCardImageReport *report)
@@ -208,7 +213,9 @@ int __wrap_MciCardImageExport(int port, MciCardImageFormat format,
                      port, MciCardImageFormatName(format));
     MciDiagLogSetMassWritePaused(1);
     MciImageReadAheadSetEnabled(1);
+    MciImageWriteBehindSetEnabled(1);
     rc = __real_MciCardImageExport(port, format, report);
+    MciImageWriteBehindSetEnabled(0);
     MciImageReadAheadSetEnabled(0);
     MciDiagLogSetMassWritePaused(0);
     LogImageReport("export", rc, report);
@@ -220,17 +227,48 @@ int __wrap_MciCardImageVerifyFile(const char *path, MciCardImageFormat format,
 {
     int rc;
     int sync_rc;
+    int trusted = TrustedImportVerifyActive && path != NULL &&
+                  format == TrustedImportFormat &&
+                  strcmp(path, TrustedImportPath) == 0;
 
     sync_rc = SyncPathDevice(path);
-    MciDiagLogPrintf("IMAGE", "verify begin format=%s path=%s preverify_sync=%d",
+    MciDiagLogPrintf("IMAGE", "%s begin format=%s path=%s preverify_sync=%d",
+                     trusted ? "trusted reopen verify" : "verify",
                      MciCardImageFormatName(format), path != NULL ? path : "NULL",
                      sync_rc);
     MciDiagLogSetMassWritePaused(1);
     MciImageReadAheadSetEnabled(1);
-    rc = __real_MciCardImageVerifyFile(path, format, report);
+    if (trusted)
+        rc = MciCardImageQuickReopenVerify(path, format, report);
+    else
+        rc = __real_MciCardImageVerifyFile(path, format, report);
+
+    if (!trusted && rc == -4 && format == MCI_CARD_IMAGE_PS2 && path != NULL) {
+        unsigned char actual[12];
+        unsigned char expected[12];
+        u32 page = 0u;
+        int find_rc = MciCardImageFindFirstEccMismatch(path, &page,
+                                                       actual, expected);
+        if (find_rc == 1) {
+            MciDiagLogPrintf("IMAGE-ECC",
+                             "first mismatch page=%u actual=%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X expected=%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
+                             page,
+                             actual[0], actual[1], actual[2], actual[3],
+                             actual[4], actual[5], actual[6], actual[7],
+                             actual[8], actual[9], actual[10], actual[11],
+                             expected[0], expected[1], expected[2], expected[3],
+                             expected[4], expected[5], expected[6], expected[7],
+                             expected[8], expected[9], expected[10], expected[11]);
+        } else {
+            MciDiagLogPrintf("IMAGE-ECC",
+                             "mismatch locator rc=%d after verifier rc=-4",
+                             find_rc);
+        }
+    }
+
     MciImageReadAheadSetEnabled(0);
     MciDiagLogSetMassWritePaused(0);
-    LogImageReport("verify", rc, report);
+    LogImageReport(trusted ? "trusted reopen verify" : "verify", rc, report);
     return rc;
 }
 
@@ -256,10 +294,10 @@ int __wrap_MciCardForceFormatWithBackup(int port, MciCardImageReport *report)
 {
     int rc;
 
-    MciDiagLogPrintf("IMAGE", "force format begin port=mc%d", port);
+    MciDiagLogPrintf("IMAGE", "force format begin port=mc%d backup=OPL .vmc", port);
     MciDiagLogSetMassWritePaused(1);
     MciImageReadAheadSetEnabled(1);
-    rc = __real_MciCardForceFormatWithBackup(port, report);
+    rc = MciCardForceFormatWithVmcBackup(port, report);
     MciImageReadAheadSetEnabled(0);
     MciDiagLogSetMassWritePaused(0);
     LogImageReport("force format", rc, report);
@@ -290,9 +328,23 @@ int __wrap_MciImageFsImportSelected(int target_port, MciImageSaveList *list,
     MciDiagLogPrintf("IMAGE-FS", "import begin target=mc%d path=%s",
                      target_port,
                      list != NULL && list->path[0] != '\0' ? list->path : "NULL");
+
+    TrustedImportVerifyActive = 0;
+    TrustedImportPath[0] = '\0';
+    if (list != NULL && list->path[0] != '\0') {
+        snprintf(TrustedImportPath, sizeof(TrustedImportPath), "%s", list->path);
+        TrustedImportFormat = list->format;
+        TrustedImportVerifyActive = 1;
+        MciDiagLogPrintf("IMAGE-FS",
+                         "selected-save import trusts prior full scan; second pass reduced to size/superblock reopen validation");
+    }
+
     MciDiagLogSetMassWritePaused(1);
     rc = __real_MciImageFsImportSelected(target_port, list, report);
     MciDiagLogSetMassWritePaused(0);
+    TrustedImportVerifyActive = 0;
+    TrustedImportPath[0] = '\0';
+
     MciDiagLogPrintf("IMAGE-FS",
                      "import end rc=%d result=%s selected=%d restored=%d files=%u dirs=%u bytes=%u rollback=%d",
                      rc, report != NULL ? MciImageFsResultText(report->result) : "NULL",
