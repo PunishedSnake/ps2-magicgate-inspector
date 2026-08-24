@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "image_write_behind.h"
+#include "r5900_memops.h"
 
 #define MCI_IMAGE_WRITE_MAX_STRIDE 528
 #define MCI_IMAGE_WRITE_PAGES 32
@@ -89,7 +90,10 @@ int __wrap_fileXioWrite(int fd, const void *buffer, int size)
         CacheStride = size;
     }
 
-    memcpy(Cache + CacheLength, buffer, (unsigned int)size);
+    /* Both supported record sizes are multiples of 16 and the image engine's
+     * page buffers are 64-byte aligned. Use LQ/SQ for that normal path while
+     * preserving a memcpy fallback for any future caller with weaker alignment. */
+    MciFastCopy(Cache + CacheLength, buffer, (unsigned int)size);
     CacheLength += size;
 
     if (CacheLength == CacheStride * MCI_IMAGE_WRITE_PAGES) {
