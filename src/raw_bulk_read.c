@@ -67,16 +67,19 @@ static void RunCpuBenchOnce(void)
 
     MciDiagLogPrintf(
         "R5900-PERF",
-        "steady-state copy8k iter=%u cycles=%u dual=%u icmiss=%u dcmiss=%u; crc8k iter=%u cycles=%u dual=%u icmiss=%u dcmiss=%u; ecc512 iter=%u cycles=%u dual=%u icmiss=%u dcmiss=%u hash=%08X",
+        "steady-state copy8k iter=%u cycles=%u dual=%u icmiss=%u dcmiss=%u branch=%u bpmiss=%u; crc8k iter=%u cycles=%u dual=%u icmiss=%u dcmiss=%u branch=%u bpmiss=%u; ecc512 iter=%u cycles=%u dual=%u icmiss=%u dcmiss=%u branch=%u bpmiss=%u hash=%08X",
         report.copy_iterations,
         report.copy_8k.cycles, report.copy_8k.dual_issues,
         report.copy_8k.icache_misses, report.copy_8k.dcache_misses,
+        report.copy_8k.branches, report.copy_8k.branch_mispredicts,
         report.crc_iterations,
         report.crc_8k.cycles, report.crc_8k.dual_issues,
         report.crc_8k.icache_misses, report.crc_8k.dcache_misses,
+        report.crc_8k.branches, report.crc_8k.branch_mispredicts,
         report.ecc_iterations,
         report.ecc_512.cycles, report.ecc_512.dual_issues,
         report.ecc_512.icache_misses, report.ecc_512.dcache_misses,
+        report.ecc_512.branches, report.ecc_512.branch_mispredicts,
         report.result_hash);
 }
 
