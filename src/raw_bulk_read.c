@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "raw_bulk_read.h"
+#include "r5900_memops.h"
 
 #define MCI_MCSERV_RPC_ID 0x80000400
 #define MCI_MCSERV_BULK_READ_CMD 0x81
@@ -171,7 +172,11 @@ int MciRawBulkReadTryPage(int port, int slot, int page, void *buffer)
     }
 
     offset = (u32)page - CacheStart;
-    memcpy(buffer, Cache + offset * MCI_PAGE_BYTES, MCI_PAGE_BYTES);
+    /* Every cache page starts at a 512-byte boundary. The image engine also
+     * supplies aligned page buffers, so the normal acquisition path now moves
+     * this hot 512-byte copy through native R5900 LQ/SQ. MciFastCopy keeps the
+     * wrapper safe for any future unaligned libmc caller. */
+    MciFastCopy(buffer, Cache + offset * MCI_PAGE_BYTES, MCI_PAGE_BYTES);
     PendingResult = (CacheWarningMask & (1u << offset)) ? 1 : 0;
     if (PendingResult > 0)
         Stats.ecc_warning_pages++;
