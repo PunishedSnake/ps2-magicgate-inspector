@@ -5,12 +5,15 @@
 
 #include "card_hot_swap.h"
 #include "card_image_fs.h"
+#include "card_save_picker.h"
 #include "save_transfer.h"
 
 int __real_MciImageFsRefreshTargetConflicts(int target_port,
                                             MciImageSaveList *list);
 int __real_MciSaveTransferImportFile(int target_port, const char *path,
                                      MciSaveTransferReport *report);
+int __real_MciCardSavePickerChoose(int *card_port, char *directory,
+                                   unsigned int directory_size);
 
 int __wrap_MciImageFsRefreshTargetConflicts(int target_port,
                                             MciImageSaveList *list)
@@ -38,4 +41,15 @@ int __wrap_MciSaveTransferImportFile(int target_port, const char *path,
         return rc;
     }
     return __real_MciSaveTransferImportFile(target_port, path, report);
+}
+
+int __wrap_MciCardSavePickerChoose(int *card_port, char *directory,
+                                   unsigned int directory_size)
+{
+    /* Settle both slots before the interactive picker so L1/R1 can move to a
+     * card that was physically replaced since the previous screen. Empty slots
+     * are allowed here; the real picker will present their normal warning. */
+    (void)MciNormalCardProbeFormatted(0, NULL);
+    (void)MciNormalCardProbeFormatted(1, NULL);
+    return __real_MciCardSavePickerChoose(card_port, directory, directory_size);
 }
