@@ -17,6 +17,7 @@
 #include "image_quick_verify.h"
 #include "image_read_ahead.h"
 #include "image_write_behind.h"
+#include "raw_bulk_read.h"
 
 int __real_MciCardImageProbeGeometry(int port, MciCardGeometry *geometry);
 int __real_MciCardImageExport(int port, MciCardImageFormat format,
@@ -123,16 +124,25 @@ void __wrap_FmcbShutdownMassBackend(FmcbMassBackendStatus *status)
 int __wrap_MciRawCardSessionStart(MciRawCardSessionStatus *status)
 {
     int rc;
+    int bulk_rc = -999;
 
     RawReadTraceBudget = 0u;
+    MciRawBulkReadReset();
     MciDiagLogPrintf("RAW", "session start begin");
     rc = __real_MciRawCardSessionStart(status);
     if (status == NULL) {
         MciDiagLogPrintf("RAW", "session start end rc=%d status=NULL", rc);
         return rc;
     }
+    if (rc == 0 && status->ready) {
+        /* This is an optional optimization layer. A stock/raw MCSERV mismatch
+         * must never take imaging down: failure simply leaves mcReadPage on the
+         * hardware-qualified one-page RPC path. */
+        bulk_rc = MciRawBulkReadBind();
+        RawReadTraceBudget = 4u;
+    }
     MciDiagLogPrintf("RAW",
-                     "session start end rc=%d ready=%d modules sio2=%d pad=%d mcman=%d mcserv=%d iomanx=%d filexio_mod=%d usbd=%d usbhdfsd=%d clients mcinit=%d mcinfo=%d/%d/%d type=%d free=%d formatted=%d filexio_init=%d",
+                     "session start end rc=%d ready=%d modules sio2=%d pad=%d mcman=%d mcserv=%d iomanx=%d filexio_mod=%d usbd=%d usbhdfsd=%d clients mcinit=%d mcinfo=%d/%d/%d type=%d free=%d formatted=%d filexio_init=%d bulk_bind=%d",
                      rc, status->ready, status->sio2_rc, status->pad_rc,
                      status->mcman_rc, status->mcserv_rc, status->iomanx_rc,
                      status->filexio_module_rc, status->usbd_rc,
@@ -140,18 +150,26 @@ int __wrap_MciRawCardSessionStart(MciRawCardSessionStatus *status)
                      status->mcinfo_issue_rc, status->mcinfo_sync_rc,
                      status->mcinfo_result, status->card_type,
                      status->free_clusters, status->formatted,
-                     status->filexio_init_rc);
-    if (rc == 0 && status->ready)
-        RawReadTraceBudget = 4u;
+                     status->filexio_init_rc, bulk_rc);
     return rc;
 }
 
 void __wrap_MciRawCardSessionStop(MciRawCardSessionStatus *status)
 {
+    MciRawBulkReadStats bulk;
+
     RawReadTraceBudget = 0u;
+    MciRawBulkReadGetStats(&bulk);
+    MciDiagLogPrintf("RAW-BULK",
+                     "stats bound=%d bind_rc=%d rpc_calls=%u cache_hits=%u fallbacks=%u pages_fetched=%u ecc_warnings=%u last_rpc=%d rpc_ticks=%llu",
+                     bulk.bound, bulk.bind_rc, bulk.rpc_calls, bulk.cache_hits,
+                     bulk.fallback_calls, bulk.pages_fetched,
+                     bulk.ecc_warning_pages, bulk.last_rpc_rc,
+                     (unsigned long long)bulk.rpc_ticks);
     MciDiagLogPrintf("RAW", "session stop begin ready=%d",
                      status != NULL ? status->ready : -1);
     __real_MciRawCardSessionStop(status);
+    MciRawBulkReadReset();
     MciDiagLogPrintf("RAW", "session stop end ready=%d",
                      status != NULL ? status->ready : -1);
 }
@@ -159,6 +177,7 @@ void __wrap_MciRawCardSessionStop(MciRawCardSessionStatus *status)
 int __wrap_mcReadPage(int port, int slot, int page, void *buffer)
 {
     int rc;
+    int bulk_handled;
     int trace = RawReadTraceBudget > 0u;
 
     if (trace) {
@@ -167,11 +186,15 @@ int __wrap_mcReadPage(int port, int slot, int page, void *buffer)
                          "mcReadPage issue begin port=%d slot=%d page=%d buffer=%p budget_after=%u",
                          port, slot, page, buffer, RawReadTraceBudget);
     }
-    rc = __real_mcReadPage(port, slot, page, buffer);
+
+    bulk_handled = MciRawBulkReadTryPage(port, slot, page, buffer);
+    rc = bulk_handled ? 0 : __real_mcReadPage(port, slot, page, buffer);
+
     if (trace)
         MciDiagLogPrintf("RAW-RPC",
-                         "mcReadPage issue end port=%d slot=%d page=%d rc=%d",
-                         port, slot, page, rc);
+                         "mcReadPage issue end port=%d slot=%d page=%d rc=%d path=%s",
+                         port, slot, page, rc,
+                         bulk_handled ? "bulk-cache" : "libmc-fallback");
     return rc;
 }
 
