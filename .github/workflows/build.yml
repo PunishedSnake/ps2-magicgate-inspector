@@ -134,6 +134,7 @@ jobs:
             -w /work \
             ps2dev/ps2dev:v2.0.0 \
             sh -c 'set -eu; \
+              apk add --no-cache build-base >/dev/null; \
               mips64r5900el-ps2-elf-gcc \
                 -D_EE -G0 -O2 -Wall -gdwarf-2 -gz \
                 -O3 -G0 -Wall -Wextra -std=gnu99 \
