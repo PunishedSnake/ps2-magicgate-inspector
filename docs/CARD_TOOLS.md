@@ -63,6 +63,35 @@ An export is not reported as successful after the last write alone. Drebin close
 
 A small `<image>.mci.txt` sidecar records geometry, format, CRC32 and verification state without modifying the standard `.ps2` or `.vmc` file itself.
 
+### 64 MiB `.ps2` failure evidence, 2026-08-24
+
+A post-logger-fix hardware capture reached all `131072/131072` logical pages and recorded acquisition CRC `EA8827F0`, but the completed 69,206,016-byte `.ps2` failed spare verification. Offline inspection found only three immediately invalid 16-byte spare records (pages `0`, `46` and `8952`), while the logical 512-byte stream in the completed file also no longer matched the acquisition CRC. No `DREBIN.LOG` text was present inside this fresh image.
+
+This proves the remaining failure is later than the raw card acquisition path and is not a recurrence of the old logger corruption. The current suspect boundary is small unaligned fileXio/USBHDFSD image I/O. PS2SDK itself documents USB mass-storage alignment failures on direct transfers, so Drebin now batches image writes and sequential reads on complete 512-byte sector boundaries:
+
+```text
+VMC   32 * 512 = 16384 bytes
+PS2   32 * 528 = 16896 bytes = 33 * 512-byte sectors
+```
+
+The verifier additionally records the first failing `.ps2` ECC page and both stored/expected ECC bytes when `rc=-4` occurs.
+
+## Raw-card SIF/RPC optimization
+
+The public legacy libmc page API performs one asynchronous SIF RPC per 512-byte page followed by one `mcSync()`. A 64 MiB image therefore used to require 131072 EE-to-IOP page RPC round trips even though MCSERV already owns an 8192-byte staging buffer for ordinary bulk file reads.
+
+Drebin's **temporary private raw MCSERV only** now adds RPC command `0x81` for a bounded sixteen-page read:
+
+```text
+16 pages * 512 bytes = 8192 bytes
+```
+
+The IOP still calls the same MCMAN `McReadPage()` once for every physical page, preserving SIO2 routing, ECC semantics and per-page bad-block maintenance. The optimization removes repeated EE/IOP dispatch and transfers all sixteen logical pages to an aligned EE buffer with one SIF DMA. The EE wrapper then satisfies the unchanged public `mcReadPage -> mcSync` contract from a cache. If the private command cannot bind or a batch fails, the request transparently falls back to stock one-page libmc RPC behavior.
+
+For a sequential 64 MiB dump this reduces the expected number of page-read SIF RPCs from `131072` to approximately `8192`. Hardware telemetry records bulk RPC count, cache hits, fallbacks, pages fetched, source-ECC warnings and accumulated RPC timer ticks. The optimization does **not** alter the normal Sony ROM X stack or the MagicGate personality.
+
+Future optimization work must measure this boundary before introducing R5900/MMI assembly. In this workload IOP/SIO2/USB latency can dominate EE arithmetic, so removing cross-processor transactions has higher priority than hand-vectorizing small loops.
+
 ## Persistent logger isolation during image I/O
 
 Real-hardware testing on 2026-08-24 established that USBHDFSD/fileXio must not be treated as safely supporting Drebin's previous logging pattern while a card-image file descriptor remains open.
@@ -94,6 +123,10 @@ log operation start durably
 
 Do not reintroduce per-progress durable logging while an image file is open. If persistent mid-stream crash checkpoints become necessary, the image itself must first be closed/synced before the logger touches `mass:` and then reopened explicitly; concurrent long-lived image I/O plus logger append traffic is not an accepted design.
 
+## Selective restore scan lifetime
+
+Image Browser performs one complete verification and filesystem scan when a source image is selected. A selected-save import in the same browser session must not repeat that complete 64 MiB sequential verification. The import reopens the same path and revalidates file size, format and page-zero superblock/geometry before following the already indexed FAT chains. Destination files are still reopened and compared byte-for-byte before the transaction can reach PASS.
+
 ## Exact restore
 
 Exact restore is intentionally strict:
@@ -110,7 +143,7 @@ This operation is for same-geometry restore. It is **not** smaller-to-larger mig
 
 ## Force format
 
-Force format is backup-first. Drebin must create and verify a `.ps2` recovery image on USB before `mcFormat()` is issued. If image creation or read-back verification fails, format remains blocked.
+Force format is backup-first. Drebin must create and verify a `.vmc` logical recovery image on USB before `mcFormat()` is issued. If image creation or read-back CRC verification fails, format remains blocked. The VMC format is deliberate: formatting safety must not depend on the still-under-qualification `.ps2` spare/ECC output path.
 
 This gives a deterministic recovery path for formats performed by Drebin. Recovery of a card that was formatted earlier without a backup is a separate forensic problem and cannot be promised losslessly.
 
