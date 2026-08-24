@@ -53,8 +53,11 @@ int MciNormalCardProbeFormatted(int port, int *free_clusters)
                 *free_clusters = free_value;
             return 0;
         }
+        /* FailDetect/transport errors describe an empty or genuinely missing
+         * slot, not a changed-card transition. Do not reset libmc merely because
+         * the other physical slot is empty. */
         if (rc < sceMcResNoFormat && rc != sceMcResChangedCard)
-            break;
+            return rc;
         DelayThread(16000);
     }
 
