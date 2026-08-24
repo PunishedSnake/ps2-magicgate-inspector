@@ -4,6 +4,29 @@ Drebin's next Card Tools iteration separates full-card imaging from individual-s
 
 Full-card imaging remains the hardware-qualified raw workflow. The new **Save Transfer** path is filesystem/container aware and is intended for moving individual saves between USB files, full memory-card images and physical cards without transplanting card geometry.
 
+## Current implementation status
+
+The implementation is deliberately landing in hardware-testable slices rather than replacing every Card Tools path at once.
+
+Implemented on the Save Transfer development branch:
+
+- Card Tools owns a local active-card context; `L1`/`R1` can switch `mc0`/`mc1` without returning to the dashboard;
+- Image Browser can also switch the destination slot and refreshes free-space/conflict state before allowing new selections;
+- a bounded, non-recursive USB file picker enumerates `mass:/`, `mass0:/` and `mass1:/`, sorts directories before files and filters supported image/save extensions;
+- the legacy image lookup is intercepted so Browse/Restore and Exact Restore can choose an arbitrary `.ps2` or `.vmc` file rather than requiring a Drebin-generated basename;
+- the image browser has a presentation-only `icon.sys` title resolver: the real filesystem directory name remains authoritative for conflict detection and restore, while a decoded title can be shown to the user;
+- the first writable single-save backend, PSU, is implemented with container validation, conflict/free-space checks, metadata restoration, byte-for-byte post-write verification and rollback of objects created by the current import;
+- PSU export writes the conventional 512-byte-entry/1024-byte-padded format, closes and syncs the USB output, then reopens it and byte-compares every exported file with the source card before reporting PASS.
+
+Not yet exposed as the final Card Tools workflow:
+
+- the unified **Import Save** and **Export Save** menu entries;
+- MAX/PWS, CBS, SPS/XPS and PSV decoders;
+- PS1 MCS/GME/PSX/PSV importers;
+- full Shift-JIS rendering. The first title pass is ASCII-first and falls back to the raw directory identifier if a useful title cannot be represented safely.
+
+A temporary integration detail remains while the old Card Tools controller is still present: cancelling the new image picker at its root returns an explicit cancellation code, but the legacy caller currently turns every negative lookup result into its old "image not found" warning. The Card Tools v2 controller must consume cancellation separately.
+
 ## Local card selection
 
 Card Tools must not inherit an immutable target from the dashboard.
@@ -23,19 +46,19 @@ Switching destination cards inside a save/image browser must refresh free-space 
 
 ## One file picker, not "latest image"
 
-Browse/Restore must stop depending on Drebin-generated names such as `mc0-00.vmc` or `mc0-00.ps2`.
+Browse/Restore must not depend on Drebin-generated names such as `mc0-00.vmc` or `mc0-00.ps2`.
 
-A primitive USB file picker is sufficient and preferable:
+The shared USB picker:
 
-- enumerate directories and supported files;
-- show the current path;
+- enumerates directories and supported files without recursively scanning the whole drive;
+- shows the current path;
 - `UP/DOWN` moves;
 - `X` opens a directory or selects a file;
 - `CIRCLE` moves to parent/back;
-- `L1/R1` changes the destination card where the operation has one;
-- files are identified by extension plus signature/structure validation, not by a required basename.
+- the active USB root can be changed between `mass:/`, `mass0:/` and `mass1:/`;
+- files are filtered by extension for navigation and are still structurally/signature validated by the consumer before any destructive action.
 
-The picker is shared by Image Browser, Exact Restore and Save Import.
+The picker is shared by Image Browser, Exact Restore and Save Import. Full-card image verification remains unchanged after a file is selected.
 
 ## Unified format model
 
@@ -81,19 +104,21 @@ Reasons:
 
 Additional export formats can be added later, but the normal one-button export should stay PSU unless a concrete interoperability reason justifies another format.
 
+The current PSU backend is intentionally fail-closed. It accepts the conventional flat PS2 save-directory form and refuses to silently discard unexpected nested directory objects.
+
 ## Human-readable save names
 
-The image browser currently exposes raw directory names such as `BASLUS-21004HIFU`. Those names remain important identifiers, but should not be the primary display label.
+The image browser must not expose raw directory names such as `BASLUS-21004HIFU` as the only user-facing identity when the save contains a usable title.
 
-The first metadata source is the save's `icon.sys` file. PS2SDK documents the `mcIcon` structure and its 34-character Shift-JIS title field. Drebin should read `icon.sys` from the save directory/image, validate the `PS2D` header and decode the title for display.
+The first metadata source is the save's `icon.sys` file. PS2SDK documents the `mcIcon` structure and its 34-character Shift-JIS title field. Drebin reads `icon.sys` from the save directory/image, validates the `PS2D` header and decodes a representable title for display.
 
 Display policy:
 
-1. decoded `icon.sys` title when valid;
+1. decoded `icon.sys` title when valid and representable;
 2. optional later heuristics from other small save metadata files;
 3. raw directory name as a guaranteed fallback.
 
-The raw directory name is always retained in a secondary field because it is the real filesystem object used for conflict detection and restore.
+The raw directory name is always retained separately because it is the real filesystem object used for conflict detection and restore. Presentation code must never rewrite the identifier used by the transaction engine.
 
 ## Import safety contract
 
@@ -115,6 +140,8 @@ pick file
 
 On failure, only objects created by the current transaction are rolled back. Existing saves are not overwritten by the initial implementation. Replace/merge policy remains a separate future conflict workflow.
 
+The persistent diagnostic logger follows the same USB isolation rule as full-card imaging: while a save archive is held open for long-form read/write/verification, durable `DREBIN.LOG` writes are paused and trace lines remain in EE RAM until the archive descriptor is closed. This prevents recurrence of the hardware-proven USBHDFSD cross-file corruption bug.
+
 ## Implementation sources and licensing
 
 Useful public references include:
@@ -124,4 +151,4 @@ Useful public references include:
 - ps2dev/mymc for documented PSU/MAX/SPS/CBS parsing and PS2 memory-card filesystem behavior;
 - PS2SDK `libmc.h` for `mcIcon` / `icon.sys` layout.
 
-Code copied or adapted into Drebin must retain compatible licensing/attribution as required. Prefer reimplementation from documented structures where this keeps Drebin's licensing and safety boundaries simple.
+Code copied or adapted into Drebin must retain compatible licensing/attribution as required. Prefer original reimplementation from documented structures and externally observable container behaviour where this keeps Drebin's licensing and safety boundaries simple.
