@@ -14,7 +14,9 @@
 #include <timer.h>
 #include <string.h>
 
+#include "diag_log.h"
 #include "raw_bulk_read.h"
+#include "r5900_bench.h"
 #include "r5900_memops.h"
 
 #define MCI_MCSERV_RPC_ID 0x80000400
@@ -46,6 +48,37 @@ static u32 CacheCount;
 static u16 CacheWarningMask;
 static int Pending;
 static int PendingResult;
+static int CpuBenchDone;
+
+static void RunCpuBenchOnce(void)
+{
+    MciR5900BenchReport report;
+    int rc;
+
+    if (CpuBenchDone)
+        return;
+    CpuBenchDone = 1;
+
+    rc = MciR5900BenchRun(&report);
+    if (rc < 0) {
+        MciDiagLogPrintf("R5900-PERF", "kernel benchmark failed rc=%d", rc);
+        return;
+    }
+
+    MciDiagLogPrintf(
+        "R5900-PERF",
+        "steady-state copy8k iter=%u cycles=%u dual=%u icmiss=%u dcmiss=%u; crc8k iter=%u cycles=%u dual=%u icmiss=%u dcmiss=%u; ecc512 iter=%u cycles=%u dual=%u icmiss=%u dcmiss=%u hash=%08X",
+        report.copy_iterations,
+        report.copy_8k.cycles, report.copy_8k.dual_issues,
+        report.copy_8k.icache_misses, report.copy_8k.dcache_misses,
+        report.crc_iterations,
+        report.crc_8k.cycles, report.crc_8k.dual_issues,
+        report.crc_8k.icache_misses, report.crc_8k.dcache_misses,
+        report.ecc_iterations,
+        report.ecc_512.cycles, report.ecc_512.dual_issues,
+        report.ecc_512.icache_misses, report.ecc_512.dcache_misses,
+        report.result_hash);
+}
 
 static void InvalidateCache(void)
 {
@@ -78,6 +111,11 @@ int MciRawBulkReadBind(void)
     memset(&Client, 0, sizeof(Client));
     InvalidateCache();
     Pending = 0;
+
+    /* Run the bounded CPU-only benchmark before the long raw stream begins.
+     * It does not touch mass: or the card and therefore cannot perturb an open
+     * image descriptor. Results are retained in the normal diagnostic ring. */
+    RunCpuBenchOnce();
 
     for (attempt = 0; attempt < 64; attempt++) {
         rc = sceSifBindRpc(&Client, MCI_MCSERV_RPC_ID, 0);
