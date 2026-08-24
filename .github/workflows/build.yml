@@ -53,6 +53,10 @@ jobs:
         shell: bash
         run: docker --version
 
+      - name: Verify card-math optimization equivalence
+        shell: bash
+        run: python3 tools/verify_card_math.py
+
       - name: Stage PS2SDK 2.0 security and card personalities
         shell: bash
         run: |
@@ -99,7 +103,12 @@ jobs:
             -v "$GITHUB_WORKSPACE:/work" \
             -w /work \
             ps2dev/ps2dev:v2.0.0 \
-            sh -c 'set -eu; apk add --no-cache build-base >/dev/null; mips64r5900el-ps2-elf-gcc --version; make'
+            sh -c 'set -eu; \
+              apk add --no-cache build-base >/dev/null; \
+              mips64r5900el-ps2-elf-gcc --version; \
+              echo "R5900 target options:"; \
+              mips64r5900el-ps2-elf-gcc -Q --help=target -c -x c /dev/null -o /tmp/r5900-target-probe.o 2>/dev/null | grep -E "march=|mtune=|mfix-r5900" || true; \
+              make'
 
       - name: Assemble development artifact
         shell: bash
