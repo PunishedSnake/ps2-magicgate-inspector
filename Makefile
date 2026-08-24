@@ -8,7 +8,13 @@ EE_OBJS = src/app_main_v2.o src/gui_v2.o src/progress.o src/diag_log.o src/diag_
 EE_LIBS = -ldebug -ldraw -lgraph -lpacket -ldma -lpad -lmc -lfileXio -lcdvd -lsecr \
 	-lioprpgen -liopreboot -lpatches -lkernel
 EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections \
-	-DNEWLIB_PORT_AWARE -DMG_SECR_PROFILE_PS2SDK14=1
+	-DMG_SECR_PROFILE_PS2SDK14=1
+
+# These two v2 composition sources intentionally call low-level fileXio/newlib
+# side by side. Existing backend sources already opt in locally, so keep this
+# target-scoped instead of redefining NEWLIB_PORT_AWARE across the whole build.
+src/app_main_v2.o src/card_save_picker.o: EE_CFLAGS += -DNEWLIB_PORT_AWARE
+
 EE_LDFLAGS = -Wl,--gc-sections \
 	-Wl,--wrap=SifExecModuleBuffer \
 	-Wl,--wrap=mcInit \
