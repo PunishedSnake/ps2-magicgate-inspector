@@ -6,7 +6,19 @@
 
 #include "save_title.h"
 
-#define ICON_SYS_TITLE_OFFSET 188u
+/* PS2SDK mcIcon layout:
+ * 0x000 head[4]
+ * 0x004 type
+ * 0x006 nlOffset
+ * 0x008 unknown2
+ * 0x00C trans
+ * 0x010 bgCol[4]       (64 bytes)
+ * 0x050 lightDir[3]    (48 bytes)
+ * 0x080 lightCol[3]    (48 bytes)
+ * 0x0B0 lightAmbient   (16 bytes)
+ * 0x0C0 title[34]
+ */
+#define ICON_SYS_TITLE_OFFSET 192u
 #define ICON_SYS_TITLE_UNITS 34u
 #define ICON_SYS_NL_OFFSET 6u
 
