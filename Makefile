@@ -15,6 +15,20 @@ EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections
 # target-scoped instead of redefining NEWLIB_PORT_AWARE across the whole build.
 src/app_main_v2.o src/card_save_picker.o: EE_CFLAGS += -DNEWLIB_PORT_AWARE
 
+# PS2DEV's R5900 compiler selects the R5900 ISA and enables -mfix-r5900, but the
+# GCC 15.2.0 toolchain currently reports a default -mtune=mips1. Keep the first
+# scheduling experiment deliberately scoped to the measured image hot path
+# instead of changing every UI/installer object at once. -mtune changes cost and
+# scheduling choices only; it does not widen the ISA selected by the toolchain.
+R5900_HOT_OBJS = \
+	src/raw_bulk_read.o \
+	src/card_math.o \
+	src/image_read_ahead.o \
+	src/image_write_behind.o \
+	src/image_quick_verify.o \
+	src/card_image.o
+$(R5900_HOT_OBJS): EE_CFLAGS += -mtune=r5900
+
 EE_LDFLAGS = -Wl,--gc-sections \
 	-Wl,--wrap=SifExecModuleBuffer \
 	-Wl,--wrap=mcInit \
