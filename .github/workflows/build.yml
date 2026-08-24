@@ -123,6 +123,35 @@ jobs:
           echo 'R5900 report summary:'
           grep -E '^(Compiler:|Target:|Final ELF|card_math compiler|[[:space:]]*text)' artifacts/R5900_STATIC_REPORT.txt || true
 
+      - name: Build card-math O3 hardware A-B candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .build/r5900-ab artifacts
+          cp MC_INSPECTOR.ELF .build/r5900-ab/MC_INSPECTOR-O2.ELF
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            ps2dev/ps2dev:v2.0.0 \
+            sh -c 'set -eu; \
+              mips64r5900el-ps2-elf-gcc \
+                -D_EE -G0 -O2 -Wall -gdwarf-2 -gz \
+                -O3 -G0 -Wall -Wextra -std=gnu99 \
+                -fdata-sections -ffunction-sections \
+                -DMG_SECR_PROFILE_PS2SDK14=1 -mtune=r5900 \
+                -I/usr/local/ps2dev/ps2sdk/ee/include \
+                -I/usr/local/ps2dev/ps2sdk/common/include -I. \
+                -c src/card_math.c -o src/card_math.o; \
+              make MC_INSPECTOR.ELF'
+          cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-cardmath-O3.ELF
+          cp .build/r5900-ab/MC_INSPECTOR-O2.ELF MC_INSPECTOR.ELF
+          {
+            echo 'R5900 hardware A/B candidate'
+            echo 'Baseline: MC_INSPECTOR.ELF = normal production O2 policy.'
+            echo 'Candidate: MC_INSPECTOR-cardmath-O3.ELF = identical sources/link except card_math.c compiled with -O3 -mtune=r5900.'
+            echo 'Compare the R5900-PERF line in DREBIN.LOG and require identical benchmark result hash plus normal image verification.'
+          } > artifacts/R5900_AB_README.txt
+
       - name: Assemble development artifact
         shell: bash
         run: |
@@ -145,6 +174,7 @@ jobs:
             echo "EE stream copy: native R5900 LQ/SQ qword path for aligned image buffers with memcpy fallback"
             echo "EE profiling: bounded R5900 PCCR/PCR hardware-counter benchmark for copy, CRC32 and ECC hot kernels"
             echo "Compiler audit: R5900_STATIC_REPORT.txt records target flags, optimizer switches, sizes and hot-path disassembly"
+            echo "A/B candidate: MC_INSPECTOR-cardmath-O3.ELF changes only card_math.c from the production O2 policy to -O3 -mtune=r5900"
             echo "Normal card restore fix: XMC mcInit re-primes card detection after temporary IOP personalities"
             echo "Selective restore: source geometry is never copied; saves are streamed through PS2 filesystem/FAT parsing into the destination card"
             echo "MagicGate: immutable raw FMCB.XLF cache in EE RAM with disposable per-bind clones"
@@ -159,9 +189,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          file artifacts/MC_INSPECTOR.ELF
-          ls -lh artifacts/MC_INSPECTOR.ELF artifacts/R5900_STATIC_REPORT.txt
-          sha256sum artifacts/MC_INSPECTOR.ELF | tee artifacts/SHA256SUMS.txt
+          file artifacts/MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-cardmath-O3.ELF
+          ls -lh artifacts/MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-cardmath-O3.ELF artifacts/R5900_STATIC_REPORT.txt
+          sha256sum artifacts/MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-cardmath-O3.ELF | tee artifacts/SHA256SUMS.txt
 
       - name: Upload development build
         uses: actions/upload-artifact@v4
