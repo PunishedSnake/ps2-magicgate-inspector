@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "card_math.h"
 #include "image_quick_verify.h"
 
 #define QV_PAGE_DATA 512u
@@ -76,59 +77,6 @@ static int ParseGeometry(const unsigned char page[QV_PAGE_DATA],
     geometry->total_pages = (u32)pages;
     geometry->from_superblock = 1;
     return 0;
-}
-
-static unsigned char Parity8(unsigned char value)
-{
-    value ^= value >> 4;
-    value ^= value >> 2;
-    value ^= value >> 1;
-    return value & 1u;
-}
-
-static unsigned char ColumnMask(unsigned char value)
-{
-    static const unsigned char BitMasks[8] = {
-        0x07, 0x16, 0x25, 0x34, 0x43, 0x52, 0x61, 0x70
-    };
-    unsigned char mask = 0;
-    unsigned int bit;
-
-    for (bit = 0; bit < 8; bit++)
-        if (value & (1u << bit))
-            mask ^= BitMasks[bit];
-    return mask;
-}
-
-static u32 CalculateEcc128(const unsigned char *data)
-{
-    unsigned char column = 0x77;
-    unsigned char line0 = 0x7F;
-    unsigned char line1 = 0x7F;
-    unsigned int i;
-
-    for (i = 0; i < 128u; i++) {
-        unsigned char value = data[i];
-        column ^= ColumnMask(value);
-        if (Parity8(value)) {
-            line0 ^= (unsigned char)(~i);
-            line1 ^= (unsigned char)i;
-        }
-    }
-    return (u32)column | ((u32)line0 << 8) | ((u32)line1 << 16);
-}
-
-static void BuildEcc12(const unsigned char data[QV_PAGE_DATA],
-                       unsigned char expected[12])
-{
-    unsigned int chunk;
-
-    for (chunk = 0; chunk < 4u; chunk++) {
-        u32 ecc = CalculateEcc128(data + chunk * 128u);
-        expected[chunk * 3u + 0u] = (unsigned char)(ecc & 0xFFu);
-        expected[chunk * 3u + 1u] = (unsigned char)((ecc >> 8) & 0xFFu);
-        expected[chunk * 3u + 2u] = (unsigned char)((ecc >> 16) & 0xFFu);
-    }
 }
 
 int MciCardImageQuickReopenVerify(const char *path,
@@ -212,7 +160,7 @@ int MciCardImageFindFirstEccMismatch(const char *path, u32 *page_out,
             fileXioClose(fd);
             return -4;
         }
-        BuildEcc12(raw, expected);
+        MciCardMathBuildEcc12(raw, expected);
         if (memcmp(raw + QV_PAGE_DATA, expected, 12u) != 0) {
             memcpy(actual, raw + QV_PAGE_DATA, 12u);
             *page_out = page;
