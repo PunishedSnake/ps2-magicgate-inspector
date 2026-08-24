@@ -130,6 +130,7 @@ int MciR5900BenchRun(MciR5900BenchReport *report)
         return -1;
 
     memset(report, 0, sizeof(*report));
+    BenchSink = 0u;
     PrepareSource();
 
     /* Warm the exact code and lookup tables before the measured steady-state
