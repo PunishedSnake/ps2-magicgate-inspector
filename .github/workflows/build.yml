@@ -143,9 +143,9 @@ jobs:
                 -I/usr/local/ps2dev/ps2sdk/ee/include \
                 -I/usr/local/ps2dev/ps2sdk/common/include -I. \
                 -c src/card_math.c -o src/card_math.o; \
-              make MC_INSPECTOR.ELF'
-          cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-cardmath-O3.ELF
-          cp .build/r5900-ab/MC_INSPECTOR-O2.ELF MC_INSPECTOR.ELF
+              make MC_INSPECTOR.ELF; \
+              cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-cardmath-O3.ELF; \
+              cp .build/r5900-ab/MC_INSPECTOR-O2.ELF MC_INSPECTOR.ELF'
           {
             echo 'R5900 hardware A/B candidate'
             echo 'Baseline: MC_INSPECTOR.ELF = normal production O2 policy.'
