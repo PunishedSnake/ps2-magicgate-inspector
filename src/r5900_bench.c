@@ -99,6 +99,7 @@ static u32 MeasureKernel(MciBenchKernel kernel, MciR5900BenchMetric *metric)
     MciR5900PerfSample sample;
     u32 result_a;
     u32 result_b;
+    u32 result_c;
 
     /* Pair A quantifies scheduling efficiency: elapsed processor cycles and
      * how often the EE actually issued two instructions together. */
@@ -119,7 +120,17 @@ static u32 MeasureKernel(MciBenchKernel kernel, MciR5900BenchMetric *metric)
     metric->icache_misses = sample.counter0;
     metric->dcache_misses = sample.counter1;
 
-    return MixHash(result_a, result_b);
+    /* Pair C distinguishes loop/control-flow cost from cache or arithmetic
+     * cost. O2/O3 often differ in unrolling and delay-slot filling, so branch
+     * traffic and actual mispredicts are part of the hardware A/B result. */
+    MciR5900PerfBegin(MCI_R5900_PC0_BRANCH_ISSUED,
+                      MCI_R5900_PC1_BRANCH_MISPREDICT);
+    result_c = kernel();
+    MciR5900PerfEnd(&sample);
+    metric->branches = sample.counter0;
+    metric->branch_mispredicts = sample.counter1;
+
+    return MixHash(MixHash(result_a, result_b), result_c);
 }
 
 int MciR5900BenchRun(MciR5900BenchReport *report)
