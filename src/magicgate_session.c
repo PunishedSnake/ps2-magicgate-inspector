@@ -27,6 +27,7 @@
 #include <libmc.h>
 
 #include "magicgate_session.h"
+#include "raw_bulk_read.h"
 
 extern unsigned char fmcb_mcserv_irx[];
 extern unsigned char secrsif_irx[];
@@ -153,6 +154,15 @@ int __wrap_mcGetInfo(int port, int slot, int *type, int *free_clusters,
 
 int __wrap_mcSync(int mode, int *cmd, int *result)
 {
+    int bulk_sync_rc;
+
+    /* The raw bulk reader completes its private RPC synchronously but must still
+     * present libmc's public asynchronous mcReadPage -> mcSync contract to the
+     * unchanged image engine. Consume that synthetic completion before any
+     * MagicGate fake-MCSERV state or the real libmc client is consulted. */
+    if (MciRawBulkReadSyncPending(mode, cmd, result, &bulk_sync_rc))
+        return bulk_sync_rc;
+
     if (IsolatedNoMcserv && FakeMcPending) {
         (void)mode;
         if (cmd != 0)
