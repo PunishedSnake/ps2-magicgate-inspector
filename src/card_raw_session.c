@@ -1,0 +1,213 @@
+/* SPDX-License-Identifier: MIT */
+/*
+ * Page-level memory-card personality for Drebin Card Tools.
+ *
+ * Sony ROM XMCSERV intentionally does not expose libmc's legacy raw-page RPCs.
+ * Modern PS2SDK's default MCSERV build is also XMC-compatible, which makes
+ * libmc identify it as MC_TYPE_XMC and reject mcReadPage/mcWritePage by design.
+ * Imaging therefore uses a separately built legacy PS2SDK MCMAN/MCSERV pair
+ * with XMC compatibility disabled, plus USBHDFSD in the same temporary IOP.
+ */
+
+#define NEWLIB_PORT_AWARE
+
+#include <tamtypes.h>
+#include <kernel.h>
+#include <sifrpc.h>
+#include <iopcontrol.h>
+#include <iopheap.h>
+#include <loadfile.h>
+#include <delaythread.h>
+#include <libmc.h>
+#include <fileXio_rpc.h>
+#include <sbv_patches.h>
+#include <string.h>
+
+#include "card_raw_session.h"
+#include "diag_log.h"
+#include "magicgate_session.h"
+#include "progress.h"
+
+extern unsigned char fmcb_freesio2_irx[];
+extern unsigned int size_fmcb_freesio2_irx;
+extern unsigned char fmcb_freepad_irx[];
+extern unsigned int size_fmcb_freepad_irx;
+extern unsigned char raw_mcman_irx[];
+extern unsigned int size_raw_mcman_irx;
+extern unsigned char raw_mcserv_irx[];
+extern unsigned int size_raw_mcserv_irx;
+extern unsigned char iomanX_irx[];
+extern unsigned int size_iomanX_irx;
+extern unsigned char fileXio_irx[];
+extern unsigned int size_fileXio_irx;
+extern unsigned char usbd_irx[];
+extern unsigned int size_usbd_irx;
+extern unsigned char usbhdfsd_irx[];
+extern unsigned int size_usbhdfsd_irx;
+
+static int ExecEmbedded(const unsigned char *data, unsigned int size)
+{
+    int start_rc = -999;
+    int module_id = SifExecModuleBuffer((void *)data, size, 0, NULL, &start_rc);
+
+    if (module_id < 0)
+        return module_id;
+    /* IRX resident/no-resident return conventions are module-specific. The
+     * module id is the reliable load result; client binding below proves the
+     * service actually became usable. */
+    return module_id;
+}
+
+void MciRawCardSessionReset(MciRawCardSessionStatus *status)
+{
+    memset(status, 0, sizeof(*status));
+    status->sio2_rc = -999;
+    status->pad_rc = -999;
+    status->mcman_rc = -999;
+    status->mcserv_rc = -999;
+    status->iomanx_rc = -999;
+    status->filexio_module_rc = -999;
+    status->usbd_rc = -999;
+    status->usbhdfsd_rc = -999;
+    status->mcinit_rc = -999;
+    status->mcinfo_issue_rc = -999;
+    status->mcinfo_sync_rc = -999;
+    status->mcinfo_result = -999;
+    status->card_type = MC_TYPE_NONE;
+    status->free_clusters = -1;
+    status->formatted = 0;
+    status->filexio_init_rc = -999;
+}
+
+int MciRawCardSessionStart(MciRawCardSessionStatus *status)
+{
+    int mcinfo_result = -999;
+    int type = MC_TYPE_NONE;
+    int free_clusters = -1;
+    int formatted = 0;
+    int rc;
+
+    if (status == NULL)
+        return -1;
+    MciRawCardSessionReset(status);
+
+    /* The caller normally detached the normal mass backend already. Repeat the
+     * transition here defensively so no progress callback can ever try to use a
+     * stale fileXio client across the IOP reset below. Detach itself is RAM-only. */
+    MciDiagLogSetIoAvailable(0);
+
+    /* MagicGate's fake-MCSERV state lives on the EE and survives an IOP reset.
+     * Clear it before the real raw personality so mcInit cannot be swallowed. */
+    MciSessionResetShim();
+
+    MciProgressUpdate(MCI_PROGRESS_CARD_TOOLS, 2,
+                      "Entering raw card mode",
+                      "Resetting the IOP before loading the legacy page-level PS2SDK memory-card stack.");
+    SifInitRpc(0);
+    while (!SifIopReset(NULL, 0)) {;}
+    while (!SifIopSync()) {;}
+    SifInitRpc(0);
+
+    rc = SifLoadFileInit();
+    if (rc < 0)
+        return rc;
+    SifInitIopHeap();
+    sbv_patch_enable_lmb();
+
+    MciProgressUpdate(MCI_PROGRESS_CARD_TOOLS, 10,
+                      "Loading raw-card I/O services",
+                      "Starting iomanX and fileXio before the memory-card and USB drivers.");
+    rc = ExecEmbedded(iomanX_irx, size_iomanX_irx);
+    status->iomanx_rc = rc;
+    if (rc < 0) goto out;
+    rc = ExecEmbedded(fileXio_irx, size_fileXio_irx);
+    status->filexio_module_rc = rc;
+    if (rc < 0) goto out;
+
+    MciProgressUpdate(MCI_PROGRESS_CARD_TOOLS, 24,
+                      "Loading legacy SIO2/MCMAN",
+                      "Starting PS2SDK SIO2 plus the dedicated non-XMC MCMAN build required by raw page RPCs.");
+    rc = ExecEmbedded(fmcb_freesio2_irx, size_fmcb_freesio2_irx);
+    status->sio2_rc = rc;
+    if (rc < 0) goto out;
+    rc = ExecEmbedded(fmcb_freepad_irx, size_fmcb_freepad_irx);
+    status->pad_rc = rc;
+    if (rc < 0) goto out;
+    rc = ExecEmbedded(raw_mcman_irx, size_raw_mcman_irx);
+    status->mcman_rc = rc;
+    if (rc < 0) goto out;
+
+    MciProgressUpdate(MCI_PROGRESS_CARD_TOOLS, 38,
+                      "Starting legacy page-level MCSERV",
+                      "Loading a non-XMC MCSERV so libmc selects MC_TYPE_MC and permits erase/read/write page commands.");
+    MciSessionAllowRealMcserv(1);
+    rc = ExecEmbedded(raw_mcserv_irx, size_raw_mcserv_irx);
+    MciSessionAllowRealMcserv(0);
+    status->mcserv_rc = rc;
+    if (rc < 0) goto out;
+
+    MciProgressUpdate(MCI_PROGRESS_CARD_TOOLS, 50,
+                      "Loading USB storage",
+                      "Starting USBD and USBHDFSD in the same raw-card IOP personality.");
+    rc = ExecEmbedded(usbd_irx, size_usbd_irx);
+    status->usbd_rc = rc;
+    if (rc < 0) goto out;
+    rc = ExecEmbedded(usbhdfsd_irx, size_usbhdfsd_irx);
+    status->usbhdfsd_rc = rc;
+
+out:
+    MciSessionAllowRealMcserv(0);
+    SifExitIopHeap();
+    SifLoadFileExit();
+    if (rc < 0)
+        return rc;
+
+    MciProgressUpdate(MCI_PROGRESS_CARD_TOOLS, 64,
+                      "Binding raw card client",
+                      "Binding libmc to the legacy MCSERV and forcing one card-detection pass before any raw page read.");
+    status->mcinit_rc = mcInit(MC_TYPE_MC);
+    if (status->mcinit_rc < 0)
+        return status->mcinit_rc;
+
+    status->mcinfo_issue_rc = mcGetInfo(0, 0, &type, &free_clusters, &formatted);
+    /* This first probe proves that a real legacy MCSERV RPC is live. The image
+     * engine performs another probe on the actually selected port before the
+     * first raw page read, so mc1 gets independent card-state initialization. */
+    if (status->mcinfo_issue_rc < 0)
+        return status->mcinfo_issue_rc;
+    status->mcinfo_sync_rc = mcSync(MC_WAIT, NULL, &mcinfo_result);
+    status->mcinfo_result = mcinfo_result;
+    status->card_type = type;
+    status->free_clusters = free_clusters;
+    status->formatted = formatted;
+    if (status->mcinfo_sync_rc < 0)
+        return status->mcinfo_sync_rc;
+
+    status->filexio_init_rc = fileXioInit();
+    if (status->filexio_init_rc < 0)
+        return status->filexio_init_rc;
+
+    /* USBHDFSD enumerates asynchronously. Do not let diagnostic code touch the
+     * new mass: service until the same settling delay used by the image engine
+     * has elapsed. This is the lifecycle boundary the failed trace build lacked. */
+    DelayThread(350000);
+    MciDiagLogSetIoAvailable(1);
+    status->ready = 1;
+    MciProgressUpdate(MCI_PROGRESS_CARD_TOOLS, 100,
+                      "Raw card mode ready",
+                      "Legacy page-level card RPCs and USB image I/O are active.");
+    return 0;
+}
+
+void MciRawCardSessionStop(MciRawCardSessionStatus *status)
+{
+    /* Detach before fileXioExit. This only changes EE logger state and queues a
+     * marker, so it is safe even if the raw operation already damaged the RPC. */
+    MciDiagLogSetIoAvailable(0);
+    if (status != NULL && status->ready)
+        fileXioExit();
+    if (status != NULL)
+        status->ready = 0;
+    MciSessionAllowRealMcserv(0);
+    MciSessionResetShim();
+}

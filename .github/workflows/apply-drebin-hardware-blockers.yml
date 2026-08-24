@@ -1,0 +1,44 @@
+name: Apply Drebin hardware blocker fixes
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/0.4.0-dev4-drebin-browser
+    paths:
+      - 'tools/apply_drebin_hardware_blockers.py'
+      - '.github/workflows/apply-drebin-hardware-blockers.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Drebin dev4 branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/0.4.0-dev4-drebin-browser
+          fetch-depth: 0
+
+      - name: Apply hardware blocker integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/apply_drebin_hardware_blockers.py
+          git diff --check
+
+      - name: Commit integrated sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'Drebin hardware blocker patch is already applied.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src
+          git commit -m 'fix(drebin): repair raw imaging, installer inventory and Card Tools UI'
+          git push origin HEAD:feat/0.4.0-dev4-drebin-browser
