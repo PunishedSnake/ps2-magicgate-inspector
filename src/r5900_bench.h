@@ -9,6 +9,8 @@ typedef struct MciR5900BenchMetric {
     u32 dual_issues;
     u32 icache_misses;
     u32 dcache_misses;
+    u32 branches;
+    u32 branch_mispredicts;
 } MciR5900BenchMetric;
 
 typedef struct MciR5900BenchReport {
