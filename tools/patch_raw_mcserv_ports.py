@@ -30,9 +30,12 @@ Drebin patches only the temporary non-XMC MCSERV built for Card Tools:
 - preserve logical port 0/1 for erase/read/write MCMAN calls;
 - let MCMAN itself select physical SIO2 channel 2/3;
 - propagate the real McReadPage result;
-- convert the special post-transfer uncorrectable-ECC result (-2) to positive 1.
-  EE-side imaging treats any negative result as fatal and a positive result as a
-  readable page with a source-ECC warning. Other negative errors remain fatal.
+- convert the special post-transfer uncorrectable-ECC result (-2) to positive 1;
+- add private RPC command 0x81 which reads up to sixteen consecutive 512-byte
+  pages into MCSERV's existing 8192-byte staging buffer and returns them to EE
+  with one SIF DMA. Underlying MCMAN/SIO2 page semantics are unchanged and the
+  public libmc ABI is untouched. The EE client falls back to stock mcReadPage if
+  this extension is unavailable or a batch cannot be completed.
 
 The normal Sony ROM X stack and PS2SDK X-style MagicGate stack are untouched.
 """
@@ -94,6 +97,90 @@ def patch(path: Path) -> None:
         raise SystemExit("legacy _McWritePage port remap did not match expected PS2SDK source")
     text = text.replace(old_write, new_write, 1)
 
+    # Private Drebin bulk-read extension. MCSERV already owns an 8192-byte
+    # staging buffer for normal file reads, so sixteen 512-byte NAND pages fit
+    # without increasing IOP memory. The callback reads each page through the
+    # same MCMAN routine as _McReadPage, preserves the historical per-page bad
+    # block maintenance call, then performs one IOP->EE SIF DMA for the batch.
+    # Result encoding: low 8 bits = pages DMA'd, bits 8..23 = ECC-warning mask.
+    anchor = "//--------------------------------------------------------------\nvoid *cb_rpc_S_0400(u32 fno, void *buf, int size)\n"
+    if anchor not in text:
+        raise SystemExit("MCSERV RPC callback anchor not found")
+    bulk_impl = r'''typedef struct DrebinBulkReadParam {
+    int port;
+    int slot;
+    u32 start_page;
+    u32 page_count;
+    void *ee_buffer;
+} DrebinBulkReadParam;
+
+static int DrebinMcReadPages(void *rpc_buf)
+{
+    DrebinBulkReadParam *param = (DrebinBulkReadParam *)rpc_buf;
+    SifDmaTransfer_t dma;
+    unsigned int warning_mask = 0;
+    unsigned int i;
+    int intStatus;
+    int dma_id;
+
+    if (param == NULL || param->ee_buffer == NULL ||
+        param->page_count == 0 || param->page_count > 16)
+        return -1;
+    if (McGetMcType(param->port, param->slot) != 2)
+        return sceMcResFailDetect;
+
+    for (i = 0; i < param->page_count; i++) {
+        int r = McReadPage(param->port, param->slot,
+                           param->start_page + i,
+                           mcserv_buf + i * 512);
+
+        /* Preserve the same maintenance point as one ordinary MCSERV callback
+         * per page. This keeps bulk mode behavior equivalent to the legacy path
+         * rather than silently changing MCMAN bad-block handling semantics. */
+        McReplaceBadBlock();
+
+        if (r == sceMcResNoFormat) {
+            warning_mask |= 1u << i;
+            continue;
+        }
+        if (r < 0)
+            return r;
+    }
+
+    dma.src = mcserv_buf;
+    dma.dest = param->ee_buffer;
+    dma.size = param->page_count * 512;
+    dma.attr = 0;
+
+    CpuSuspendIntr(&intStatus);
+    dma_id = sceSifSetDma(&dma, 1);
+    CpuResumeIntr(intStatus);
+    if (dma_id == 0)
+        return -2;
+    while (sceSifDmaStat(dma_id) >= 0)
+        DelayThread(100);
+
+    return (int)(param->page_count | (warning_mask << 8));
+}
+
+//--------------------------------------------------------------
+'''
+    text = text.replace(anchor, bulk_impl + anchor, 1)
+
+    dispatch_anchor = """\t\tcase 0x80:\n#ifdef BUILDING_XMCSERV\n\t\tcase 0x11: // CMD_UNFORMAT\n#endif\n\t\t\trpc_stat.result = sceMcUnformat();\n\t\t\tbreak;"""
+    dispatch_new = dispatch_anchor + """
+#ifndef BUILDING_XMCSERV
+\t\tcase 0x81: // DREBIN_PRIVATE_BULK_READ
+\t\t\trpc_stat.result = DrebinMcReadPages(buf);
+\t\t\t/* DrebinMcReadPages already preserves the legacy per-page
+\t\t\t * McReplaceBadBlock maintenance point. */
+\t\t\tneed_replace_bad_block = 0;
+\t\t\tbreak;
+#endif"""
+    if dispatch_anchor not in text:
+        raise SystemExit("MCSERV unformat dispatch anchor not found")
+    text = text.replace(dispatch_anchor, dispatch_new, 1)
+
     path.write_text(text)
 
 
@@ -102,4 +189,4 @@ if __name__ == "__main__":
         raise SystemExit("usage: patch_raw_mcserv_ports.py <mcserv.c>")
     source = Path(sys.argv[1])
     patch(source)
-    print("PS2SDK legacy MCSERV logical-state/ECC-tolerant raw-page patch applied")
+    print("PS2SDK legacy MCSERV logical-state/ECC-tolerant/bulk-read patch applied")
