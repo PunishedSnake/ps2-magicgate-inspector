@@ -700,7 +700,7 @@ int MciSaveTransferExportPsu(int source_port, const char *save_directory,
     unsigned char padding[PSU_CLUSTER_BYTES];
     int out_fd = -1;
     int free_clusters;
-    int count;
+    int count = -999;
     int dot = -1;
     int dotdot = -1;
     int files = 0;
