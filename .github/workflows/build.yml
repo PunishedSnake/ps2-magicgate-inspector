@@ -22,6 +22,7 @@ on:
       - feat/0.4.0
       - feat/0.4.0-dev3-drebin
       - feat/0.4.0-dev4-drebin-browser
+      - feat/0.4.0-dev4-save-transfer-picker-impl4
     paths:
       - 'src/**'
       - 'tools/**'
@@ -117,7 +118,9 @@ jobs:
             echo "Frontend: configurable Native / 480p / 576p / 720p / 1080i GS dashboard"
             echo "Card Tools: PCSX2 .ps2 and OPL .vmc imaging plus filesystem-aware browser/selective restore"
             echo "Raw page backend: dedicated legacy PS2SDK MCMAN/MCSERV built with XMC compatibility disabled"
-            echo "Raw port fix: legacy MCSERV primes physical SIO2 card state 2/3 before erase/read page RPCs"
+            echo "Raw port contract: MCSERV preserves logical mc0/mc1 ports 0/1; MCMAN owns the final physical SIO2 channel 2/3 mapping"
+            echo "Raw acquisition: private 16-page/8192-byte MCSERV bulk-read RPC with legacy mcReadPage fallback and telemetry"
+            echo "EE stream copy: native R5900 LQ/SQ qword path for aligned image buffers with memcpy fallback"
             echo "Normal card restore fix: XMC mcInit re-primes card detection after temporary IOP personalities"
             echo "Selective restore: source geometry is never copied; saves are streamed through PS2 filesystem/FAT parsing into the destination card"
             echo "MagicGate: immutable raw FMCB.XLF cache in EE RAM with disposable per-bind clones"
