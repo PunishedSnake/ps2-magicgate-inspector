@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "image_read_ahead.h"
+#include "r5900_memops.h"
 
 #define MCI_IMAGE_READ_AHEAD_MAX_STRIDE 528
 #define MCI_IMAGE_READ_AHEAD_PAGES 32
@@ -68,6 +69,8 @@ int __wrap_fileXioRead(int fd, void *buffer, int size)
 
     remaining = CacheLength - CacheOffset;
     if (remaining < size) {
+        /* This move can overlap, so it intentionally remains memmove rather
+         * than using the non-overlapping LQ/SQ stream primitive. */
         if (remaining > 0)
             memmove(Cache, Cache + CacheOffset, (unsigned int)remaining);
         CacheOffset = 0;
@@ -91,7 +94,10 @@ int __wrap_fileXioRead(int fd, void *buffer, int size)
     if (remaining <= 0)
         return 0;
     copy_size = remaining < size ? remaining : size;
-    memcpy(buffer, Cache + CacheOffset, (unsigned int)copy_size);
+    /* Cache is 64-byte aligned and the normal 512/528-byte destination buffers
+     * are aligned by the image engine. MciFastCopy uses native R5900 LQ/SQ in
+     * that common case and falls back to memcpy for any unusual caller. */
+    MciFastCopy(buffer, Cache + CacheOffset, (unsigned int)copy_size);
     CacheOffset += copy_size;
     return copy_size;
 }
