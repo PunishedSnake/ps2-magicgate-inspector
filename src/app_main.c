@@ -305,9 +305,6 @@ static int RunMagicGateSession(int target_port)
     return report->result == MG_RESULT_PASS ? 0 : -1;
 }
 
-/* Installer KELF binding uses the same isolated hardware-validated personality
- * as the probe, but calls PS2SDK libsecr's complete SecrDownloadFile path so
- * Kbit/Kc/ICVPS2 are written into the in-RAM KELF before normal-stack restore. */
 static int BindKelfForInstaller(int target_port, unsigned char *buffer,
                                 unsigned int size, void *userdata)
 {
@@ -408,10 +405,6 @@ static void RunSelectedFullScan(int target_port)
     FmcbResetPackageReport(&FmcbReports[target_port], target_port);
     CardInspectSized(target_port, &Reports[target_port], CurrentFsTestBytes());
 
-    /* Discover and fully validate the installer while the normal USB stack is
-     * already stable. A successful preflight caches the package root, so the
-     * following MagicGate test can open its FMCB.XLF directly rather than
-     * searching again after an IOP transition. */
     (void)FmcbProbeMassPackage(target_port, &FmcbMassStatus,
                                &FmcbReports[target_port]);
     if (Reports[target_port].type == MC_TYPE_PS2) {
@@ -783,6 +776,30 @@ static u32 SelectedImageClusters(const MciImageSaveList *list)
     return total;
 }
 
+static void ClearImageSelections(MciImageSaveList *list)
+{
+    int i;
+
+    if (list == NULL)
+        return;
+    for (i = 0; i < list->save_count; i++)
+        list->saves[i].selected = 0;
+}
+
+static int RefreshImageBrowserDestination(int target_port,
+                                          MciImageSaveList *list,
+                                          int *free_clusters)
+{
+    int rc;
+
+    ClearImageSelections(list);
+    rc = MciImageFsRefreshTargetConflicts(target_port, list);
+    if (rc < 0)
+        return rc;
+    *free_clusters = CurrentFreeClusters(target_port);
+    return *free_clusters < 0 ? *free_clusters : 0;
+}
+
 static void ShowSelectiveRestoreResult(const MciImageImportReport *report, int rc)
 {
     char message[520];
@@ -806,6 +823,7 @@ static void RunSelectiveRestoreLatest(int port, MciCardImageFormat format)
     MciImageSaveList list;
     MciImageImportReport report;
     char path[MCI_CARD_IMAGE_PATH_MAX];
+    int target_port = port;
     int row = 0;
     int first = 0;
     int free_clusters;
@@ -813,8 +831,6 @@ static void RunSelectiveRestoreLatest(int port, MciCardImageFormat format)
     u32 held;
     u32 pressed;
 
-    /* Until the source picker lands, use the newest Drebin image for either
-     * source slot. This already permits mc0-image -> mc1 and vice versa. */
     rc = MciCardImageFindLatest(port, format, path, sizeof(path));
     if (rc < 0)
         rc = MciCardImageFindLatest(port ^ 1, format, path, sizeof(path));
@@ -840,19 +856,20 @@ static void RunSelectiveRestoreLatest(int port, MciCardImageFormat format)
         return;
     }
 
-    rc = MciImageFsRefreshTargetConflicts(port, &list);
+    rc = RefreshImageBrowserDestination(target_port, &list, &free_clusters);
     if (rc < 0) {
         MciGuiRenderMessage("Image Browser",
-                            "The destination card could not be checked for existing save-directory conflicts.",
+                            "The destination card could not be checked for conflicts and free space.",
                             "CROSS or CIRCLE returns to Card Tools.",
                             MCI_GUI_TONE_DANGER);
         WaitForModalDismiss();
         return;
     }
-    free_clusters = CurrentFreeClusters(port);
 
     for (;;) {
-        MciGuiRenderImageBrowser(port, &list, row, first, free_clusters);
+        int requested_port = target_port;
+
+        MciGuiRenderImageBrowser(target_port, &list, row, first, free_clusters);
         for (;;) {
             pressed = ReadPadPressed(&held);
             if (pressed != 0u)
@@ -861,6 +878,29 @@ static void RunSelectiveRestoreLatest(int port, MciCardImageFormat format)
         }
         if (pressed & PAD_CIRCLE)
             return;
+        if (pressed & PAD_L1)
+            requested_port = 0;
+        else if (pressed & PAD_R1)
+            requested_port = 1;
+        if (requested_port != target_port) {
+            int previous_port = target_port;
+            target_port = requested_port;
+            rc = RefreshImageBrowserDestination(target_port, &list, &free_clusters);
+            if (rc < 0) {
+                char message[224];
+                target_port = previous_port;
+                (void)RefreshImageBrowserDestination(target_port, &list,
+                                                     &free_clusters);
+                snprintf(message, sizeof(message),
+                         "mc%d is not available as a formatted destination. Keeping mc%d selected.",
+                         requested_port, target_port);
+                MciGuiRenderMessage("Destination card unavailable", message,
+                                    "CROSS or CIRCLE returns to the image browser.",
+                                    MCI_GUI_TONE_WARNING);
+                WaitForModalDismiss();
+            }
+            continue;
+        }
         if (pressed & PAD_UP) {
             row = row == 0 ? list.save_count - 1 : row - 1;
         } else if (pressed & PAD_DOWN) {
@@ -895,23 +935,24 @@ static void RunSelectiveRestoreLatest(int port, MciCardImageFormat format)
         }
 
         if ((pressed & PAD_CROSS) && SelectedImageClusters(&list) > 0u) {
-            rc = MciImageFsImportSelected(port, &list, &report);
+            rc = MciImageFsImportSelected(target_port, &list, &report);
             if (rc == 0)
-                ResetSlotReports(port);
+                ResetSlotReports(target_port);
             ShowSelectiveRestoreResult(&report, rc);
             return;
         }
     }
 }
 
-static void RunCardToolsMenu(int port)
+static int RunCardToolsMenu(int port)
 {
+    int active_port = port;
     int item = 0;
     u32 held;
     u32 pressed;
 
     for (;;) {
-        MciGuiRenderCardTools(port, item);
+        MciGuiRenderCardTools(active_port, item);
         for (;;) {
             pressed = ReadPadPressed(&held);
             if (pressed != 0u)
@@ -919,7 +960,11 @@ static void RunCardToolsMenu(int port)
             DelayThread(16000);
         }
         if (pressed & PAD_CIRCLE)
-            return;
+            return active_port;
+        if (pressed & PAD_L1)
+            active_port = 0;
+        else if (pressed & PAD_R1)
+            active_port = 1;
         if (pressed & PAD_LEFT)
             item = (item & ~1) | ((item & 1) ^ 1);
         else if (pressed & PAD_RIGHT)
@@ -932,14 +977,14 @@ static void RunCardToolsMenu(int port)
             continue;
 
         switch (item) {
-            case 0: RunCardImageExportAction(port, MCI_CARD_IMAGE_PS2); break;
-            case 1: RunCardImageExportAction(port, MCI_CARD_IMAGE_VMC); break;
-            case 2: RunSelectiveRestoreLatest(port, MCI_CARD_IMAGE_PS2); break;
-            case 3: RunSelectiveRestoreLatest(port, MCI_CARD_IMAGE_VMC); break;
-            case 4: RunCardImageRestoreLatest(port, MCI_CARD_IMAGE_PS2); break;
-            case 5: RunCardImageRestoreLatest(port, MCI_CARD_IMAGE_VMC); break;
-            case 6: RunForceFormatWithBackup(port); break;
-            default: return;
+            case 0: RunCardImageExportAction(active_port, MCI_CARD_IMAGE_PS2); break;
+            case 1: RunCardImageExportAction(active_port, MCI_CARD_IMAGE_VMC); break;
+            case 2: RunSelectiveRestoreLatest(active_port, MCI_CARD_IMAGE_PS2); break;
+            case 3: RunSelectiveRestoreLatest(active_port, MCI_CARD_IMAGE_VMC); break;
+            case 4: RunCardImageRestoreLatest(active_port, MCI_CARD_IMAGE_PS2); break;
+            case 5: RunCardImageRestoreLatest(active_port, MCI_CARD_IMAGE_VMC); break;
+            case 6: RunForceFormatWithBackup(active_port); break;
+            default: return active_port;
         }
     }
 }
@@ -1202,7 +1247,7 @@ int main(int argc, char *argv[])
             }
 
             if ((pressed & PAD_TRIANGLE) && page != MCI_GUI_SETTINGS) {
-                RunCardToolsMenu(selected);
+                selected = RunCardToolsMenu(selected);
                 confirm_format = 0;
                 last_format_rc = -999;
                 dirty = 1;
