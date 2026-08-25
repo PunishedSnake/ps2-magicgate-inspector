@@ -17,20 +17,11 @@ void __real_MciGuiRenderImageBrowser(int target_port,
 /*
  * Transitional P0 view adapter.
  *
- * The old renderer copied the complete MciImageSaveList every time the browser
- * was redrawn just so icon.sys titles could replace the visible name field.
- * The list can hold 128 save records, so that copy needlessly churned a working
- * set larger than the EE D-cache.
- *
- * Card Tools and this renderer are single-threaded and synchronous. Temporarily
- * replace only the at-most-seven visible name fields, render immediately, then
- * restore the authoritative filesystem identifiers before returning. The raw
- * BASLUS/BESLES/etc names are therefore never observed by restore/conflict code
- * in their presentation form.
- *
- * This adapter disappears once display_title becomes part of the filesystem
- * index itself. Until then the title resolver still opens the image during the
- * first cache fill, so DREBIN.LOG mass writes remain paused around resolution.
+ * New filesystem indexes carry display_title directly. Older/partial indexes
+ * still fall back to the standalone resolver until that duplicate parser is
+ * completely retired. Only the at-most-seven visible filesystem-name fields are
+ * temporarily substituted for the synchronous renderer and restored before the
+ * caller regains control; restore/conflict identity stays authoritative.
  */
 void __wrap_MciGuiRenderImageBrowser(int target_port,
                                      const MciImageSaveList *list,
@@ -41,6 +32,7 @@ void __wrap_MciGuiRenderImageBrowser(int target_port,
     char saved_names[7][MCI_IMAGE_SAVE_NAME_MAX];
     int saved_index[7];
     int saved_count = 0;
+    int needs_legacy_resolver = 0;
     int i;
     MciImageSaveList *mutable_list;
 
@@ -51,7 +43,19 @@ void __wrap_MciGuiRenderImageBrowser(int target_port,
     }
 
     mutable_list = (MciImageSaveList *)(void *)list;
-    MciDiagLogSetMassWritePaused(1);
+    for (i = 0; i < 7; i++) {
+        int index = first_row + i;
+        if (index < 0 || index >= list->save_count)
+            break;
+        if (list->saves[index].display_title[0] == '\0') {
+            needs_legacy_resolver = 1;
+            break;
+        }
+    }
+
+    if (needs_legacy_resolver)
+        MciDiagLogSetMassWritePaused(1);
+
     for (i = 0; i < 7; i++) {
         int index = first_row + i;
         const char *title;
@@ -59,7 +63,10 @@ void __wrap_MciGuiRenderImageBrowser(int target_port,
         if (index < 0 || index >= list->save_count ||
             saved_count >= (int)(sizeof(saved_index) / sizeof(saved_index[0])))
             break;
-        title = MciImageSaveDisplayTitle(list, index);
+
+        title = list->saves[index].display_title[0] != '\0'
+                    ? list->saves[index].display_title
+                    : MciImageSaveDisplayTitle(list, index);
         if (title == NULL || title[0] == '\0' ||
             strcmp(title, list->saves[index].name) == 0)
             continue;
@@ -71,7 +78,9 @@ void __wrap_MciGuiRenderImageBrowser(int target_port,
                  sizeof(mutable_list->saves[index].name), "%s", title);
         saved_count++;
     }
-    MciDiagLogSetMassWritePaused(0);
+
+    if (needs_legacy_resolver)
+        MciDiagLogSetMassWritePaused(0);
 
     __real_MciGuiRenderImageBrowser(target_port, list, selected_row,
                                     first_row, free_clusters);
