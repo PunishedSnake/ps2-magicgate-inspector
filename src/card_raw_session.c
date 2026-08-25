@@ -218,6 +218,7 @@ void MciRawCardSessionStop(MciRawCardSessionStatus *status)
     drain_rc = MciRawBulkReadDrain();
     MciDiagLogPrintf("RAW-BULK", "pipeline drain before raw teardown rc=%d",
                      drain_rc);
+    MciRawBulkReadLogStats("pre-teardown");
 
     /* Detach before fileXioExit. This only changes EE logger state and queues a
      * marker, so it is safe even if the raw operation already damaged the RPC. */
