@@ -4,10 +4,16 @@
 /*
  * Enable/disable the image-only fileXioWrite batching wrapper.
  *
- * While enabled, 512-byte VMC pages and 528-byte PCSX2 raw records are
- * collected in groups of 32 before reaching USBHDFSD. All supported card page
- * counts are multiples of 32, so a successful full-image export drains the
- * cache before the image descriptor is closed.
+ * Production currently uses a synchronous 32-record batch. Performance-lab
+ * builds may vary the batch size and enable one-request-deep async fileXio
+ * write-behind. The async path owns two EE buffers but never queues a second
+ * USB/BOT write before the first one completes.
+ *
+ * Ownership while async is enabled:
+ *   FILL -> FILEXIO/USB -> FREE
+ * The producer may fill the other slot while FILEXIO/USB owns one slot.
+ * fileXioClose is the mandatory completion boundary before descriptor reuse,
+ * verification or any unrelated fileXio operation.
  */
 void MciImageWriteBehindSetEnabled(int enabled);
 
