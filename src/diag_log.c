@@ -24,6 +24,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <timer.h>
 
 #include "diag_log.h"
 
@@ -55,6 +56,7 @@ static int PathReady;
 static int Initialized;
 static int InWrite;
 static unsigned int MassWritePauseDepth;
+static u64 LogEpoch;
 
 static int WriteAll(int fd, const char *text, unsigned int length)
 {
@@ -180,9 +182,10 @@ static void EnsureInitialized(void)
     PathReady = 0;
     InWrite = 0;
     MassWritePauseDepth = 0u;
+    LogEpoch = GetTimerSystemTime();
     snprintf(Pending[0], sizeof(Pending[0]),
-             "#%06u [SESSION] ========== Drebin diagnostic session start ==========",
-             Sequence);
+             "#%06u t=%llu [SESSION] ========== Drebin diagnostic session start ==========",
+             Sequence, 0ULL);
 }
 
 /* Flush the complete RAM trace with one append descriptor and one sync. The old
@@ -215,8 +218,10 @@ static void FlushPending(void)
 
     if (DroppedLines > 0u) {
         snprintf(overflow, sizeof(overflow),
-                 "#%06u [LOGGER] pending ring overflow; %u older line(s) dropped",
-                 ++Sequence, DroppedLines);
+                 "#%06u t=%llu [LOGGER] pending ring overflow; %u older line(s) dropped",
+                 ++Sequence,
+                 (unsigned long long)(GetTimerSystemTime() - LogEpoch),
+                 DroppedLines);
         rc = WriteAll(fd, overflow, (unsigned int)strlen(overflow));
         if (rc == 0)
             rc = WriteAll(fd, "\n", 1u);
@@ -248,6 +253,7 @@ static void FormatLineV(char line[DIAG_LINE_MAX], const char *component,
                         const char *format, va_list args)
 {
     char payload[240];
+    u64 relative_ticks;
 
     if (component == NULL)
         component = "GEN";
@@ -255,8 +261,10 @@ static void FormatLineV(char line[DIAG_LINE_MAX], const char *component,
         format = "";
     vsnprintf(payload, sizeof(payload), format, args);
     payload[sizeof(payload) - 1u] = '\0';
-    snprintf(line, DIAG_LINE_MAX, "#%06u [%s] %s",
-             ++Sequence, component, payload);
+    relative_ticks = GetTimerSystemTime() - LogEpoch;
+    snprintf(line, DIAG_LINE_MAX, "#%06u t=%llu [%s] %s",
+             ++Sequence, (unsigned long long)relative_ticks,
+             component, payload);
     line[DIAG_LINE_MAX - 1u] = '\0';
 }
 
@@ -273,6 +281,7 @@ void MciDiagLogReset(void)
     MassWritePauseDepth = 0u;
     LogPath[0] = '\0';
     LogDevice[0] = '\0';
+    LogEpoch = GetTimerSystemTime();
     MciDiagLogPrintf("SESSION", "========== Drebin diagnostic session start ==========");
 }
 
