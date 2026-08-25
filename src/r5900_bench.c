@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "card_math.h"
+#include "diag_log.h"
 #include "r5900_bench.h"
 #include "r5900_memops.h"
 #include "r5900_perf.h"
@@ -281,6 +282,27 @@ static int CopyMatches(unsigned int bytes)
     return memcmp(BenchDest, BenchSource, bytes) == 0;
 }
 
+static void LogCopyAb(const MciR5900BenchReport *report)
+{
+    MciDiagLogPrintf(
+        "R5900-COPY-AB",
+        "samples=%u fast512=%u/%u/%u/%u libc512=%u/%u/%u/%u fast528=%u/%u/%u/%u libc528=%u/%u/%u/%u fast8k=%u/%u/%u/%u libc8k=%u/%u/%u/%u units=processor_cycles order=p50/p95/p99/max hash=%08X",
+        report->latency_samples,
+        report->fast_copy_512.p50, report->fast_copy_512.p95,
+        report->fast_copy_512.p99, report->fast_copy_512.max,
+        report->libc_copy_512.p50, report->libc_copy_512.p95,
+        report->libc_copy_512.p99, report->libc_copy_512.max,
+        report->fast_copy_528.p50, report->fast_copy_528.p95,
+        report->fast_copy_528.p99, report->fast_copy_528.max,
+        report->libc_copy_528.p50, report->libc_copy_528.p95,
+        report->libc_copy_528.p99, report->libc_copy_528.max,
+        report->fast_copy_8k.p50, report->fast_copy_8k.p95,
+        report->fast_copy_8k.p99, report->fast_copy_8k.max,
+        report->libc_copy_8k.p50, report->libc_copy_8k.p95,
+        report->libc_copy_8k.p99, report->libc_copy_8k.max,
+        report->result_hash);
+}
+
 int MciR5900BenchRun(MciR5900BenchReport *report)
 {
     u32 hash = 2166136261u;
@@ -335,5 +357,6 @@ int MciR5900BenchRun(MciR5900BenchReport *report)
     report->result_hash = MixHash(hash, BenchSink);
 
     MciR5900PerfDisable();
+    LogCopyAb(report);
     return 0;
 }
