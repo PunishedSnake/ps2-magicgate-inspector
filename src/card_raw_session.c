@@ -27,6 +27,7 @@
 #include "diag_log.h"
 #include "magicgate_session.h"
 #include "progress.h"
+#include "usb_search.h"
 
 extern unsigned char fmcb_freesio2_irx[];
 extern unsigned int size_fmcb_freesio2_irx;
@@ -187,10 +188,16 @@ out:
     if (status->filexio_init_rc < 0)
         return status->filexio_init_rc;
 
-    /* USBHDFSD enumerates asynchronously. Do not let diagnostic code touch the
-     * new mass: service until the same settling delay used by the image engine
-     * has elapsed. This is the lifecycle boundary the failed trace build lacked. */
-    DelayThread(350000);
+    /* USBHDFSD enumeration is asynchronous, but a fixed sleep pays its full
+     * latency even for devices that are already ready and still cannot prove a
+     * slow device actually mounted. Use the existing bounded readiness probe:
+     * one short grace interval, then return as soon as any mass root opens. */
+    DelayThread(20000);
+    rc = MciUsbWaitForStorage(8u, 50000u);
+    MciDiagLogPrintf("RAW", "USB readiness probe rc=%d after fileXio init", rc);
+    if (rc < 0)
+        return rc;
+
     MciDiagLogSetIoAvailable(1);
     status->ready = 1;
     MciProgressUpdate(MCI_PROGRESS_CARD_TOOLS, 100,
