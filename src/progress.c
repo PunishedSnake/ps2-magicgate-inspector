@@ -82,13 +82,14 @@ void MciProgressUpdate(MciProgressDomain domain,
         }
     }
 
-    /* The GS can update much more frequently than a crash log needs. Keep one
-     * durable line per visible percent/action transition so raw imaging does
-     * not turn USB sync traffic into the workload we are trying to diagnose. */
+    /* Progress is diagnostic trace, not recovery evidence. Keep one RAM line per
+     * visible percent/action transition, but do not make each line an individual
+     * open/write/close/sync transaction on USB. The logger batch-flushes this
+     * trace at the next explicit durability/lifecycle boundary. */
     if ((int)domain != LastLoggedDomain || percent != LastLoggedPercent ||
         strcmp(safe_action, LastLoggedAction) != 0) {
-        MciDiagLogPrintf("PROGRESS", "domain=%s percent=%d action=%s | %s",
-                         ProgressTitle(domain), percent, safe_action, safe_detail);
+        MciDiagLogTracePrintf("PROGRESS", "domain=%s percent=%d action=%s | %s",
+                              ProgressTitle(domain), percent, safe_action, safe_detail);
         LastLoggedDomain = (int)domain;
         LastLoggedPercent = percent;
         snprintf(LastLoggedAction, sizeof(LastLoggedAction), "%s", safe_action);
