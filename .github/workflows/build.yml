@@ -43,7 +43,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
@@ -108,7 +108,63 @@ jobs:
               mips64r5900el-ps2-elf-gcc --version; \
               echo "R5900 target options:"; \
               mips64r5900el-ps2-elf-gcc -Q --help=target -c -x c /dev/null -o /tmp/r5900-target-probe.o 2>/dev/null | grep -E "march=|mtune=|mfix-r5900" || true; \
-              make R5900_BENCH=0'
+              make R5900_BENCH=0 RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0'
+
+      - name: Build P0 transport hardware A-B matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts .build/p0-ab
+          cp MC_INSPECTOR.ELF .build/p0-ab/MC_INSPECTOR-production.ELF
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            ps2dev/ps2dev:v2.0.0 \
+            sh -c 'set -eu; \
+              apk add --no-cache build-base >/dev/null; \
+              build_variant() { \
+                name="$1"; raw_pages="$2"; raw_async="$3"; write_pages="$4"; write_async="$5"; \
+                rm -f src/raw_bulk_read.o src/image_write_behind.o MC_INSPECTOR.ELF; \
+                make R5900_BENCH=0 RAW_BULK_PAGES="$raw_pages" RAW_BULK_ASYNC="$raw_async" IMAGE_WRITE_PAGES="$write_pages" IMAGE_WRITE_ASYNC="$write_async" MC_INSPECTOR.ELF; \
+                cp MC_INSPECTOR.ELF "artifacts/$name"; \
+              }; \
+              build_variant MC_INSPECTOR-p0-raw-sync4.ELF 4 0 32 0; \
+              build_variant MC_INSPECTOR-p0-raw-sync8.ELF 8 0 32 0; \
+              build_variant MC_INSPECTOR-p0-raw-async8.ELF 8 1 32 0; \
+              build_variant MC_INSPECTOR-p0-raw-async16.ELF 16 1 32 0; \
+              build_variant MC_INSPECTOR-p0-usb-sync16.ELF 16 0 16 0; \
+              build_variant MC_INSPECTOR-p0-usb-sync64.ELF 16 0 64 0; \
+              build_variant MC_INSPECTOR-p0-usb-async32.ELF 16 0 32 1; \
+              build_variant MC_INSPECTOR-p0-usb-async64.ELF 16 0 64 1; \
+              rm -f src/raw_bulk_read.o src/image_write_behind.o MC_INSPECTOR.ELF; \
+              make R5900_BENCH=0 RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0 MC_INSPECTOR.ELF; \
+              cmp -s MC_INSPECTOR.ELF .build/p0-ab/MC_INSPECTOR-production.ELF'
+          cat > artifacts/P0_TRANSPORT_AB_README.txt <<'EOF'
+          P0 transport hardware A/B matrix
+
+          Production baseline:
+            MC_INSPECTOR.ELF
+            raw bulk: 16 pages, synchronous
+            USB write-behind: 32 records, synchronous
+
+          Raw/SIF candidates, USB held at production settings:
+            MC_INSPECTOR-p0-raw-sync4.ELF
+            MC_INSPECTOR-p0-raw-sync8.ELF
+            MC_INSPECTOR-p0-raw-async8.ELF
+            MC_INSPECTOR-p0-raw-async16.ELF
+
+          USB candidates, raw/SIF held at production settings:
+            MC_INSPECTOR-p0-usb-sync16.ELF
+            MC_INSPECTOR-p0-usb-sync64.ELF
+            MC_INSPECTOR-p0-usb-async32.ELF
+            MC_INSPECTOR-p0-usb-async64.ELF
+
+          Use the same physical console, card, USB device, image format and workload.
+          Require identical logical CRC / verification result before comparing time.
+          Compare RAW-BULK-PERF p50/p95/p99/max, async ready/wait counts and IMAGE-IO
+          underlying-call/byte/tick/percentile telemetry. Production stays synchronous
+          until a candidate wins on real hardware without correctness regressions.
+          EOF
 
       - name: Analyze R5900 hot path and compiler variants
         shell: bash
@@ -135,8 +191,8 @@ jobs:
             ps2dev/ps2dev:v2.0.0 \
             sh -c 'set -eu; \
               apk add --no-cache build-base >/dev/null; \
-              rm -f src/raw_bulk_read.o MC_INSPECTOR.ELF; \
-              make R5900_BENCH=1 MC_INSPECTOR.ELF; \
+              rm -f src/raw_bulk_read.o src/image_write_behind.o MC_INSPECTOR.ELF; \
+              make R5900_BENCH=1 RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0 MC_INSPECTOR.ELF; \
               cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-perflab-O2.ELF; \
               mips64r5900el-ps2-elf-gcc \
                 -D_EE -G0 -O2 -Wall -gdwarf-2 -gz \
@@ -147,7 +203,7 @@ jobs:
                 -I/usr/local/ps2dev/ps2sdk/common/include -I. \
                 -c src/card_math.c -o src/card_math.o; \
               rm -f MC_INSPECTOR.ELF; \
-              make R5900_BENCH=1 MC_INSPECTOR.ELF; \
+              make R5900_BENCH=1 RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0 MC_INSPECTOR.ELF; \
               cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-perflab-cardmath-O3.ELF; \
               cp .build/r5900-ab/MC_INSPECTOR-production.ELF MC_INSPECTOR.ELF'
           {
@@ -176,7 +232,8 @@ jobs:
             echo "Card Tools: PCSX2 .ps2 and OPL .vmc imaging plus filesystem-aware browser/selective restore"
             echo "Raw page backend: dedicated legacy PS2SDK MCMAN/MCSERV built with XMC compatibility disabled"
             echo "Raw port contract: MCSERV preserves logical mc0/mc1 ports 0/1; MCMAN owns the final physical SIO2 channel 2/3 mapping"
-            echo "Raw acquisition: private 16-page/8192-byte MCSERV bulk-read RPC with legacy mcReadPage fallback and telemetry"
+            echo "Production raw acquisition: private 16-page/8192-byte synchronous MCSERV bulk-read RPC with legacy mcReadPage fallback and telemetry"
+            echo "Production USB image output: 32-record synchronous write-behind; P0 A/B artifacts exercise bounded raw NOWAIT and fileXio NOWAIT variants"
             echo "EE stream copy: native R5900 LQ/SQ qword path for aligned image buffers with memcpy fallback"
             echo "Production profiling: real image operations record SIF/USB batching and wait-time telemetry without running a synthetic CPU benchmark"
             echo "Performance Lab: separate O2 and card_math-O3 ELFs enable the bounded R5900 PCCR/PCR copy/CRC32/ECC benchmark"
@@ -195,9 +252,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          file artifacts/MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-perflab-O2.ELF artifacts/MC_INSPECTOR-perflab-cardmath-O3.ELF
-          ls -lh artifacts/MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-perflab-O2.ELF artifacts/MC_INSPECTOR-perflab-cardmath-O3.ELF artifacts/R5900_STATIC_REPORT.txt
-          sha256sum artifacts/MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-perflab-O2.ELF artifacts/MC_INSPECTOR-perflab-cardmath-O3.ELF | tee artifacts/SHA256SUMS.txt
+          file artifacts/MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-perflab-O2.ELF artifacts/MC_INSPECTOR-perflab-cardmath-O3.ELF artifacts/MC_INSPECTOR-p0-*.ELF
+          ls -lh artifacts/MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-perflab-O2.ELF artifacts/MC_INSPECTOR-perflab-cardmath-O3.ELF artifacts/MC_INSPECTOR-p0-*.ELF artifacts/R5900_STATIC_REPORT.txt
+          sha256sum artifacts/MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-perflab-O2.ELF artifacts/MC_INSPECTOR-perflab-cardmath-O3.ELF artifacts/MC_INSPECTOR-p0-*.ELF | tee artifacts/SHA256SUMS.txt
 
       - name: Upload development build
         uses: actions/upload-artifact@v4
