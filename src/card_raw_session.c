@@ -21,6 +21,7 @@
 #include <libmc.h>
 #include <fileXio_rpc.h>
 #include <sbv_patches.h>
+#include <timer.h>
 #include <string.h>
 
 #include "card_raw_session.h"
@@ -47,6 +48,9 @@ extern unsigned int size_usbd_irx;
 extern unsigned char usbhdfsd_irx[];
 extern unsigned int size_usbhdfsd_irx;
 
+static u64 RawSessionStartTicks;
+static u64 RawSessionReadyTicks;
+
 static int ExecEmbedded(const unsigned char *data, unsigned int size)
 {
     int start_rc = -999;
@@ -58,6 +62,15 @@ static int ExecEmbedded(const unsigned char *data, unsigned int size)
      * module id is the reliable load result; client binding below proves the
      * service actually became usable. */
     return module_id;
+}
+
+static u64 TicksToUsec(u64 ticks)
+{
+    u32 seconds = 0u;
+    u32 useconds = 0u;
+
+    TimerBusClock2USec(ticks, &seconds, &useconds);
+    return (u64)seconds * 1000000u + useconds;
 }
 
 void MciRawCardSessionReset(MciRawCardSessionStatus *status)
@@ -91,6 +104,8 @@ int MciRawCardSessionStart(MciRawCardSessionStatus *status)
 
     if (status == NULL)
         return -1;
+    RawSessionStartTicks = GetTimerSystemTime();
+    RawSessionReadyTicks = 0u;
     MciRawCardSessionReset(status);
 
     /* The caller normally detached the normal mass backend already. Repeat the
@@ -201,6 +216,12 @@ out:
 
     MciDiagLogSetIoAvailable(1);
     status->ready = 1;
+    RawSessionReadyTicks = GetTimerSystemTime();
+    MciDiagLogPrintf(
+        "RAW-PERF",
+        "session ready setup_ticks=%llu setup_us=%llu",
+        (unsigned long long)(RawSessionReadyTicks - RawSessionStartTicks),
+        (unsigned long long)TicksToUsec(RawSessionReadyTicks - RawSessionStartTicks));
     MciProgressUpdate(MCI_PROGRESS_CARD_TOOLS, 100,
                       "Raw card mode ready",
                       "Legacy page-level card RPCs and USB image I/O are active.");
@@ -209,6 +230,10 @@ out:
 
 void MciRawCardSessionStop(MciRawCardSessionStatus *status)
 {
+    u64 stop_ticks;
+    u64 setup_ticks;
+    u64 active_ticks;
+    u64 total_ticks;
     int drain_rc;
 
     /* A NOWAIT raw prefetch owns both an EE receive buffer and the current IOP
@@ -220,6 +245,26 @@ void MciRawCardSessionStop(MciRawCardSessionStatus *status)
                      drain_rc);
     MciRawBulkReadLogStats("pre-teardown");
 
+    stop_ticks = GetTimerSystemTime();
+    setup_ticks = RawSessionReadyTicks >= RawSessionStartTicks
+                      ? RawSessionReadyTicks - RawSessionStartTicks
+                      : 0u;
+    active_ticks = RawSessionReadyTicks != 0u && stop_ticks >= RawSessionReadyTicks
+                       ? stop_ticks - RawSessionReadyTicks
+                       : 0u;
+    total_ticks = RawSessionStartTicks != 0u && stop_ticks >= RawSessionStartTicks
+                      ? stop_ticks - RawSessionStartTicks
+                      : 0u;
+    MciDiagLogPrintf(
+        "RAW-PERF",
+        "session stop setup_ticks=%llu setup_us=%llu active_ticks=%llu active_us=%llu total_ticks=%llu total_us=%llu",
+        (unsigned long long)setup_ticks,
+        (unsigned long long)TicksToUsec(setup_ticks),
+        (unsigned long long)active_ticks,
+        (unsigned long long)TicksToUsec(active_ticks),
+        (unsigned long long)total_ticks,
+        (unsigned long long)TicksToUsec(total_ticks));
+
     /* Detach before fileXioExit. This only changes EE logger state and queues a
      * marker, so it is safe even if the raw operation already damaged the RPC. */
     MciDiagLogSetIoAvailable(0);
@@ -227,6 +272,8 @@ void MciRawCardSessionStop(MciRawCardSessionStatus *status)
         fileXioExit();
     if (status != NULL)
         status->ready = 0;
+    RawSessionStartTicks = 0u;
+    RawSessionReadyTicks = 0u;
     MciSessionAllowRealMcserv(0);
     MciSessionResetShim();
 }
