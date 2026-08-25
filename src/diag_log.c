@@ -9,10 +9,10 @@
  * have had enough time to become usable. Callers therefore explicitly attach
  * and detach the logger at safe lifecycle boundaries.
  *
- * Every durable line is opened in append mode, written, closed and best-effort
- * synced. While mass: is detached, or while a card-image stream owns a long-
- * lived mass: descriptor, a bounded EE-side ring retains trace lines and flushes
- * them only after the filesystem is safe for logger I/O again.
+ * Durable checkpoints may touch mass: immediately when that is safe. Ordinary
+ * trace is retained in a bounded EE-side ring and batch-flushed at a later
+ * durability/lifecycle boundary. While a card-image stream owns a long-lived
+ * mass: descriptor no logger write is allowed at all.
  */
 
 #define NEWLIB_PORT_AWARE
@@ -109,12 +109,24 @@ static int EnsurePath(void)
     return -1;
 }
 
+static int FinishDurableWrite(int fd, int rc)
+{
+    int close_rc = fileXioClose(fd);
+
+    if (rc == 0 && close_rc < 0)
+        rc = close_rc;
+    if (rc == 0) {
+        (void)fileXioSync(LogDevice, 0);
+        DelayThread(2000);
+    }
+    return rc;
+}
+
 static int WriteRawLineNow(const char *line)
 {
     unsigned int length;
     int fd;
     int rc;
-    int close_rc;
 
     if (!IoAvailable || MassWritePauseDepth != 0u || InWrite)
         return -1;
@@ -133,14 +145,7 @@ static int WriteRawLineNow(const char *line)
     rc = WriteAll(fd, line, length);
     if (rc == 0)
         rc = WriteAll(fd, "\n", 1u);
-    close_rc = fileXioClose(fd);
-    if (rc == 0 && close_rc < 0)
-        rc = close_rc;
-
-    if (rc == 0) {
-        (void)fileXioSync(LogDevice, 0);
-        DelayThread(2000);
-    }
+    rc = FinishDurableWrite(fd, rc);
     InWrite = 0;
     return rc;
 }
@@ -180,39 +185,79 @@ static void EnsureInitialized(void)
              Sequence);
 }
 
+/* Flush the complete RAM trace with one append descriptor and one sync. The old
+ * implementation performed open/write/close/sync once per queued line, turning
+ * diagnostics into a small-file filesystem workload exactly when Card Tools
+ * was trying to measure I/O. */
 static void FlushPending(void)
 {
-    char line[DIAG_LINE_MAX];
+    char overflow[DIAG_LINE_MAX];
+    int fd;
+    int rc = 0;
 
-    if (!IoAvailable || MassWritePauseDepth != 0u)
+    if (!IoAvailable || MassWritePauseDepth != 0u || InWrite)
+        return;
+    if (PendingCount == 0u && DroppedLines == 0u)
         return;
     if (EnsurePath() < 0) {
         IoAvailable = 0;
         return;
     }
 
-    if (DroppedLines > 0u) {
-        snprintf(line, sizeof(line),
-                 "#%06u [LOGGER] pending ring overflow; %u older line(s) dropped",
-                 ++Sequence, DroppedLines);
-        if (WriteRawLineNow(line) < 0) {
-            IoAvailable = 0;
-            PathReady = 0;
-            return;
-        }
-        DroppedLines = 0u;
+    InWrite = 1;
+    fd = fileXioOpen(LogPath, FIO_O_WRONLY | FIO_O_CREAT | FIO_O_APPEND);
+    if (fd < 0) {
+        InWrite = 0;
+        IoAvailable = 0;
+        PathReady = 0;
+        return;
     }
 
-    while (PendingCount > 0u) {
-        unsigned int index = PendingHead;
-        if (WriteRawLineNow(Pending[index]) < 0) {
-            IoAvailable = 0;
-            PathReady = 0;
-            return;
-        }
-        PendingHead = (PendingHead + 1u) % DIAG_PENDING_LINES;
-        PendingCount--;
+    if (DroppedLines > 0u) {
+        snprintf(overflow, sizeof(overflow),
+                 "#%06u [LOGGER] pending ring overflow; %u older line(s) dropped",
+                 ++Sequence, DroppedLines);
+        rc = WriteAll(fd, overflow, (unsigned int)strlen(overflow));
+        if (rc == 0)
+            rc = WriteAll(fd, "\n", 1u);
+        if (rc == 0)
+            DroppedLines = 0u;
     }
+
+    while (rc == 0 && PendingCount > 0u) {
+        unsigned int index = PendingHead;
+        rc = WriteAll(fd, Pending[index],
+                      (unsigned int)strlen(Pending[index]));
+        if (rc == 0)
+            rc = WriteAll(fd, "\n", 1u);
+        if (rc == 0) {
+            PendingHead = (PendingHead + 1u) % DIAG_PENDING_LINES;
+            PendingCount--;
+        }
+    }
+
+    rc = FinishDurableWrite(fd, rc);
+    InWrite = 0;
+    if (rc < 0) {
+        IoAvailable = 0;
+        PathReady = 0;
+    }
+}
+
+static void FormatLineV(char line[DIAG_LINE_MAX], const char *component,
+                        const char *format, va_list args)
+{
+    char payload[240];
+
+    if (component == NULL)
+        component = "GEN";
+    if (format == NULL)
+        format = "";
+    vsnprintf(payload, sizeof(payload), format, args);
+    payload[sizeof(payload) - 1u] = '\0';
+    snprintf(line, DIAG_LINE_MAX, "#%06u [%s] %s",
+             ++Sequence, component, payload);
+    line[DIAG_LINE_MAX - 1u] = '\0';
 }
 
 void MciDiagLogReset(void)
@@ -300,35 +345,41 @@ void MciDiagLogSetMassWritePaused(int paused)
 
 void MciDiagLogPrintf(const char *component, const char *format, ...)
 {
-    char payload[240];
     char line[DIAG_LINE_MAX];
     va_list args;
     int rc;
 
     EnsureInitialized();
-    if (component == NULL)
-        component = "GEN";
-    if (format == NULL)
-        format = "";
-
     va_start(args, format);
-    vsnprintf(payload, sizeof(payload), format, args);
+    FormatLineV(line, component, format, args);
     va_end(args);
-    payload[sizeof(payload) - 1u] = '\0';
-
-    snprintf(line, sizeof(line), "#%06u [%s] %s",
-             ++Sequence, component, payload);
-    line[sizeof(line) - 1u] = '\0';
 
     if (IoAvailable && MassWritePauseDepth == 0u) {
-        rc = WriteRawLineNow(line);
-        if (rc == 0)
-            return;
-        IoAvailable = 0;
-        PathReady = 0;
-        LogPath[0] = '\0';
-        LogDevice[0] = '\0';
+        /* Preserve chronological order: RAM trace accumulated since the previous
+         * checkpoint is committed in one batch before this durable event. */
+        FlushPending();
+        if (IoAvailable) {
+            rc = WriteRawLineNow(line);
+            if (rc == 0)
+                return;
+            IoAvailable = 0;
+            PathReady = 0;
+            LogPath[0] = '\0';
+            LogDevice[0] = '\0';
+        }
     }
+    QueueLine(line);
+}
+
+void MciDiagLogTracePrintf(const char *component, const char *format, ...)
+{
+    char line[DIAG_LINE_MAX];
+    va_list args;
+
+    EnsureInitialized();
+    va_start(args, format);
+    FormatLineV(line, component, format, args);
+    va_end(args);
     QueueLine(line);
 }
 
