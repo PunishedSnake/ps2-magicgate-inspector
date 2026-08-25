@@ -4,13 +4,15 @@
  *
  * card_image.c intentionally presents 512/528-byte logical-page reads. On real
  * PS2 USBHDFSD, issuing one fileXioRead RPC per page makes a 64 MiB verification
- * pass needlessly expensive. This wrapper batches thirty-two pages in one
- * underlying read while preserving exact page-sized semantics to callers.
+ * pass needlessly expensive. This wrapper coalesces those reads while preserving
+ * exact page-sized semantics to callers.
  *
- * 32 is intentional rather than arbitrary:
+ * Production keeps the hardware-used 32-page baseline:
  *   32 * 512 = 16384 bytes for VMC
  *   32 * 528 = 16896 bytes = 33 * 512-byte sectors for PCSX2 raw images
- * Thus both formats refill the cache on complete USB/FAT sector boundaries.
+ * P0 Performance Lab variants also build 16 and 64 pages. Larger is not assumed
+ * faster: the EE has an 8 KiB D-cache and USB/BOT/fileXio have their own request
+ * granularity, so real-hardware p50/p95/p99/max decides the useful trade-off.
  *
  * The mode is explicitly enabled only around strictly sequential image readers.
  * It must remain disabled for the filesystem browser, which performs fileXioLseek
@@ -27,9 +29,19 @@
 #include "image_read_ahead.h"
 #include "r5900_memops.h"
 
-#define MCI_IMAGE_READ_AHEAD_MAX_STRIDE 528
+#ifndef MCI_IMAGE_READ_AHEAD_PAGES
 #define MCI_IMAGE_READ_AHEAD_PAGES 32
-#define MCI_IMAGE_READ_AHEAD_BYTES (MCI_IMAGE_READ_AHEAD_MAX_STRIDE * MCI_IMAGE_READ_AHEAD_PAGES)
+#endif
+
+#if MCI_IMAGE_READ_AHEAD_PAGES != 16 && \
+    MCI_IMAGE_READ_AHEAD_PAGES != 32 && \
+    MCI_IMAGE_READ_AHEAD_PAGES != 64
+#error "MCI_IMAGE_READ_AHEAD_PAGES must be 16, 32 or 64"
+#endif
+
+#define MCI_IMAGE_READ_AHEAD_MAX_STRIDE 528
+#define MCI_IMAGE_READ_AHEAD_BYTES \
+    (MCI_IMAGE_READ_AHEAD_MAX_STRIDE * MCI_IMAGE_READ_AHEAD_PAGES)
 #define MCI_IO_LATENCY_BUCKETS 256u
 #define MCI_IO_TICKS_PER_MS (kBUSCLK / 1000u)
 
