@@ -27,6 +27,7 @@
 #include "diag_log.h"
 #include "magicgate_session.h"
 #include "progress.h"
+#include "raw_bulk_read.h"
 #include "usb_search.h"
 
 extern unsigned char fmcb_freesio2_irx[];
@@ -208,6 +209,16 @@ out:
 
 void MciRawCardSessionStop(MciRawCardSessionStatus *status)
 {
+    int drain_rc;
+
+    /* A NOWAIT raw prefetch owns both an EE receive buffer and the current IOP
+     * MCSERV personality until RPC END arrives. Rebooting/tearing down fileXio
+     * underneath that ownership would turn a performance optimization into a
+     * lifecycle race. Submit early, wait late, but still wait before destruction. */
+    drain_rc = MciRawBulkReadDrain();
+    MciDiagLogPrintf("RAW-BULK", "pipeline drain before raw teardown rc=%d",
+                     drain_rc);
+
     /* Detach before fileXioExit. This only changes EE logger state and queues a
      * marker, so it is safe even if the raw operation already damaged the RPC. */
     MciDiagLogSetIoAvailable(0);
