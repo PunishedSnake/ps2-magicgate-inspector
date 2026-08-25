@@ -16,8 +16,15 @@
 
 #include "diag_log.h"
 #include "raw_bulk_read.h"
-#include "r5900_bench.h"
 #include "r5900_memops.h"
+
+#ifndef MCI_ENABLE_R5900_BENCH
+#define MCI_ENABLE_R5900_BENCH 0
+#endif
+
+#if MCI_ENABLE_R5900_BENCH
+#include "r5900_bench.h"
+#endif
 
 #define MCI_MCSERV_RPC_ID 0x80000400
 #define MCI_MCSERV_BULK_READ_CMD 0x81
@@ -48,6 +55,8 @@ static u32 CacheCount;
 static u16 CacheWarningMask;
 static int Pending;
 static int PendingResult;
+
+#if MCI_ENABLE_R5900_BENCH
 static int CpuBenchDone;
 
 static void RunCpuBenchOnce(void)
@@ -82,6 +91,7 @@ static void RunCpuBenchOnce(void)
         report.ecc_512.branches, report.ecc_512.branch_mispredicts,
         report.result_hash);
 }
+#endif
 
 static void InvalidateCache(void)
 {
@@ -115,10 +125,12 @@ int MciRawBulkReadBind(void)
     InvalidateCache();
     Pending = 0;
 
-    /* Run the bounded CPU-only benchmark before the long raw stream begins.
-     * It does not touch mass: or the card and therefore cannot perturb an open
-     * image descriptor. Results are retained in the normal diagnostic ring. */
+#if MCI_ENABLE_R5900_BENCH
+    /* Development/performance-lab build only. Normal backup latency and cache
+     * state must not include a synthetic CPU benchmark before every first raw
+     * session. Whole-operation telemetry is the production measurement path. */
     RunCpuBenchOnce();
+#endif
 
     for (attempt = 0; attempt < 64; attempt++) {
         rc = sceSifBindRpc(&Client, MCI_MCSERV_RPC_ID, 0);
