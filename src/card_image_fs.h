@@ -4,6 +4,7 @@
 #include <tamtypes.h>
 
 #include "card_image.h"
+#include "save_title.h"
 
 #define MCI_IMAGE_SAVE_MAX 128
 #define MCI_IMAGE_SAVE_NAME_MAX 33
@@ -23,7 +24,13 @@ typedef enum MciImageFsResult {
 } MciImageFsResult;
 
 typedef struct MciImageSaveEntry {
+    /* Filesystem identity used for conflict detection and restore. */
     char name[MCI_IMAGE_SAVE_NAME_MAX];
+    /* Presentation-only title decoded during the same image index pass. Empty
+     * means the renderer should fall back to name. Keeping both fields makes
+     * identity and UI representation explicit instead of cloning/mutating the
+     * whole dataset during rendering. */
+    char display_title[MCI_SAVE_TITLE_MAX];
     u16 mode;
     u8 created[8];
     u8 modified[8];
