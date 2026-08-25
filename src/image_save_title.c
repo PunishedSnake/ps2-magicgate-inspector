@@ -65,6 +65,13 @@ typedef struct TitleImage {
     TitleSuperblock sb;
 } TitleImage;
 
+typedef struct TitleDirCursor {
+    u32 current_relative;
+    u32 cluster_index;
+    int loaded;
+    unsigned char cluster[TITLE_MAX_CLUSTER_BYTES];
+} TitleDirCursor;
+
 static char CachePath[MCI_CARD_IMAGE_PATH_MAX];
 static MciCardImageFormat CacheFormat;
 static int CacheCount = -1;
@@ -192,27 +199,51 @@ static int next_cluster(TitleImage *image, u32 current, u32 *next)
     return *next < image->sb.alloc_end && *next != current ? 0 : -6;
 }
 
-static int read_dir_entry(TitleImage *image, u32 start_relative,
-                          u32 index, TitleDirEntry *entry)
+static void dir_cursor_init(TitleDirCursor *cursor, u32 start_relative)
 {
-    unsigned char cluster[TITLE_MAX_CLUSTER_BYTES];
-    u32 hops = index / image->dir_entries_per_cluster;
-    u32 slot = index % image->dir_entries_per_cluster;
-    u32 current = start_relative;
-    u32 next;
-    u32 i;
+    memset(cursor, 0, sizeof(*cursor));
+    cursor->current_relative = start_relative;
+}
+
+/* Sequential directory cursor. The former ReadDirEntryAt implementation began
+ * at the first cluster for every index, making a directory scan repeatedly walk
+ * the same FAT prefix. This cursor advances ownership of the current cluster
+ * once and reuses its already-read 1 KiB payload for adjacent directory entries. */
+static int dir_cursor_read(TitleImage *image, TitleDirCursor *cursor,
+                           u32 index, TitleDirEntry *entry)
+{
+    u32 wanted_cluster;
+    u32 slot;
     int rc;
 
-    for (i = 0u; i < hops; i++) {
-        rc = next_cluster(image, current, &next);
+    if (image == NULL || cursor == NULL || entry == NULL ||
+        cursor->current_relative >= image->sb.alloc_end)
+        return -1;
+    wanted_cluster = index / image->dir_entries_per_cluster;
+    slot = index % image->dir_entries_per_cluster;
+    if (wanted_cluster < cursor->cluster_index)
+        return -2;
+
+    while (cursor->cluster_index < wanted_cluster) {
+        u32 next;
+        rc = next_cluster(image, cursor->current_relative, &next);
         if (rc != 0)
-            return -1;
-        current = next;
+            return -3;
+        cursor->current_relative = next;
+        cursor->cluster_index++;
+        cursor->loaded = 0;
     }
-    rc = read_cluster(image, image->sb.alloc_offset + current, cluster);
-    if (rc < 0)
-        return rc;
-    memcpy(entry, cluster + slot * sizeof(TitleDirEntry), sizeof(*entry));
+
+    if (!cursor->loaded) {
+        rc = read_cluster(image,
+                          image->sb.alloc_offset + cursor->current_relative,
+                          cursor->cluster);
+        if (rc < 0)
+            return rc;
+        cursor->loaded = 1;
+    }
+    memcpy(entry, cursor->cluster + slot * sizeof(TitleDirEntry),
+           sizeof(*entry));
     return 0;
 }
 
@@ -295,14 +326,16 @@ static int title_for_save(TitleImage *image, const MciImageSaveEntry *save,
                           char out[MCI_SAVE_TITLE_MAX])
 {
     unsigned char icon[1024];
+    TitleDirCursor cursor;
     TitleDirEntry entry;
     char name[33];
     u32 i;
     int rc;
 
+    dir_cursor_init(&cursor, save->start_cluster);
     for (i = 2u; i < save->entry_count; i++) {
         unsigned int got = 0u;
-        rc = read_dir_entry(image, save->start_cluster, i, &entry);
+        rc = dir_cursor_read(image, &cursor, i, &entry);
         if (rc < 0)
             return rc;
         if ((entry.mode & (TITLE_MODE_EXISTS | TITLE_MODE_FILE)) !=
