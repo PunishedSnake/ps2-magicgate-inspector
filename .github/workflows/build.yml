@@ -43,7 +43,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -94,7 +94,7 @@ jobs:
           echo 'Legacy raw-page modules:'
           sha256sum .build/ps2sdk2-raw/*.irx
 
-      - name: Build standalone ELF in PS2DEV v2.0.0
+      - name: Build production ELF in PS2DEV v2.0.0
         shell: bash
         run: |
           set -euo pipefail
@@ -108,7 +108,7 @@ jobs:
               mips64r5900el-ps2-elf-gcc --version; \
               echo "R5900 target options:"; \
               mips64r5900el-ps2-elf-gcc -Q --help=target -c -x c /dev/null -o /tmp/r5900-target-probe.o 2>/dev/null | grep -E "march=|mtune=|mfix-r5900" || true; \
-              make'
+              make R5900_BENCH=0'
 
       - name: Analyze R5900 hot path and compiler variants
         shell: bash
@@ -123,18 +123,21 @@ jobs:
           echo 'R5900 report summary:'
           grep -E '^(Compiler:|Target:|Final ELF|card_math compiler|[[:space:]]*text)' artifacts/R5900_STATIC_REPORT.txt || true
 
-      - name: Build card-math O3 hardware A-B candidate
+      - name: Build explicit R5900 Performance Lab A-B candidates
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p .build/r5900-ab artifacts
-          cp MC_INSPECTOR.ELF .build/r5900-ab/MC_INSPECTOR-O2.ELF
+          cp MC_INSPECTOR.ELF .build/r5900-ab/MC_INSPECTOR-production.ELF
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/work" \
             -w /work \
             ps2dev/ps2dev:v2.0.0 \
             sh -c 'set -eu; \
               apk add --no-cache build-base >/dev/null; \
+              rm -f src/raw_bulk_read.o MC_INSPECTOR.ELF; \
+              make R5900_BENCH=1 MC_INSPECTOR.ELF; \
+              cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-perflab-O2.ELF; \
               mips64r5900el-ps2-elf-gcc \
                 -D_EE -G0 -O2 -Wall -gdwarf-2 -gz \
                 -O3 -G0 -Wall -Wextra -std=gnu99 \
@@ -143,14 +146,16 @@ jobs:
                 -I/usr/local/ps2dev/ps2sdk/ee/include \
                 -I/usr/local/ps2dev/ps2sdk/common/include -I. \
                 -c src/card_math.c -o src/card_math.o; \
-              make MC_INSPECTOR.ELF; \
-              cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-cardmath-O3.ELF; \
-              cp .build/r5900-ab/MC_INSPECTOR-O2.ELF MC_INSPECTOR.ELF'
+              rm -f MC_INSPECTOR.ELF; \
+              make R5900_BENCH=1 MC_INSPECTOR.ELF; \
+              cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-perflab-cardmath-O3.ELF; \
+              cp .build/r5900-ab/MC_INSPECTOR-production.ELF MC_INSPECTOR.ELF'
           {
-            echo 'R5900 hardware A/B candidate'
-            echo 'Baseline: MC_INSPECTOR.ELF = normal production O2 policy.'
-            echo 'Candidate: MC_INSPECTOR-cardmath-O3.ELF = identical sources/link except card_math.c compiled with -O3 -mtune=r5900.'
-            echo 'Compare the R5900-PERF line in DREBIN.LOG and require identical benchmark result hash plus normal image verification.'
+            echo 'R5900 Performance Lab hardware A/B candidates'
+            echo 'Production: MC_INSPECTOR.ELF has no synthetic CPU benchmark in the normal imaging path.'
+            echo 'Candidate A: MC_INSPECTOR-perflab-O2.ELF enables R5900-PERF with the normal O2 card_math policy.'
+            echo 'Candidate B: MC_INSPECTOR-perflab-cardmath-O3.ELF enables the same benchmark and changes only card_math.c to -O3 -mtune=r5900.'
+            echo 'Compare R5900-PERF on the same real console/workload and require identical result hash plus normal image correctness.'
           } > artifacts/R5900_AB_README.txt
 
       - name: Assemble development artifact
@@ -173,9 +178,9 @@ jobs:
             echo "Raw port contract: MCSERV preserves logical mc0/mc1 ports 0/1; MCMAN owns the final physical SIO2 channel 2/3 mapping"
             echo "Raw acquisition: private 16-page/8192-byte MCSERV bulk-read RPC with legacy mcReadPage fallback and telemetry"
             echo "EE stream copy: native R5900 LQ/SQ qword path for aligned image buffers with memcpy fallback"
-            echo "EE profiling: bounded R5900 PCCR/PCR hardware-counter benchmark for copy, CRC32 and ECC hot kernels"
+            echo "Production profiling: real image operations record SIF/USB batching and wait-time telemetry without running a synthetic CPU benchmark"
+            echo "Performance Lab: separate O2 and card_math-O3 ELFs enable the bounded R5900 PCCR/PCR copy/CRC32/ECC benchmark"
             echo "Compiler audit: R5900_STATIC_REPORT.txt records target flags, optimizer switches, sizes and hot-path disassembly"
-            echo "A/B candidate: MC_INSPECTOR-cardmath-O3.ELF changes only card_math.c from the production O2 policy to -O3 -mtune=r5900"
             echo "Normal card restore fix: XMC mcInit re-primes card detection after temporary IOP personalities"
             echo "Selective restore: source geometry is never copied; saves are streamed through PS2 filesystem/FAT parsing into the destination card"
             echo "MagicGate: immutable raw FMCB.XLF cache in EE RAM with disposable per-bind clones"
@@ -190,9 +195,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          file artifacts/MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-cardmath-O3.ELF
-          ls -lh artifacts/MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-cardmath-O3.ELF artifacts/R5900_STATIC_REPORT.txt
-          sha256sum artifacts/MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-cardmath-O3.ELF | tee artifacts/SHA256SUMS.txt
+          file artifacts/MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-perflab-O2.ELF artifacts/MC_INSPECTOR-perflab-cardmath-O3.ELF
+          ls -lh artifacts/MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-perflab-O2.ELF artifacts/MC_INSPECTOR-perflab-cardmath-O3.ELF artifacts/R5900_STATIC_REPORT.txt
+          sha256sum artifacts/MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-perflab-O2.ELF artifacts/MC_INSPECTOR-perflab-cardmath-O3.ELF | tee artifacts/SHA256SUMS.txt
 
       - name: Upload development build
         uses: actions/upload-artifact@v4
