@@ -26,6 +26,16 @@ src/raw_bulk_read.o: EE_CFLAGS += \
 	-DMCI_RAW_BULK_PAGES=$(RAW_BULK_PAGES) \
 	-DMCI_RAW_BULK_ASYNC=$(RAW_BULK_ASYNC)
 
+# USB image output is a separate A/B axis. Keep production on the existing
+# synchronous 32-record batch until real hardware proves a different batch or
+# one-request-deep fileXio NOWAIT pipeline. BOT remains command-serialized, so
+# async means overlap with EE/card production, not multiple outstanding BOT I/O.
+IMAGE_WRITE_PAGES ?= 32
+IMAGE_WRITE_ASYNC ?= 0
+src/image_write_behind.o: EE_CFLAGS += \
+	-DMCI_IMAGE_WRITE_PAGES=$(IMAGE_WRITE_PAGES) \
+	-DMCI_IMAGE_WRITE_ASYNC=$(IMAGE_WRITE_ASYNC)
+
 # These two v2 composition sources intentionally call low-level fileXio/newlib
 # side by side. Existing backend sources already opt in locally, so keep this
 # target-scoped instead of redefining NEWLIB_PORT_AWARE across the whole build.
@@ -54,6 +64,7 @@ EE_LDFLAGS = -Wl,--gc-sections \
 	-Wl,--wrap=mcReadPage \
 	-Wl,--wrap=fileXioRead \
 	-Wl,--wrap=fileXioWrite \
+	-Wl,--wrap=fileXioClose \
 	-Wl,--wrap=fileXioSync \
 	-Wl,--wrap=FmcbInitMassBackend \
 	-Wl,--wrap=FmcbShutdownMassBackend \
