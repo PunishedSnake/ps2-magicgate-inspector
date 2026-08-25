@@ -30,6 +30,8 @@
 #define MCI_IMAGE_READ_AHEAD_MAX_STRIDE 528
 #define MCI_IMAGE_READ_AHEAD_PAGES 32
 #define MCI_IMAGE_READ_AHEAD_BYTES (MCI_IMAGE_READ_AHEAD_MAX_STRIDE * MCI_IMAGE_READ_AHEAD_PAGES)
+#define MCI_IO_LATENCY_BUCKETS 256u
+#define MCI_IO_TICKS_PER_MS (kBUSCLK / 1000u)
 
 static unsigned char Cache[MCI_IMAGE_READ_AHEAD_BYTES] __attribute__((aligned(64)));
 static unsigned int EnableDepth;
@@ -44,8 +46,10 @@ static u64 OperationStart;
 static u64 UnderlyingTicks;
 static u64 LogicalBytes;
 static u64 UnderlyingBytes;
+static u64 MaxReadTicks;
 static u32 LogicalReads;
 static u32 UnderlyingReads;
+static u32 ReadLatencyHistogram[MCI_IO_LATENCY_BUCKETS];
 
 int __real_fileXioRead(int fd, void *buffer, int size);
 
@@ -63,8 +67,46 @@ static void ResetStats(void)
     UnderlyingTicks = 0u;
     LogicalBytes = 0u;
     UnderlyingBytes = 0u;
+    MaxReadTicks = 0u;
     LogicalReads = 0u;
     UnderlyingReads = 0u;
+    memset(ReadLatencyHistogram, 0, sizeof(ReadLatencyHistogram));
+}
+
+static void RecordReadLatency(u64 ticks)
+{
+    u64 bucket64 = ticks / (u64)MCI_IO_TICKS_PER_MS;
+    unsigned int bucket = bucket64 >= MCI_IO_LATENCY_BUCKETS
+                              ? MCI_IO_LATENCY_BUCKETS - 1u
+                              : (unsigned int)bucket64;
+    ReadLatencyHistogram[bucket]++;
+    if (ticks > MaxReadTicks)
+        MaxReadTicks = ticks;
+}
+
+static unsigned int ReadPercentileMsFloor(unsigned int percentile)
+{
+    unsigned int target;
+    unsigned int seen = 0u;
+    unsigned int i;
+
+    if (UnderlyingReads == 0u)
+        return 0u;
+    target = (UnderlyingReads * percentile + 99u) / 100u;
+    for (i = 0u; i < MCI_IO_LATENCY_BUCKETS; i++) {
+        seen += ReadLatencyHistogram[i];
+        if (seen >= target)
+            return i;
+    }
+    return MCI_IO_LATENCY_BUCKETS - 1u;
+}
+
+static u64 TicksToUsec(u64 ticks)
+{
+    u32 seconds = 0u;
+    u32 useconds = 0u;
+    TimerBusClock2USec(ticks, &seconds, &useconds);
+    return (u64)seconds * 1000000u + useconds;
 }
 
 void MciImageReadAheadSetEnabled(int enabled)
@@ -85,12 +127,15 @@ void MciImageReadAheadSetEnabled(int enabled)
 
     MciDiagLogTracePrintf(
         "IMAGE-IO",
-        "read-ahead end logical_calls=%u logical_bytes=%llu underlying_calls=%u underlying_bytes=%llu underlying_ticks=%llu operation_ticks=%llu batch_pages=%u",
+        "read-ahead end logical_calls=%u logical_bytes=%llu underlying_calls=%u underlying_bytes=%llu underlying_ticks=%llu operation_ticks=%llu batch_pages=%u batch_p50_ms_floor=%u batch_p95_ms_floor=%u batch_p99_ms_floor=%u batch_max_us=%llu",
         LogicalReads, (unsigned long long)LogicalBytes,
         UnderlyingReads, (unsigned long long)UnderlyingBytes,
         (unsigned long long)UnderlyingTicks,
         (unsigned long long)(GetTimerSystemTime() - OperationStart),
-        (unsigned int)MCI_IMAGE_READ_AHEAD_PAGES);
+        (unsigned int)MCI_IMAGE_READ_AHEAD_PAGES,
+        ReadPercentileMsFloor(50u), ReadPercentileMsFloor(95u),
+        ReadPercentileMsFloor(99u),
+        (unsigned long long)TicksToUsec(MaxReadTicks));
     ResetCache();
 }
 
@@ -124,12 +169,15 @@ int __wrap_fileXioRead(int fd, void *buffer, int size)
         while (CacheLength < size) {
             int capacity = (int)sizeof(Cache) - CacheLength;
             u64 begin;
+            u64 elapsed;
             if (capacity <= 0)
                 break;
             begin = GetTimerSystemTime();
             rc = __real_fileXioRead(fd, Cache + CacheLength, capacity);
-            UnderlyingTicks += GetTimerSystemTime() - begin;
+            elapsed = GetTimerSystemTime() - begin;
+            UnderlyingTicks += elapsed;
             UnderlyingReads++;
+            RecordReadLatency(elapsed);
             if (rc <= 0) {
                 if (CacheLength == 0)
                     return rc;
