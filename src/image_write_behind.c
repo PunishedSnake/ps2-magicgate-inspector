@@ -23,6 +23,8 @@
 #define MCI_IMAGE_WRITE_MAX_STRIDE 528
 #define MCI_IMAGE_WRITE_PAGES 32
 #define MCI_IMAGE_WRITE_BYTES (MCI_IMAGE_WRITE_MAX_STRIDE * MCI_IMAGE_WRITE_PAGES)
+#define MCI_IO_LATENCY_BUCKETS 256u
+#define MCI_IO_TICKS_PER_MS (kBUSCLK / 1000u)
 
 static unsigned char Cache[MCI_IMAGE_WRITE_BYTES] __attribute__((aligned(64)));
 static unsigned int EnableDepth;
@@ -34,8 +36,10 @@ static u64 OperationStart;
 static u64 UnderlyingTicks;
 static u64 LogicalBytes;
 static u64 UnderlyingBytes;
+static u64 MaxWriteTicks;
 static u32 LogicalWrites;
 static u32 UnderlyingWrites;
+static u32 WriteLatencyHistogram[MCI_IO_LATENCY_BUCKETS];
 
 int __real_fileXioWrite(int fd, const void *buffer, int size);
 
@@ -52,8 +56,46 @@ static void ResetStats(void)
     UnderlyingTicks = 0u;
     LogicalBytes = 0u;
     UnderlyingBytes = 0u;
+    MaxWriteTicks = 0u;
     LogicalWrites = 0u;
     UnderlyingWrites = 0u;
+    memset(WriteLatencyHistogram, 0, sizeof(WriteLatencyHistogram));
+}
+
+static void RecordWriteLatency(u64 ticks)
+{
+    u64 bucket64 = ticks / (u64)MCI_IO_TICKS_PER_MS;
+    unsigned int bucket = bucket64 >= MCI_IO_LATENCY_BUCKETS
+                              ? MCI_IO_LATENCY_BUCKETS - 1u
+                              : (unsigned int)bucket64;
+    WriteLatencyHistogram[bucket]++;
+    if (ticks > MaxWriteTicks)
+        MaxWriteTicks = ticks;
+}
+
+static unsigned int WritePercentileMsFloor(unsigned int percentile)
+{
+    unsigned int target;
+    unsigned int seen = 0u;
+    unsigned int i;
+
+    if (UnderlyingWrites == 0u)
+        return 0u;
+    target = (UnderlyingWrites * percentile + 99u) / 100u;
+    for (i = 0u; i < MCI_IO_LATENCY_BUCKETS; i++) {
+        seen += WriteLatencyHistogram[i];
+        if (seen >= target)
+            return i;
+    }
+    return MCI_IO_LATENCY_BUCKETS - 1u;
+}
+
+static u64 TicksToUsec(u64 ticks)
+{
+    u32 seconds = 0u;
+    u32 useconds = 0u;
+    TimerBusClock2USec(ticks, &seconds, &useconds);
+    return (u64)seconds * 1000000u + useconds;
 }
 
 static int FlushCache(void)
@@ -63,10 +105,13 @@ static int FlushCache(void)
     while (done < CacheLength) {
         int rc;
         u64 begin = GetTimerSystemTime();
+        u64 elapsed;
         rc = __real_fileXioWrite(CacheFd, Cache + done,
                                  CacheLength - done);
-        UnderlyingTicks += GetTimerSystemTime() - begin;
+        elapsed = GetTimerSystemTime() - begin;
+        UnderlyingTicks += elapsed;
         UnderlyingWrites++;
+        RecordWriteLatency(elapsed);
         if (rc <= 0)
             return rc < 0 ? rc : -1;
         UnderlyingBytes += (u64)(unsigned int)rc;
@@ -100,12 +145,15 @@ void MciImageWriteBehindSetEnabled(int enabled)
      * dead descriptor during teardown. */
     MciDiagLogTracePrintf(
         "IMAGE-IO",
-        "write-behind end logical_calls=%u logical_bytes=%llu underlying_calls=%u underlying_bytes=%llu underlying_ticks=%llu operation_ticks=%llu batch_pages=%u pending_bytes=%d",
+        "write-behind end logical_calls=%u logical_bytes=%llu underlying_calls=%u underlying_bytes=%llu underlying_ticks=%llu operation_ticks=%llu batch_pages=%u pending_bytes=%d batch_p50_ms_floor=%u batch_p95_ms_floor=%u batch_p99_ms_floor=%u batch_max_us=%llu",
         LogicalWrites, (unsigned long long)LogicalBytes,
         UnderlyingWrites, (unsigned long long)UnderlyingBytes,
         (unsigned long long)UnderlyingTicks,
         (unsigned long long)(GetTimerSystemTime() - OperationStart),
-        (unsigned int)MCI_IMAGE_WRITE_PAGES, CacheLength);
+        (unsigned int)MCI_IMAGE_WRITE_PAGES, CacheLength,
+        WritePercentileMsFloor(50u), WritePercentileMsFloor(95u),
+        WritePercentileMsFloor(99u),
+        (unsigned long long)TicksToUsec(MaxWriteTicks));
     ResetCache();
 }
 
