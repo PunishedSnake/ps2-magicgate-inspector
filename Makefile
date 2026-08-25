@@ -14,7 +14,17 @@ EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections
 # backup/restore latency. Production builds keep this at zero. CI can rebuild
 # raw_bulk_read.o with R5900_BENCH=1 for explicit hardware A/B artifacts.
 R5900_BENCH ?= 0
-src/raw_bulk_read.o: EE_CFLAGS += -DMCI_ENABLE_R5900_BENCH=$(R5900_BENCH)
+
+# Raw-card streaming knobs are explicit hardware A/B inputs, not universal
+# truths. Production keeps the previously qualified synchronous 16-page batch.
+# Candidate builds can use NOWAIT one-batch read-ahead and/or a 4 KiB batch to
+# test whether reducing EE D-cache pressure beats the extra RPC frequency.
+RAW_BULK_PAGES ?= 16
+RAW_BULK_ASYNC ?= 0
+src/raw_bulk_read.o: EE_CFLAGS += \
+	-DMCI_ENABLE_R5900_BENCH=$(R5900_BENCH) \
+	-DMCI_RAW_BULK_PAGES=$(RAW_BULK_PAGES) \
+	-DMCI_RAW_BULK_ASYNC=$(RAW_BULK_ASYNC)
 
 # These two v2 composition sources intentionally call low-level fileXio/newlib
 # side by side. Existing backend sources already opt in locally, so keep this
