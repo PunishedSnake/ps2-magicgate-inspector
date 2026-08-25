@@ -39,6 +39,10 @@ void MciRawBulkReadSetPageLimit(u32 total_pages);
  * correctness failure for a stream that never consumed that batch. */
 int MciRawBulkReadDrain(void);
 
+/* Emit one bounded end-of-operation summary, including RPC tail latency and
+ * async ready/wait counters. This is deliberately not a per-batch trace. */
+void MciRawBulkReadLogStats(const char *phase);
+
 /* Try to satisfy one logical mcReadPage request from the configured bulk cache.
  * Returns 1 when handled and arms MciRawBulkReadSyncPending(), 0 when the caller
  * must issue the ordinary libmc mcReadPage RPC instead. */
