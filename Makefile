@@ -10,6 +10,12 @@ EE_LIBS = -ldebug -ldraw -lgraph -lpacket -ldma -lpad -lmc -lfileXio -lcdvd -lse
 EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections \
 	-DMG_SECR_PROFILE_PS2SDK14=1
 
+# Synthetic R5900 counters are a Performance Lab feature, not part of ordinary
+# backup/restore latency. Production builds keep this at zero. CI can rebuild
+# raw_bulk_read.o with R5900_BENCH=1 for explicit hardware A/B artifacts.
+R5900_BENCH ?= 0
+src/raw_bulk_read.o: EE_CFLAGS += -DMCI_ENABLE_R5900_BENCH=$(R5900_BENCH)
+
 # These two v2 composition sources intentionally call low-level fileXio/newlib
 # side by side. Existing backend sources already opt in locally, so keep this
 # target-scoped instead of redefining NEWLIB_PORT_AWARE across the whole build.
