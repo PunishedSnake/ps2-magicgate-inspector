@@ -18,10 +18,10 @@ void __real_MciGuiRenderImageBrowser(int target_port,
  * Transitional P0 view adapter.
  *
  * New filesystem indexes carry display_title directly. Older/partial indexes
- * still fall back to the standalone resolver until that duplicate parser is
- * completely retired. Only the at-most-seven visible filesystem-name fields are
- * temporarily substituted for the synchronous renderer and restored before the
- * caller regains control; restore/conflict identity stays authoritative.
+ * still fall back to the standalone resolver until the v2 frontend stops
+ * composing the legacy gui.c implementation. Only the at-most-seven visible
+ * filesystem-name fields are temporarily substituted for the synchronous
+ * renderer. Identity bytes are saved/restored exactly, never re-formatted.
  */
 void __wrap_MciGuiRenderImageBrowser(int target_port,
                                      const MciImageSaveList *list,
@@ -72,8 +72,8 @@ void __wrap_MciGuiRenderImageBrowser(int target_port,
             continue;
 
         saved_index[saved_count] = index;
-        snprintf(saved_names[saved_count], sizeof(saved_names[saved_count]),
-                 "%s", list->saves[index].name);
+        memcpy(saved_names[saved_count], list->saves[index].name,
+               sizeof(saved_names[saved_count]));
         snprintf(mutable_list->saves[index].name,
                  sizeof(mutable_list->saves[index].name), "%s", title);
         saved_count++;
@@ -87,8 +87,7 @@ void __wrap_MciGuiRenderImageBrowser(int target_port,
 
     for (i = 0; i < saved_count; i++) {
         int index = saved_index[i];
-        snprintf(mutable_list->saves[index].name,
-                 sizeof(mutable_list->saves[index].name), "%s",
-                 saved_names[i]);
+        memcpy(mutable_list->saves[index].name, saved_names[i],
+               sizeof(mutable_list->saves[index].name));
     }
 }
