@@ -20,6 +20,7 @@
 
 #include "card_image_fs.h"
 #include "progress.h"
+#include "save_title.h"
 
 #define FS_PAGE_SIZE 512u
 #define FS_PS2_STRIDE 528u
@@ -31,6 +32,7 @@
 #define FS_FAT_NEXT_MASK 0x7FFFFFFFu
 #define FS_IMPORT_CREATED_MAX 384
 #define FS_MAX_DEPTH 12
+#define FS_ICON_PREFIX_MAX 1024u
 
 #pragma pack(push, 1)
 typedef struct MciFsSuperblock {
@@ -85,6 +87,13 @@ typedef struct MciFsStats {
     u32 clusters;
 } MciFsStats;
 
+typedef struct MciFsDirCursor {
+    u32 current_relative;
+    u32 cluster_index;
+    int loaded;
+    unsigned char cluster[FS_MAX_CLUSTER_BYTES] __attribute__((aligned(64)));
+} MciFsDirCursor;
+
 typedef struct MciImportTxn {
     int port;
     MciFsImage *image;
@@ -111,6 +120,19 @@ static int IsDotName(const char *name)
 {
     return name[0] == '.' &&
            (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'));
+}
+
+static int NameEqualCi(const char *a, const char *b)
+{
+    while (*a != '\0' && *b != '\0') {
+        unsigned char ca = (unsigned char)*a++;
+        unsigned char cb = (unsigned char)*b++;
+        if (ca >= 'A' && ca <= 'Z') ca = (unsigned char)(ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z') cb = (unsigned char)(cb + ('a' - 'A'));
+        if (ca != cb)
+            return 0;
+    }
+    return *a == '\0' && *b == '\0';
 }
 
 static int SafeEntryName(const MciFsDirEntry *entry, char out[33])
@@ -231,29 +253,89 @@ static int NextRelativeCluster(MciFsImage *image, u32 current, u32 *next)
     return 0;
 }
 
-static int ReadDirEntryAt(MciFsImage *image, u32 start_relative,
-                          u32 index, MciFsDirEntry *entry)
+static void DirCursorInit(MciFsDirCursor *cursor, u32 start_relative)
 {
-    unsigned char cluster[FS_MAX_CLUSTER_BYTES];
-    u32 hops = index / image->dir_entries_per_cluster;
-    u32 slot = index % image->dir_entries_per_cluster;
-    u32 current = start_relative;
-    u32 next;
-    u32 i;
+    memset(cursor, 0, sizeof(*cursor));
+    cursor->current_relative = start_relative;
+}
+
+/* Sequential directory access. The previous ReadDirEntryAt() started from the
+ * directory's first cluster for every entry index and re-walked the same FAT
+ * prefix. Scans/imports consume entries monotonically, so retain ownership of
+ * the current cluster and advance only when the index crosses a cluster edge. */
+static int DirCursorRead(MciFsImage *image, MciFsDirCursor *cursor,
+                         u32 index, MciFsDirEntry *entry)
+{
+    u32 wanted_cluster;
+    u32 slot;
     int rc;
 
-    if (start_relative >= image->sb.alloc_end || entry == NULL)
+    if (image == NULL || cursor == NULL || entry == NULL ||
+        cursor->current_relative >= image->sb.alloc_end)
         return -1;
-    for (i = 0; i < hops; i++) {
-        rc = NextRelativeCluster(image, current, &next);
+
+    wanted_cluster = index / image->dir_entries_per_cluster;
+    slot = index % image->dir_entries_per_cluster;
+    if (wanted_cluster < cursor->cluster_index)
+        return -2;
+
+    while (cursor->cluster_index < wanted_cluster) {
+        u32 next;
+        rc = NextRelativeCluster(image, cursor->current_relative, &next);
         if (rc != 0)
-            return -2;
-        current = next;
+            return -3;
+        cursor->current_relative = next;
+        cursor->cluster_index++;
+        cursor->loaded = 0;
     }
-    rc = ReadCluster(image, image->sb.alloc_offset + current, cluster);
-    if (rc < 0)
-        return rc;
-    memcpy(entry, cluster + slot * sizeof(MciFsDirEntry), sizeof(*entry));
+
+    if (!cursor->loaded) {
+        rc = ReadCluster(image, image->sb.alloc_offset + cursor->current_relative,
+                         cursor->cluster);
+        if (rc < 0)
+            return rc;
+        cursor->loaded = 1;
+    }
+
+    memcpy(entry, cursor->cluster + slot * sizeof(MciFsDirEntry), sizeof(*entry));
+    return 0;
+}
+
+static int ReadFilePrefix(MciFsImage *image, const MciFsDirEntry *entry,
+                          unsigned char *buffer, unsigned int capacity,
+                          unsigned int *read_size)
+{
+    unsigned char cluster[FS_MAX_CLUSTER_BYTES] __attribute__((aligned(64)));
+    u32 current = entry->cluster;
+    u32 remaining = entry->length;
+    unsigned int done = 0u;
+    int rc;
+
+    if (buffer == NULL || read_size == NULL)
+        return -1;
+    if (remaining > capacity)
+        remaining = capacity;
+
+    while (remaining > 0u) {
+        u32 chunk;
+        if (current == FS_FAT_END || current >= image->sb.alloc_end)
+            return -2;
+        rc = ReadCluster(image, image->sb.alloc_offset + current, cluster);
+        if (rc < 0)
+            return rc;
+        chunk = remaining > image->cluster_bytes ? image->cluster_bytes : remaining;
+        memcpy(buffer + done, cluster, chunk);
+        done += chunk;
+        remaining -= chunk;
+        if (remaining > 0u) {
+            u32 next;
+            rc = NextRelativeCluster(image, current, &next);
+            if (rc != 0)
+                return -3;
+            current = next;
+        }
+    }
+    *read_size = done;
     return 0;
 }
 
@@ -284,12 +366,8 @@ static int OpenImage(const char *path, MciCardImageFormat format,
         return -2;
     }
     memcpy(&image->sb, first, sizeof(image->sb));
-    /*
-     * pages_per_block is physical erase geometry, not a filesystem-browser
-     * constraint. Official 8 MiB cards commonly report 16, while the 64 MiB
-     * hardware-qualified image reports 32. The browser never erases blocks, so
-     * rejecting values above 16 only discards otherwise valid PS2 filesystems.
-     */
+    /* pages_per_block is physical erase geometry, not a filesystem-browser
+     * constraint. The browser never erases the source image. */
     if (memcmp(image->sb.magic, SuperblockMagic, sizeof(SuperblockMagic)) != 0 ||
         image->sb.page_len != FS_PAGE_SIZE ||
         (image->sb.pages_per_cluster != 1u && image->sb.pages_per_cluster != 2u) ||
@@ -325,8 +403,10 @@ static void CloseImage(MciFsImage *image)
 }
 
 static int AccumulateDirectory(MciFsImage *image, u32 start_relative,
-                               u32 entry_count, MciFsStats *stats, int depth)
+                               u32 entry_count, MciFsStats *stats, int depth,
+                               char *display_title, unsigned int title_size)
 {
+    MciFsDirCursor cursor;
     MciFsDirEntry entry;
     char name[33];
     u32 i;
@@ -336,9 +416,10 @@ static int AccumulateDirectory(MciFsImage *image, u32 start_relative,
         return -1;
     stats->dirs++;
     stats->clusters += CeilDiv(entry_count, image->dir_entries_per_cluster);
+    DirCursorInit(&cursor, start_relative);
 
     for (i = 2u; i < entry_count; i++) {
-        rc = ReadDirEntryAt(image, start_relative, i, &entry);
+        rc = DirCursorRead(image, &cursor, i, &entry);
         if (rc < 0)
             return rc;
         if ((entry.mode & FS_MODE_EXISTS) == 0u)
@@ -349,11 +430,23 @@ static int AccumulateDirectory(MciFsImage *image, u32 start_relative,
             stats->files++;
             stats->bytes += entry.length;
             stats->clusters += CeilDiv(entry.length, image->cluster_bytes);
+
+            /* Presentation metadata belongs to this index pass. Decode only the
+             * top-level save's icon.sys and keep failure non-fatal: a missing or
+             * unusual title must never make an otherwise browseable save invalid. */
+            if (depth == 0 && display_title != NULL && title_size > 0u &&
+                display_title[0] == '\0' && NameEqualCi(name, "icon.sys")) {
+                unsigned char icon[FS_ICON_PREFIX_MAX] __attribute__((aligned(64)));
+                unsigned int got = 0u;
+                if (ReadFilePrefix(image, &entry, icon, sizeof(icon), &got) == 0)
+                    (void)MciSaveTitleDecodeIconSys(icon, got,
+                                                    display_title, title_size);
+            }
         } else if (entry.mode & FS_MODE_DIR) {
             if (entry.cluster == FS_FAT_END || entry.cluster >= image->sb.alloc_end)
                 return -2;
             rc = AccumulateDirectory(image, entry.cluster, entry.length,
-                                     stats, depth + 1);
+                                     stats, depth + 1, NULL, 0u);
             if (rc < 0)
                 return rc;
         }
@@ -381,6 +474,7 @@ int MciImageFsScan(const char *path, MciCardImageFormat format,
                    MciImageSaveList *list)
 {
     MciFsImage image;
+    MciFsDirCursor root_cursor;
     MciFsDirEntry root;
     MciFsDirEntry entry;
     MciFsStats stats;
@@ -402,7 +496,9 @@ int MciImageFsScan(const char *path, MciCardImageFormat format,
         list->result = MCI_IMAGE_FS_IMAGE_INVALID;
         return rc;
     }
-    rc = ReadDirEntryAt(&image, image.sb.rootdir_cluster, 0u, &root);
+
+    DirCursorInit(&root_cursor, image.sb.rootdir_cluster);
+    rc = DirCursorRead(&image, &root_cursor, 0u, &root);
     if (rc < 0 || root.length < 2u || root.length > image.sb.alloc_end * image.dir_entries_per_cluster) {
         CloseImage(&image);
         list->result = MCI_IMAGE_FS_CORRUPT;
@@ -411,9 +507,10 @@ int MciImageFsScan(const char *path, MciCardImageFormat format,
 
     for (i = 2u; i < root.length; i++) {
         MciImageSaveEntry *save;
+        char display_title[MCI_SAVE_TITLE_MAX];
         int percent;
 
-        rc = ReadDirEntryAt(&image, image.sb.rootdir_cluster, i, &entry);
+        rc = DirCursorRead(&image, &root_cursor, i, &entry);
         if (rc < 0) {
             CloseImage(&image);
             list->result = MCI_IMAGE_FS_CORRUPT;
@@ -435,7 +532,9 @@ int MciImageFsScan(const char *path, MciCardImageFormat format,
         }
 
         memset(&stats, 0, sizeof(stats));
-        rc = AccumulateDirectory(&image, entry.cluster, entry.length, &stats, 0);
+        memset(display_title, 0, sizeof(display_title));
+        rc = AccumulateDirectory(&image, entry.cluster, entry.length, &stats, 0,
+                                 display_title, sizeof(display_title));
         if (rc < 0) {
             CloseImage(&image);
             list->result = MCI_IMAGE_FS_CORRUPT;
@@ -443,7 +542,13 @@ int MciImageFsScan(const char *path, MciCardImageFormat format,
         }
         save = &list->saves[list->save_count++];
         snprintf(save->name, sizeof(save->name), "%s", name);
+        if (display_title[0] != '\0')
+            snprintf(save->display_title, sizeof(save->display_title), "%s",
+                     display_title);
         save->mode = entry.mode;
+        memcpy(save->created, &entry.created, sizeof(save->created));
+        memcpy(save->modified, &entry.modified, sizeof(save->modified));
+        save->attr = entry.attr;
         save->start_cluster = entry.cluster;
         save->entry_count = entry.length;
         save->total_bytes = stats.bytes;
@@ -460,7 +565,7 @@ int MciImageFsScan(const char *path, MciCardImageFormat format,
     CloseImage(&image);
     list->result = list->truncated ? MCI_IMAGE_FS_TOO_MANY_SAVES : MCI_IMAGE_FS_OK;
     MciProgressUpdate(MCI_PROGRESS_CARD_TOOLS, 100, "Image browser index ready",
-                      "Top-level PS2 directories are indexed and can now be selected independently for restore.");
+                      "Top-level PS2 directories and available icon.sys titles are indexed in one pass.");
     return 0;
 }
 
@@ -664,6 +769,7 @@ static int ImportFile(MciImportTxn *txn, const MciFsDirEntry *entry,
 static int ImportDirectory(MciImportTxn *txn, const MciFsDirEntry *dir_entry,
                            const char *path, int depth)
 {
+    MciFsDirCursor cursor;
     MciFsDirEntry entry;
     char name[33];
     char child[MCI_IMAGE_SAVE_PATH_MAX];
@@ -680,8 +786,9 @@ static int ImportDirectory(MciImportTxn *txn, const MciFsDirEntry *dir_entry,
         return -2;
     txn->report->directories_written++;
 
+    DirCursorInit(&cursor, dir_entry->cluster);
     for (i = 2u; i < dir_entry->length; i++) {
-        rc = ReadDirEntryAt(txn->image, dir_entry->cluster, i, &entry);
+        rc = DirCursorRead(txn->image, &cursor, i, &entry);
         if (rc < 0)
             return rc;
         if ((entry.mode & FS_MODE_EXISTS) == 0u)
@@ -820,6 +927,9 @@ int MciImageFsImportSelected(int target_port, MciImageSaveList *list,
         top.mode = save->mode;
         top.length = save->entry_count;
         top.cluster = save->start_cluster;
+        memcpy(&top.created, save->created, sizeof(save->created));
+        memcpy(&top.modified, save->modified, sizeof(save->modified));
+        top.attr = save->attr;
         snprintf(top.name, sizeof(top.name), "%s", save->name);
         snprintf(path, sizeof(path), "/%s", save->name);
         report->failed_save_index = i;
