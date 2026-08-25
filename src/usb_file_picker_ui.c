@@ -10,6 +10,20 @@
 #include "gui.h"
 #include "usb_file_picker_ui.h"
 
+/*
+ * P0 lifetime contract:
+ * MciUsbPickerList contains up to 128 entries with long path/name fields. Two
+ * automatic instances consumed roughly 100 KiB of the default 128 KiB EE stack
+ * before the rest of the UI call chain was counted. Card Tools is single-threaded
+ * and the picker is not re-entrant, so keep its double-buffered catalog in BSS.
+ *
+ * The two buffers are ownership slots, not two copies of the current catalog:
+ * active -> renderer/selection, scratch -> next directory/root scan. On a
+ * successful transition the pointers swap in O(1), avoiding the former large
+ * struct assignment as well as the stack hazard.
+ */
+static MciUsbPickerList PickerBuffers[2];
+
 static int PadState(u32 *state)
 {
     struct padButtonStatus buttons;
@@ -108,6 +122,14 @@ static void RenderPicker(const char *title, const char *card_role,
                         MCI_GUI_TONE_INFO);
 }
 
+static void SwapPickerBuffers(MciUsbPickerList **active,
+                              MciUsbPickerList **scratch)
+{
+    MciUsbPickerList *tmp = *active;
+    *active = *scratch;
+    *scratch = tmp;
+}
+
 int MciUsbPickerChoose(MciUsbPickerFilter filter,
                        const char *title,
                        const char *card_role,
@@ -116,8 +138,8 @@ int MciUsbPickerChoose(MciUsbPickerFilter filter,
                        unsigned int path_size,
                        MciSaveTransferFormat *format)
 {
-    MciUsbPickerList list;
-    MciUsbPickerList next;
+    MciUsbPickerList *list = &PickerBuffers[0];
+    MciUsbPickerList *next = &PickerBuffers[1];
     int row = 0;
     int first = 0;
     int rc;
@@ -131,7 +153,7 @@ int MciUsbPickerChoose(MciUsbPickerFilter filter,
     if (card_port != NULL && (*card_port < 0 || *card_port > 1))
         *card_port = 0;
 
-    rc = MciUsbPickerOpenFirst(filter, &list);
+    rc = MciUsbPickerOpenFirst(filter, list);
     if (rc < 0) {
         MciGuiRenderMessage("USB picker unavailable",
                             "No readable mass:/, mass0:/ or mass1:/ filesystem could be opened.",
@@ -142,11 +164,11 @@ int MciUsbPickerChoose(MciUsbPickerFilter filter,
     for (;;) {
         u32 pressed;
 
-        if (list.entry_count == 0)
+        if (list->entry_count == 0)
             row = first = 0;
-        else if (row >= list.entry_count)
-            row = list.entry_count - 1;
-        RenderPicker(title, card_role, card_port, &list, row, first);
+        else if (row >= list->entry_count)
+            row = list->entry_count - 1;
+        RenderPicker(title, card_role, card_port, list, row, first);
         do {
             pressed = ReadPressed(&old_state);
             if (pressed == 0u)
@@ -159,37 +181,37 @@ int MciUsbPickerChoose(MciUsbPickerFilter filter,
             else if (pressed & PAD_R1)
                 *card_port = 1;
         }
-        if ((pressed & PAD_UP) && list.entry_count > 0)
-            row = row == 0 ? list.entry_count - 1 : row - 1;
-        else if ((pressed & PAD_DOWN) && list.entry_count > 0)
-            row = (row + 1) % list.entry_count;
+        if ((pressed & PAD_UP) && list->entry_count > 0)
+            row = row == 0 ? list->entry_count - 1 : row - 1;
+        else if ((pressed & PAD_DOWN) && list->entry_count > 0)
+            row = (row + 1) % list->entry_count;
         if (row < first)
             first = row;
         else if (row >= first + 7)
             first = row - 6;
 
         if (pressed & PAD_TRIANGLE) {
-            if (MciUsbPickerCycleRoot(&list, 1, &next) == 0) {
-                list = next;
+            if (MciUsbPickerCycleRoot(list, 1, next) == 0) {
+                SwapPickerBuffers(&list, &next);
                 row = first = 0;
             }
             continue;
         }
         if (pressed & PAD_CIRCLE) {
-            rc = MciUsbPickerParent(&list, &next);
+            rc = MciUsbPickerParent(list, next);
             if (rc == 0) {
-                list = next;
+                SwapPickerBuffers(&list, &next);
                 row = first = 0;
                 continue;
             }
             return 1;
         }
-        if ((pressed & PAD_CROSS) && list.entry_count > 0) {
-            const MciUsbPickerEntry *entry = &list.entries[row];
+        if ((pressed & PAD_CROSS) && list->entry_count > 0) {
+            const MciUsbPickerEntry *entry = &list->entries[row];
             if (entry->is_directory) {
-                rc = MciUsbPickerEnter(&list, row, &next);
+                rc = MciUsbPickerEnter(list, row, next);
                 if (rc == 0) {
-                    list = next;
+                    SwapPickerBuffers(&list, &next);
                     row = first = 0;
                 }
                 continue;
