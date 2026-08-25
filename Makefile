@@ -26,6 +26,14 @@ src/raw_bulk_read.o: EE_CFLAGS += \
 	-DMCI_RAW_BULK_PAGES=$(RAW_BULK_PAGES) \
 	-DMCI_RAW_BULK_ASYNC=$(RAW_BULK_ASYNC)
 
+# Sequential verification/readback batching is its own P0 axis. Production uses
+# the established 32-page refill while CI also builds 16/64-page candidates.
+# This remains synchronous for now so read batch size can be isolated from the
+# separate global fileXio NOWAIT experiment used by image output.
+IMAGE_READ_PAGES ?= 32
+src/image_read_ahead.o: EE_CFLAGS += \
+	-DMCI_IMAGE_READ_AHEAD_PAGES=$(IMAGE_READ_PAGES)
+
 # USB image output is a separate A/B axis. Keep production on the existing
 # synchronous 32-record batch until real hardware proves a different batch or
 # one-request-deep fileXio NOWAIT pipeline. BOT remains command-serialized, so
