@@ -1,9 +1,14 @@
 /* SPDX-License-Identifier: MIT */
 /*
  * Drebin EE client for the private bulk-read extension injected into the
- * temporary legacy MCSERV. The public libmc ABI remains unchanged: mcReadPage
- * still appears asynchronous to card_image.c, while this layer prefetches 16
- * logical pages with one SIF RPC and serves subsequent page requests from EE RAM.
+ * temporary legacy MCSERV.
+ *
+ * The public libmc ABI remains unchanged: callers still issue mcReadPage and
+ * consume completion through mcSync. The private path batches physical card
+ * reads and, in the hardware A/B build, keeps one next batch outstanding while
+ * EE code consumes the current batch. This is deliberately a one-request-deep
+ * pipeline: MCSERV exposes one server-data object and one staging buffer, so we
+ * do not pretend that arbitrary RPC re-entry is safe.
  */
 
 #include <tamtypes.h>
@@ -22,15 +27,32 @@
 #define MCI_ENABLE_R5900_BENCH 0
 #endif
 
+#ifndef MCI_RAW_BULK_PAGES
+#define MCI_RAW_BULK_PAGES 16
+#endif
+
+#ifndef MCI_RAW_BULK_ASYNC
+#define MCI_RAW_BULK_ASYNC 0
+#endif
+
+#if MCI_RAW_BULK_PAGES != 4 && MCI_RAW_BULK_PAGES != 8 && MCI_RAW_BULK_PAGES != 16
+#error "MCI_RAW_BULK_PAGES must be 4, 8 or 16"
+#endif
+
+#if MCI_RAW_BULK_ASYNC
+#define MCI_CACHE_SLOTS 2
+#else
+#define MCI_CACHE_SLOTS 1
+#endif
+
 #if MCI_ENABLE_R5900_BENCH
 #include "r5900_bench.h"
 #endif
 
 #define MCI_MCSERV_RPC_ID 0x80000400
 #define MCI_MCSERV_BULK_READ_CMD 0x81
-#define MCI_BULK_PAGES 16
 #define MCI_PAGE_BYTES 512
-#define MCI_BULK_BYTES (MCI_BULK_PAGES * MCI_PAGE_BYTES)
+#define MCI_BULK_BYTES (MCI_RAW_BULK_PAGES * MCI_PAGE_BYTES)
 
 /* High 16 bits returned by the IOP encode one ECC-warning bit per prefetched
  * page. Low 8 bits contain the number of pages DMA-transferred. */
@@ -42,19 +64,43 @@ typedef struct MciRawBulkRpcArgs {
     void *ee_buffer;
 } MciRawBulkRpcArgs;
 
+typedef struct MciRawBulkCacheMeta {
+    int valid;
+    int port;
+    int slot;
+    u32 start;
+    u32 count;
+    u16 warning_mask;
+} MciRawBulkCacheMeta;
+
 static SifRpcClientData_t Client __attribute__((aligned(64)));
 static MciRawBulkRpcArgs Send __attribute__((aligned(64)));
 static int Receive __attribute__((aligned(64)));
-static unsigned char Cache[MCI_BULK_BYTES] __attribute__((aligned(64)));
+static unsigned char CacheData[MCI_CACHE_SLOTS][MCI_BULK_BYTES]
+    __attribute__((aligned(64)));
+static MciRawBulkCacheMeta CacheMeta[MCI_CACHE_SLOTS];
 static MciRawBulkReadStats Stats;
-static int CacheValid;
-static int CachePort;
-static int CacheSlot;
-static u32 CacheStart;
-static u32 CacheCount;
-static u16 CacheWarningMask;
+static int CurrentCache;
+static u32 PageLimit;
 static int Pending;
 static int PendingResult;
+static int LastPageValid;
+static int LastPort;
+static int LastSlot;
+static u32 LastPage;
+
+#if MCI_RAW_BULK_ASYNC
+static int AsyncReceive __attribute__((aligned(64)));
+static int AsyncActive;
+static volatile int AsyncDone;
+static int AsyncCache;
+static int AsyncPort;
+static int AsyncSlot;
+static u32 AsyncStart;
+static u32 AsyncCount;
+static u64 AsyncIssueTicks;
+static int AsyncSema = -1;
+#endif
 
 #if MCI_ENABLE_R5900_BENCH
 static int CpuBenchDone;
@@ -93,27 +139,260 @@ static void RunCpuBenchOnce(void)
 }
 #endif
 
-static void InvalidateCache(void)
+static void InvalidateCacheSlot(int index)
 {
-    CacheValid = 0;
-    CachePort = -1;
-    CacheSlot = -1;
-    CacheStart = 0u;
-    CacheCount = 0u;
-    CacheWarningMask = 0u;
+    if (index < 0 || index >= MCI_CACHE_SLOTS)
+        return;
+    memset(&CacheMeta[index], 0, sizeof(CacheMeta[index]));
+    CacheMeta[index].port = -1;
+    CacheMeta[index].slot = -1;
 }
+
+static void InvalidateAllCaches(void)
+{
+    int i;
+    for (i = 0; i < MCI_CACHE_SLOTS; i++)
+        InvalidateCacheSlot(i);
+    CurrentCache = -1;
+}
+
+static u32 BatchStart(u32 page)
+{
+    return page & ~(u32)(MCI_RAW_BULK_PAGES - 1u);
+}
+
+static u32 BatchCount(u32 start)
+{
+    if (PageLimit != 0u) {
+        u32 remaining;
+        if (start >= PageLimit)
+            return 0u;
+        remaining = PageLimit - start;
+        return remaining < MCI_RAW_BULK_PAGES ? remaining : MCI_RAW_BULK_PAGES;
+    }
+    return MCI_RAW_BULK_PAGES;
+}
+
+static int CacheContains(int index, int port, int slot, u32 page)
+{
+    const MciRawBulkCacheMeta *meta;
+    if (index < 0 || index >= MCI_CACHE_SLOTS)
+        return 0;
+    meta = &CacheMeta[index];
+    return meta->valid && meta->port == port && meta->slot == slot &&
+           page >= meta->start && page < meta->start + meta->count;
+}
+
+static int CommitRpcResult(int index, int port, int slot, u32 start,
+                           int rpc_result)
+{
+    unsigned int pages;
+
+    Stats.last_rpc_rc = rpc_result;
+    if (rpc_result < 0) {
+        InvalidateCacheSlot(index);
+        return rpc_result;
+    }
+
+    pages = (unsigned int)rpc_result & 0xFFu;
+    if (pages == 0u || pages > MCI_RAW_BULK_PAGES) {
+        InvalidateCacheSlot(index);
+        return -3;
+    }
+
+    _InvalidDCache(CacheData[index], CacheData[index] + pages * MCI_PAGE_BYTES);
+    CacheMeta[index].valid = 1;
+    CacheMeta[index].port = port;
+    CacheMeta[index].slot = slot;
+    CacheMeta[index].start = start;
+    CacheMeta[index].count = pages;
+    CacheMeta[index].warning_mask =
+        (u16)(((unsigned int)rpc_result >> 8) & 0xFFFFu);
+    Stats.pages_fetched += pages;
+    return 0;
+}
+
+static int FillCacheSync(int index, int port, int slot, u32 start)
+{
+    u32 count = BatchCount(start);
+    u64 begin;
+    int rc;
+
+    if (!Stats.bound || count == 0u)
+        return -1;
+
+    /* IOP DMA targets cached EE memory. Push any dirty aliases out before the
+     * transfer; CommitRpcResult invalidates the received range after completion. */
+    _SyncDCache(CacheData[index], CacheData[index] + MCI_BULK_BYTES);
+
+    Send.port = port;
+    Send.slot = slot;
+    Send.start_page = start;
+    Send.page_count = count;
+    Send.ee_buffer = CacheData[index];
+    Receive = 0;
+
+    begin = GetTimerSystemTime();
+    rc = sceSifCallRpc(&Client, MCI_MCSERV_BULK_READ_CMD, 0,
+                       &Send, sizeof(Send), &Receive, sizeof(Receive),
+                       NULL, NULL);
+    Stats.rpc_ticks += GetTimerSystemTime() - begin;
+    Stats.rpc_calls++;
+    if (rc < 0) {
+        Stats.last_rpc_rc = rc;
+        Stats.bound = 0;
+        InvalidateCacheSlot(index);
+        return rc;
+    }
+    return CommitRpcResult(index, port, slot, start, Receive);
+}
+
+#if MCI_RAW_BULK_ASYNC
+static void AsyncEnd(void *unused)
+{
+    (void)unused;
+    AsyncDone = 1;
+    if (AsyncSema >= 0)
+        iSignalSema(AsyncSema);
+}
+
+static int FinishAsync(void)
+{
+    int ready_before_wait;
+    int wait_rc;
+    int rc;
+    u64 wait_begin;
+    u64 now;
+
+    if (!AsyncActive)
+        return 0;
+
+    ready_before_wait = AsyncDone != 0;
+    wait_begin = GetTimerSystemTime();
+    wait_rc = WaitSema(AsyncSema);
+    now = GetTimerSystemTime();
+    if (wait_rc < 0) {
+        Stats.last_rpc_rc = wait_rc;
+        AsyncActive = 0;
+        InvalidateCacheSlot(AsyncCache);
+        return wait_rc;
+    }
+
+    if (ready_before_wait) {
+        Stats.async_ready_hits++;
+    } else {
+        Stats.async_waits++;
+        Stats.async_wait_ticks += now - wait_begin;
+    }
+    Stats.rpc_ticks += now - AsyncIssueTicks;
+
+    rc = CommitRpcResult(AsyncCache, AsyncPort, AsyncSlot,
+                         AsyncStart, AsyncReceive);
+    AsyncActive = 0;
+    AsyncDone = 0;
+    return rc;
+}
+
+static int StartAsync(int index, int port, int slot, u32 start)
+{
+    u32 count = BatchCount(start);
+    int rc;
+
+    if (!Stats.bound || AsyncActive || AsyncSema < 0 || count == 0u)
+        return -1;
+
+    InvalidateCacheSlot(index);
+    _SyncDCache(CacheData[index], CacheData[index] + MCI_BULK_BYTES);
+
+    Send.port = port;
+    Send.slot = slot;
+    Send.start_page = start;
+    Send.page_count = count;
+    Send.ee_buffer = CacheData[index];
+    AsyncReceive = 0;
+    AsyncDone = 0;
+    AsyncCache = index;
+    AsyncPort = port;
+    AsyncSlot = slot;
+    AsyncStart = start;
+    AsyncCount = count;
+    AsyncIssueTicks = GetTimerSystemTime();
+    AsyncActive = 1;
+
+    rc = sceSifCallRpc(&Client, MCI_MCSERV_BULK_READ_CMD,
+                       SIF_RPC_M_NOWAIT,
+                       &Send, sizeof(Send),
+                       &AsyncReceive, sizeof(AsyncReceive),
+                       AsyncEnd, NULL);
+    Stats.rpc_calls++;
+    Stats.async_submits++;
+    if (rc < 0) {
+        Stats.last_rpc_rc = rc;
+        Stats.bound = 0;
+        AsyncActive = 0;
+        AsyncDone = 0;
+        InvalidateCacheSlot(index);
+        return rc;
+    }
+    return 0;
+}
+
+static void MaybeStartNext(int port, int slot, u32 page, int sequential)
+{
+    const MciRawBulkCacheMeta *meta;
+    int next_index;
+    u32 next_start;
+
+    if (!sequential || PageLimit == 0u || AsyncActive || CurrentCache < 0)
+        return;
+    meta = &CacheMeta[CurrentCache];
+    if (!meta->valid || meta->port != port || meta->slot != slot)
+        return;
+
+    next_start = meta->start + meta->count;
+    if (next_start >= PageLimit || page >= next_start)
+        return;
+
+    next_index = CurrentCache ^ 1;
+    (void)StartAsync(next_index, port, slot, next_start);
+}
+#endif
 
 void MciRawBulkReadReset(void)
 {
+#if MCI_RAW_BULK_ASYNC
+    /* Callers must drain before tearing down the IOP personality. Reset is also
+     * used before a new session, where no request can legitimately be active. */
+    AsyncActive = 0;
+    AsyncDone = 0;
+    AsyncCache = -1;
+    AsyncPort = -1;
+    AsyncSlot = -1;
+    AsyncStart = 0u;
+    AsyncCount = 0u;
+    AsyncIssueTicks = 0u;
+    AsyncReceive = 0;
+    if (AsyncSema >= 0) {
+        DeleteSema(AsyncSema);
+        AsyncSema = -1;
+    }
+#endif
     memset(&Client, 0, sizeof(Client));
     memset(&Send, 0, sizeof(Send));
     Receive = 0;
     memset(&Stats, 0, sizeof(Stats));
     Stats.bind_rc = -999;
     Stats.last_rpc_rc = -999;
-    InvalidateCache();
+    Stats.batch_pages = MCI_RAW_BULK_PAGES;
+    Stats.async_enabled = MCI_RAW_BULK_ASYNC ? 1 : 0;
+    InvalidateAllCaches();
+    PageLimit = 0u;
     Pending = 0;
     PendingResult = 0;
+    LastPageValid = 0;
+    LastPort = -1;
+    LastSlot = -1;
+    LastPage = 0u;
 }
 
 int MciRawBulkReadBind(void)
@@ -122,7 +401,7 @@ int MciRawBulkReadBind(void)
     int rc = -1;
 
     memset(&Client, 0, sizeof(Client));
-    InvalidateCache();
+    InvalidateAllCaches();
     Pending = 0;
 
 #if MCI_ENABLE_R5900_BENCH
@@ -137,6 +416,18 @@ int MciRawBulkReadBind(void)
         if (rc < 0)
             break;
         if (Client.server != NULL) {
+#if MCI_RAW_BULK_ASYNC
+            ee_sema_t sema;
+            memset(&sema, 0, sizeof(sema));
+            sema.max_count = 1;
+            sema.init_count = 0;
+            AsyncSema = CreateSema(&sema);
+            if (AsyncSema < 0) {
+                Stats.bind_rc = AsyncSema;
+                Stats.bound = 0;
+                return AsyncSema;
+            }
+#endif
             Stats.bind_rc = 0;
             Stats.bound = 1;
             return 0;
@@ -149,90 +440,88 @@ int MciRawBulkReadBind(void)
     return Stats.bind_rc;
 }
 
-static int FillCache(int port, int slot, u32 page)
+void MciRawBulkReadSetPageLimit(u32 total_pages)
 {
-    u32 start = page & ~(u32)(MCI_BULK_PAGES - 1);
-    u64 begin;
-    int rc;
-    unsigned int pages;
+    PageLimit = total_pages;
+}
 
-    if (!Stats.bound)
-        return -1;
-
-    /* The IOP will DMA into this cached EE range. Write back any dirty lines
-     * first so they can never overwrite the incoming transfer later, then
-     * invalidate the range again once the synchronous RPC confirms DMA finish. */
-    _SyncDCache(Cache, Cache + sizeof(Cache));
-
-    Send.port = port;
-    Send.slot = slot;
-    Send.start_page = start;
-    Send.page_count = MCI_BULK_PAGES;
-    Send.ee_buffer = Cache;
-    Receive = 0;
-
-    begin = GetTimerSystemTime();
-    rc = sceSifCallRpc(&Client, MCI_MCSERV_BULK_READ_CMD, 0,
-                       &Send, sizeof(Send), &Receive, sizeof(Receive),
-                       NULL, NULL);
-    Stats.rpc_ticks += GetTimerSystemTime() - begin;
-    Stats.rpc_calls++;
-    Stats.last_rpc_rc = rc < 0 ? rc : Receive;
-    if (rc < 0) {
-        Stats.bound = 0;
-        InvalidateCache();
-        return rc;
-    }
-    if (Receive < 0) {
-        InvalidateCache();
-        return Receive;
-    }
-
-    pages = (unsigned int)Receive & 0xFFu;
-    if (pages == 0u || pages > MCI_BULK_PAGES) {
-        InvalidateCache();
-        return -3;
-    }
-
-    _InvalidDCache(Cache, Cache + pages * MCI_PAGE_BYTES);
-    CachePort = port;
-    CacheSlot = slot;
-    CacheStart = start;
-    CacheCount = pages;
-    CacheWarningMask = (u16)(((unsigned int)Receive >> 8) & 0xFFFFu);
-    CacheValid = 1;
-    Stats.pages_fetched += pages;
+int MciRawBulkReadDrain(void)
+{
+#if MCI_RAW_BULK_ASYNC
+    if (AsyncActive)
+        return FinishAsync();
+#endif
     return 0;
 }
 
 int MciRawBulkReadTryPage(int port, int slot, int page, void *buffer)
 {
+    u32 requested;
+    u32 start;
     u32 offset;
     int rc;
+    int sequential;
 
     if (!Stats.bound || buffer == NULL || page < 0 || Pending)
         return 0;
 
-    if (!CacheValid || port != CachePort || slot != CacheSlot ||
-        (u32)page < CacheStart || (u32)page >= CacheStart + CacheCount) {
-        rc = FillCache(port, slot, (u32)page);
+    requested = (u32)page;
+    sequential = LastPageValid && LastPort == port && LastSlot == slot &&
+                 requested == LastPage + 1u;
+
+    if (!CacheContains(CurrentCache, port, slot, requested)) {
+        start = BatchStart(requested);
+#if MCI_RAW_BULK_ASYNC
+        if (AsyncActive && AsyncPort == port && AsyncSlot == slot &&
+            AsyncStart == start) {
+            int completed_cache = AsyncCache;
+            rc = FinishAsync();
+            if (rc == 0)
+                CurrentCache = completed_cache;
+        } else {
+            if (AsyncActive) {
+                Stats.async_discards++;
+                (void)FinishAsync();
+            }
+            rc = -1;
+        }
         if (rc < 0) {
+            int fill_index = CurrentCache < 0 ? 0 : (CurrentCache ^ 1);
+            rc = FillCacheSync(fill_index, port, slot, start);
+            if (rc == 0)
+                CurrentCache = fill_index;
+        }
+#else
+        rc = FillCacheSync(0, port, slot, start);
+        if (rc == 0)
+            CurrentCache = 0;
+#endif
+        if (rc < 0 || !CacheContains(CurrentCache, port, slot, requested)) {
             Stats.fallback_calls++;
+            LastPageValid = 0;
             return 0;
         }
     } else {
         Stats.cache_hits++;
     }
 
-    offset = (u32)page - CacheStart;
-    /* Every cache page starts at a 512-byte boundary. The image engine also
-     * supplies aligned page buffers, so the normal acquisition path now moves
-     * this hot 512-byte copy through native R5900 LQ/SQ. MciFastCopy keeps the
-     * wrapper safe for any future unaligned libmc caller. */
-    MciFastCopy(buffer, Cache + offset * MCI_PAGE_BYTES, MCI_PAGE_BYTES);
-    PendingResult = (CacheWarningMask & (1u << offset)) ? 1 : 0;
+    offset = requested - CacheMeta[CurrentCache].start;
+    MciFastCopy(buffer,
+                CacheData[CurrentCache] + offset * MCI_PAGE_BYTES,
+                MCI_PAGE_BYTES);
+    PendingResult =
+        (CacheMeta[CurrentCache].warning_mask & (1u << offset)) ? 1 : 0;
     if (PendingResult > 0)
         Stats.ecc_warning_pages++;
+
+#if MCI_RAW_BULK_ASYNC
+    MaybeStartNext(port, slot, requested, sequential);
+#endif
+
+    LastPageValid = 1;
+    LastPort = port;
+    LastSlot = slot;
+    LastPage = requested;
     Pending = 1;
     return 1;
 }
@@ -242,7 +531,7 @@ int MciRawBulkReadSyncPending(int mode, int *cmd, int *result, int *sync_rc)
     if (!Pending)
         return 0;
 
-    (void)mode; /* Bulk RPC already completed synchronously before mcReadPage returned. */
+    (void)mode;
     if (cmd != NULL)
         *cmd = MC_FUNC_READ_PAGE;
     if (result != NULL)
