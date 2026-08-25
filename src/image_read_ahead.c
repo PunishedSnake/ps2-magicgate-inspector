@@ -20,8 +20,10 @@
 #define NEWLIB_PORT_AWARE
 
 #include <fileXio_rpc.h>
+#include <timer.h>
 #include <string.h>
 
+#include "diag_log.h"
 #include "image_read_ahead.h"
 #include "r5900_memops.h"
 
@@ -30,11 +32,20 @@
 #define MCI_IMAGE_READ_AHEAD_BYTES (MCI_IMAGE_READ_AHEAD_MAX_STRIDE * MCI_IMAGE_READ_AHEAD_PAGES)
 
 static unsigned char Cache[MCI_IMAGE_READ_AHEAD_BYTES] __attribute__((aligned(64)));
-static int Enabled;
+static unsigned int EnableDepth;
 static int CacheFd = -1;
 static int CacheStride;
 static int CacheOffset;
 static int CacheLength;
+
+/* Whole-operation counters. These deliberately measure the real user workload,
+ * not a synthetic microbenchmark. Nested users share one ownership interval. */
+static u64 OperationStart;
+static u64 UnderlyingTicks;
+static u64 LogicalBytes;
+static u64 UnderlyingBytes;
+static u32 LogicalReads;
+static u32 UnderlyingReads;
 
 int __real_fileXioRead(int fd, void *buffer, int size);
 
@@ -46,9 +57,40 @@ static void ResetCache(void)
     CacheLength = 0;
 }
 
+static void ResetStats(void)
+{
+    OperationStart = GetTimerSystemTime();
+    UnderlyingTicks = 0u;
+    LogicalBytes = 0u;
+    UnderlyingBytes = 0u;
+    LogicalReads = 0u;
+    UnderlyingReads = 0u;
+}
+
 void MciImageReadAheadSetEnabled(int enabled)
 {
-    Enabled = enabled ? 1 : 0;
+    if (enabled) {
+        if (EnableDepth++ == 0u) {
+            ResetCache();
+            ResetStats();
+        }
+        return;
+    }
+
+    if (EnableDepth == 0u)
+        return;
+    EnableDepth--;
+    if (EnableDepth != 0u)
+        return;
+
+    MciDiagLogTracePrintf(
+        "IMAGE-IO",
+        "read-ahead end logical_calls=%u logical_bytes=%llu underlying_calls=%u underlying_bytes=%llu underlying_ticks=%llu operation_ticks=%llu batch_pages=%u",
+        LogicalReads, (unsigned long long)LogicalBytes,
+        UnderlyingReads, (unsigned long long)UnderlyingBytes,
+        (unsigned long long)UnderlyingTicks,
+        (unsigned long long)(GetTimerSystemTime() - OperationStart),
+        (unsigned int)MCI_IMAGE_READ_AHEAD_PAGES);
     ResetCache();
 }
 
@@ -58,8 +100,11 @@ int __wrap_fileXioRead(int fd, void *buffer, int size)
     int rc;
     int copy_size;
 
-    if (!Enabled || buffer == NULL || (size != 512 && size != 528))
+    if (EnableDepth == 0u || buffer == NULL || (size != 512 && size != 528))
         return __real_fileXioRead(fd, buffer, size);
+
+    LogicalReads++;
+    LogicalBytes += (u64)(unsigned int)size;
 
     if (fd != CacheFd || size != CacheStride) {
         ResetCache();
@@ -78,14 +123,19 @@ int __wrap_fileXioRead(int fd, void *buffer, int size)
 
         while (CacheLength < size) {
             int capacity = (int)sizeof(Cache) - CacheLength;
+            u64 begin;
             if (capacity <= 0)
                 break;
+            begin = GetTimerSystemTime();
             rc = __real_fileXioRead(fd, Cache + CacheLength, capacity);
+            UnderlyingTicks += GetTimerSystemTime() - begin;
+            UnderlyingReads++;
             if (rc <= 0) {
                 if (CacheLength == 0)
                     return rc;
                 break;
             }
+            UnderlyingBytes += (u64)(unsigned int)rc;
             CacheLength += rc;
         }
     }
