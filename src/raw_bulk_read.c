@@ -53,6 +53,11 @@
 #define MCI_MCSERV_BULK_READ_CMD 0x81
 #define MCI_PAGE_BYTES 512
 #define MCI_BULK_BYTES (MCI_RAW_BULK_PAGES * MCI_PAGE_BYTES)
+#define MCI_MAX_CARD_PAGES 262144u
+#define MCI_LATENCY_BUCKETS 256u
+#define MCI_TICKS_PER_MS (kBUSCLK / 1000u)
+
+static const char SuperblockMagic[28] = "Sony PS2 Memory Card Format ";
 
 /* High 16 bits returned by the IOP encode one ECC-warning bit per prefetched
  * page. Low 8 bits contain the number of pages DMA-transferred. */
@@ -80,6 +85,12 @@ static unsigned char CacheData[MCI_CACHE_SLOTS][MCI_BULK_BYTES]
     __attribute__((aligned(64)));
 static MciRawBulkCacheMeta CacheMeta[MCI_CACHE_SLOTS];
 static MciRawBulkReadStats Stats;
+static u32 RpcLatencyHistogram[MCI_LATENCY_BUCKETS];
+static u32 WaitLatencyHistogram[MCI_LATENCY_BUCKETS];
+static unsigned int RpcLatencySamples;
+static unsigned int WaitLatencySamples;
+static u64 RpcLatencyMaxTicks;
+static u64 WaitLatencyMaxTicks;
 static int CurrentCache;
 static u32 PageLimit;
 static int Pending;
@@ -97,7 +108,6 @@ static int AsyncCache;
 static int AsyncPort;
 static int AsyncSlot;
 static u32 AsyncStart;
-static u32 AsyncCount;
 static u64 AsyncIssueTicks;
 static int AsyncSema = -1;
 #endif
@@ -138,6 +148,90 @@ static void RunCpuBenchOnce(void)
         report.result_hash);
 }
 #endif
+
+static int KnownPageCount(u32 pages)
+{
+    switch (pages) {
+        case 8192u:
+        case 16384u:
+        case 32768u:
+        case 65536u:
+        case 131072u:
+        case 262144u:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static void MaybeLearnPageLimit(const unsigned char page[MCI_PAGE_BYTES])
+{
+    u16 page_len;
+    u16 pages_per_cluster;
+    u32 clusters_per_card;
+    u64 pages;
+
+    if (PageLimit != 0u || page == NULL ||
+        memcmp(page, SuperblockMagic, sizeof(SuperblockMagic)) != 0)
+        return;
+
+    /* This is only a transport prefetch bound. card_image.c remains the
+     * authoritative geometry parser and independently validates the same page.
+     * We merely avoid an extra control dependency between that parser and this
+     * optional read-ahead layer. Invalid/unusual metadata disables speculation. */
+    memcpy(&page_len, page + 40u, sizeof(page_len));
+    memcpy(&pages_per_cluster, page + 42u, sizeof(pages_per_cluster));
+    memcpy(&clusters_per_card, page + 48u, sizeof(clusters_per_card));
+    if (page_len != MCI_PAGE_BYTES || pages_per_cluster == 0u ||
+        clusters_per_card == 0u)
+        return;
+
+    pages = (u64)pages_per_cluster * (u64)clusters_per_card;
+    if (pages > MCI_MAX_CARD_PAGES || !KnownPageCount((u32)pages))
+        return;
+    PageLimit = (u32)pages;
+}
+
+static void RecordLatency(u32 histogram[MCI_LATENCY_BUCKETS],
+                          unsigned int *samples, u64 *max_ticks, u64 ticks)
+{
+    u64 bucket64 = ticks / (u64)MCI_TICKS_PER_MS;
+    unsigned int bucket = bucket64 >= MCI_LATENCY_BUCKETS
+                              ? MCI_LATENCY_BUCKETS - 1u
+                              : (unsigned int)bucket64;
+
+    histogram[bucket]++;
+    (*samples)++;
+    if (ticks > *max_ticks)
+        *max_ticks = ticks;
+}
+
+static unsigned int PercentileMsFloor(const u32 histogram[MCI_LATENCY_BUCKETS],
+                                      unsigned int samples,
+                                      unsigned int percentile)
+{
+    unsigned int target;
+    unsigned int seen = 0u;
+    unsigned int i;
+
+    if (samples == 0u)
+        return 0u;
+    target = (samples * percentile + 99u) / 100u;
+    for (i = 0u; i < MCI_LATENCY_BUCKETS; i++) {
+        seen += histogram[i];
+        if (seen >= target)
+            return i;
+    }
+    return MCI_LATENCY_BUCKETS - 1u;
+}
+
+static u64 TicksToUsec(u64 ticks)
+{
+    u32 seconds = 0u;
+    u32 useconds = 0u;
+    TimerBusClock2USec(ticks, &seconds, &useconds);
+    return (u64)seconds * 1000000u + useconds;
+}
 
 static void InvalidateCacheSlot(int index)
 {
@@ -216,6 +310,7 @@ static int FillCacheSync(int index, int port, int slot, u32 start)
 {
     u32 count = BatchCount(start);
     u64 begin;
+    u64 elapsed;
     int rc;
 
     if (!Stats.bound || count == 0u)
@@ -236,8 +331,11 @@ static int FillCacheSync(int index, int port, int slot, u32 start)
     rc = sceSifCallRpc(&Client, MCI_MCSERV_BULK_READ_CMD, 0,
                        &Send, sizeof(Send), &Receive, sizeof(Receive),
                        NULL, NULL);
-    Stats.rpc_ticks += GetTimerSystemTime() - begin;
+    elapsed = GetTimerSystemTime() - begin;
+    Stats.rpc_ticks += elapsed;
     Stats.rpc_calls++;
+    RecordLatency(RpcLatencyHistogram, &RpcLatencySamples,
+                  &RpcLatencyMaxTicks, elapsed);
     if (rc < 0) {
         Stats.last_rpc_rc = rc;
         Stats.bound = 0;
@@ -263,6 +361,7 @@ static int FinishAsync(void)
     int rc;
     u64 wait_begin;
     u64 now;
+    u64 elapsed;
 
     if (!AsyncActive)
         return 0;
@@ -281,10 +380,17 @@ static int FinishAsync(void)
     if (ready_before_wait) {
         Stats.async_ready_hits++;
     } else {
+        u64 wait_ticks = now - wait_begin;
         Stats.async_waits++;
-        Stats.async_wait_ticks += now - wait_begin;
+        Stats.async_wait_ticks += wait_ticks;
+        RecordLatency(WaitLatencyHistogram, &WaitLatencySamples,
+                      &WaitLatencyMaxTicks, wait_ticks);
     }
-    Stats.rpc_ticks += now - AsyncIssueTicks;
+
+    elapsed = now - AsyncIssueTicks;
+    Stats.rpc_ticks += elapsed;
+    RecordLatency(RpcLatencyHistogram, &RpcLatencySamples,
+                  &RpcLatencyMaxTicks, elapsed);
 
     rc = CommitRpcResult(AsyncCache, AsyncPort, AsyncSlot,
                          AsyncStart, AsyncReceive);
@@ -315,7 +421,6 @@ static int StartAsync(int index, int port, int slot, u32 start)
     AsyncPort = port;
     AsyncSlot = slot;
     AsyncStart = start;
-    AsyncCount = count;
     AsyncIssueTicks = GetTimerSystemTime();
     AsyncActive = 1;
 
@@ -369,7 +474,6 @@ void MciRawBulkReadReset(void)
     AsyncPort = -1;
     AsyncSlot = -1;
     AsyncStart = 0u;
-    AsyncCount = 0u;
     AsyncIssueTicks = 0u;
     AsyncReceive = 0;
     if (AsyncSema >= 0) {
@@ -381,6 +485,12 @@ void MciRawBulkReadReset(void)
     memset(&Send, 0, sizeof(Send));
     Receive = 0;
     memset(&Stats, 0, sizeof(Stats));
+    memset(RpcLatencyHistogram, 0, sizeof(RpcLatencyHistogram));
+    memset(WaitLatencyHistogram, 0, sizeof(WaitLatencyHistogram));
+    RpcLatencySamples = 0u;
+    WaitLatencySamples = 0u;
+    RpcLatencyMaxTicks = 0u;
+    WaitLatencyMaxTicks = 0u;
     Stats.bind_rc = -999;
     Stats.last_rpc_rc = -999;
     Stats.batch_pages = MCI_RAW_BULK_PAGES;
@@ -442,7 +552,8 @@ int MciRawBulkReadBind(void)
 
 void MciRawBulkReadSetPageLimit(u32 total_pages)
 {
-    PageLimit = total_pages;
+    if (total_pages > 0u && total_pages <= MCI_MAX_CARD_PAGES)
+        PageLimit = total_pages;
 }
 
 int MciRawBulkReadDrain(void)
@@ -452,6 +563,36 @@ int MciRawBulkReadDrain(void)
         return FinishAsync();
 #endif
     return 0;
+}
+
+void MciRawBulkReadLogStats(const char *phase)
+{
+    unsigned int rpc_p50 = PercentileMsFloor(RpcLatencyHistogram,
+                                              RpcLatencySamples, 50u);
+    unsigned int rpc_p95 = PercentileMsFloor(RpcLatencyHistogram,
+                                              RpcLatencySamples, 95u);
+    unsigned int rpc_p99 = PercentileMsFloor(RpcLatencyHistogram,
+                                              RpcLatencySamples, 99u);
+    unsigned int wait_p95 = PercentileMsFloor(WaitLatencyHistogram,
+                                               WaitLatencySamples, 95u);
+    unsigned int wait_p99 = PercentileMsFloor(WaitLatencyHistogram,
+                                               WaitLatencySamples, 99u);
+
+    MciDiagLogPrintf(
+        "RAW-BULK-PERF",
+        "%s batch_pages=%u async=%d page_limit=%u rpc_calls=%u pages=%u hits=%u fallbacks=%u ecc_warn=%u async_submit=%u ready=%u waits=%u discards=%u rpc_p50_ms_floor=%u rpc_p95_ms_floor=%u rpc_p99_ms_floor=%u rpc_max_us=%llu wait_p95_ms_floor=%u wait_p99_ms_floor=%u wait_max_us=%llu rpc_ticks=%llu wait_ticks=%llu last_rpc=%d",
+        phase != NULL ? phase : "snapshot",
+        Stats.batch_pages, Stats.async_enabled, PageLimit,
+        Stats.rpc_calls, Stats.pages_fetched, Stats.cache_hits,
+        Stats.fallback_calls, Stats.ecc_warning_pages,
+        Stats.async_submits, Stats.async_ready_hits, Stats.async_waits,
+        Stats.async_discards, rpc_p50, rpc_p95, rpc_p99,
+        (unsigned long long)TicksToUsec(RpcLatencyMaxTicks),
+        wait_p95, wait_p99,
+        (unsigned long long)TicksToUsec(WaitLatencyMaxTicks),
+        (unsigned long long)Stats.rpc_ticks,
+        (unsigned long long)Stats.async_wait_ticks,
+        Stats.last_rpc_rc);
 }
 
 int MciRawBulkReadTryPage(int port, int slot, int page, void *buffer)
@@ -509,6 +650,10 @@ int MciRawBulkReadTryPage(int port, int slot, int page, void *buffer)
     MciFastCopy(buffer,
                 CacheData[CurrentCache] + offset * MCI_PAGE_BYTES,
                 MCI_PAGE_BYTES);
+
+    if (requested == 0u)
+        MaybeLearnPageLimit((const unsigned char *)buffer);
+
     PendingResult =
         (CacheMeta[CurrentCache].warning_mask & (1u << offset)) ? 1 : 0;
     if (PendingResult > 0)
