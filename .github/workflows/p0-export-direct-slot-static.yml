@@ -1,0 +1,61 @@
+name: P0 Export Direct Slot Static Audit
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - perf/p0-export-direct-write-slot
+    paths:
+      - 'src/card_image.c'
+      - 'src/image_write_behind.c'
+      - 'src/image_write_behind.h'
+      - '.github/workflows/p0-export-direct-slot-static.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  compile-pair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile synchronous and async ownership variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/p0-export-direct-slot .build/direct-slot
+          docker pull ps2dev/ps2dev:v2.0.0
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work \
+            ps2dev/ps2dev:v2.0.0 sh -c 'set -eu; \
+              BASE="-D_EE -G0 -O2 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections -DMG_SECR_PROFILE_PS2SDK14=1 -mtune=r5900"; \
+              INCS="-I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -Isrc -I."; \
+              mips64r5900el-ps2-elf-gcc $BASE $INCS -c src/card_image.c -o .build/direct-slot/card_image.o; \
+              for async in 0 1; do \
+                mips64r5900el-ps2-elf-gcc $BASE $INCS -DMCI_IMAGE_WRITE_PAGES=32 -DMCI_IMAGE_WRITE_ASYNC=$async -c src/image_write_behind.c -o .build/direct-slot/write-$async.o; \
+                mips64r5900el-ps2-elf-ld -r .build/direct-slot/card_image.o .build/direct-slot/write-$async.o -o .build/direct-slot/pair-$async.o; \
+                mips64r5900el-ps2-elf-nm .build/direct-slot/pair-$async.o | grep -q " T MciImageWriteBehindReserve"; \
+                mips64r5900el-ps2-elf-nm .build/direct-slot/pair-$async.o | grep -q " T MciImageWriteBehindCommit"; \
+                if mips64r5900el-ps2-elf-nm -u .build/direct-slot/pair-$async.o | grep -q MciImageWriteBehind; then \
+                  echo "ERROR: unresolved direct-slot API in async=$async"; exit 1; \
+                fi; \
+              done; \
+              { \
+                echo "candidate=$GITHUB_SHA"; \
+                echo "sync writer/card pair:"; mips64r5900el-ps2-elf-size .build/direct-slot/pair-0.o; \
+                echo "async writer/card pair:"; mips64r5900el-ps2-elf-size .build/direct-slot/pair-1.o; \
+                echo "direct API symbols:"; mips64r5900el-ps2-elf-nm -S .build/direct-slot/pair-0.o | grep MciImageWriteBehind; \
+              } > artifacts/p0-export-direct-slot/STATIC_REPORT.txt; \
+              mips64r5900el-ps2-elf-objdump -dr --disassemble=MciCardImageExport .build/direct-slot/card_image.o > artifacts/p0-export-direct-slot/export.S; \
+              mips64r5900el-ps2-elf-objdump -dr --disassemble=MciImageWriteBehindReserve .build/direct-slot/write-0.o > artifacts/p0-export-direct-slot/reserve.S; \
+              mips64r5900el-ps2-elf-objdump -dr --disassemble=MciImageWriteBehindCommit .build/direct-slot/write-0.o > artifacts/p0-export-direct-slot/commit.S'
+          cat artifacts/p0-export-direct-slot/STATIC_REPORT.txt
+
+      - name: Upload audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS2-MCI-P0-export-direct-slot-${{ github.sha }}
+          path: artifacts/p0-export-direct-slot/
+          if-no-files-found: error
+          retention-days: 30
