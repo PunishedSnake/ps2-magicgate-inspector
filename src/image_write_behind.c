@@ -471,3 +471,88 @@ int __wrap_fileXioClose(int fd)
         return drain_rc;
     return close_rc;
 }
+
+int MciImageWriteBehindReserve(int fd, int size, void **buffer)
+{
+    MciImageWriteSlot *slot;
+    int rc;
+
+    if (buffer == NULL)
+        return -1;
+    *buffer = NULL;
+
+    if (EnableDepth == 0u || (size != 512 && size != 528))
+        return 0;
+
+    if (ActiveFd >= 0 && (fd != ActiveFd || size != ActiveStride)) {
+        rc = DrainAsync();
+        if (rc < 0) {
+            LastError = rc;
+            return rc;
+        }
+        ResetSlot(FillSlot);
+        ActiveFd = -1;
+        ActiveStride = 0;
+    }
+    if (ActiveFd < 0) {
+        ActiveFd = fd;
+        ActiveStride = size;
+    }
+
+    slot = &Slots[FillSlot];
+    if (slot->length == 0) {
+        slot->fd = fd;
+        slot->stride = size;
+    }
+
+    if (slot->length + size > (int)sizeof(Cache[FillSlot])) {
+        rc = FlushFullSlot(FillSlot);
+        if (rc < 0) {
+            LastError = rc;
+            return rc;
+        }
+        slot = &Slots[FillSlot];
+        slot->fd = fd;
+        slot->stride = size;
+    }
+
+    *buffer = Cache[FillSlot] + slot->length;
+    return 1;
+}
+
+int MciImageWriteBehindCommit(int fd, void *buffer, int size)
+{
+    MciImageWriteSlot *slot;
+    unsigned char *expected;
+    int rc;
+
+    if (EnableDepth == 0u || buffer == NULL ||
+        (size != 512 && size != 528))
+        return -1;
+    if (fd != ActiveFd || size != ActiveStride)
+        return -2;
+
+    slot = &Slots[FillSlot];
+    if (slot->fd != fd || slot->stride != size)
+        return -3;
+
+    expected = Cache[FillSlot] + slot->length;
+    if ((unsigned char *)buffer != expected)
+        return -4;
+    if (slot->length + size > (int)sizeof(Cache[FillSlot]))
+        return -5;
+
+    LogicalWrites++;
+    LogicalBytes += (u64)(unsigned int)size;
+    slot->length += size;
+
+    if (slot->length == slot->stride * MCI_IMAGE_WRITE_PAGES) {
+        rc = FlushFullSlot(FillSlot);
+        if (rc < 0) {
+            LastError = rc;
+            return rc;
+        }
+    }
+
+    return size;
+}
