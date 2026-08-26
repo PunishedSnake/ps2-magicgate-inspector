@@ -1,0 +1,157 @@
+name: P0 Export Copy Elision
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - perf/p0-export-copy-elision
+    paths:
+      - 'src/card_image.c'
+      - 'Makefile'
+      - '.github/workflows/p0-export-copy-elision.yml'
+
+permissions:
+  contents: read
+
+env:
+  BASE_SHA: 850a4eb9bbc513787d456c8dc4d80de8c22f54bc
+  PS2SDK_SECURITY_COMMIT: a13b5971ec0e39c7ba8b8559b80a4e81c8425352
+
+jobs:
+  build-and-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Extract qualified baseline source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .build artifacts/p0-export-copy-elision
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          git show "$BASE_SHA:src/card_image.c" > .build/card_image-baseline.c
+
+      - name: Stage pinned PS2SDK personalities
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+          docker pull ps2dev/ps2dev:v2.0.0
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            -e PS2SDK_SECURITY_COMMIT="$PS2SDK_SECURITY_COMMIT" \
+            ps2dev/ps2dev:v2.0.0 \
+            sh -c 'set -eu; \
+              apk add --no-cache git python3 build-base >/dev/null; \
+              for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/ps2sdk2-mg/$f"; done; \
+              git init -q /tmp/ps2sdk-src; \
+              git -C /tmp/ps2sdk-src remote add origin https://github.com/ps2dev/ps2sdk.git; \
+              git -C /tmp/ps2sdk-src fetch -q --depth 1 origin "$PS2SDK_SECURITY_COMMIT"; \
+              git -C /tmp/ps2sdk-src checkout -q FETCH_HEAD; \
+              python3 /work/tools/patch_secrman14_diag.py /tmp/ps2sdk-src/iop/security/secrman; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrman clean all; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrsif clean all; \
+              cp /tmp/ps2sdk-src/iop/security/secrman/irx/secrman.irx /work/.build/ps2sdk2-secr14/secrman.irx; \
+              cp /tmp/ps2sdk-src/iop/security/secrsif/irx/secrsif.irx /work/.build/ps2sdk2-secr14/secrsif.irx; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman all MCMAN_BUILDING_XMCMAN=0 MCMAN_BUILDING_XMCMAN_V2=0; \
+              python3 /work/tools/patch_raw_mcserv_ports.py /tmp/ps2sdk-src/iop/memorycard/mcserv/src/mcserv.c; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv all MCMAN_BUILDING_XMCSERV=0; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcman/irx/mcman.irx /work/.build/ps2sdk2-raw/mcman.irx; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcserv/irx/mcserv.irx /work/.build/ps2sdk2-raw/mcserv.irx'
+
+      - name: Build candidate and compare export object
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            ps2dev/ps2dev:v2.0.0 \
+            sh -c 'set -eu; \
+              apk add --no-cache build-base >/dev/null; \
+              make R5900_BENCH=0 RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 IMAGE_READ_PAGES=32 IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0 MC_INSPECTOR.ELF; \
+              cp MC_INSPECTOR.ELF artifacts/p0-export-copy-elision/MC_INSPECTOR-copy-elision.ELF; \
+              cp src/card_image.o .build/card_image-candidate.o; \
+              CFLAGS="-D_EE -G0 -O2 -Wall -gdwarf-2 -gz -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections -DMG_SECR_PROFILE_PS2SDK14=1 -mtune=r5900"; \
+              mips64r5900el-ps2-elf-gcc $CFLAGS -I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -Isrc -I. -c .build/card_image-baseline.c -o .build/card_image-baseline.o; \
+              { \
+                echo "Qualified baseline: $BASE_SHA"; \
+                echo "Candidate: $GITHUB_SHA"; \
+                echo; \
+                echo "== object sizes =="; \
+                mips64r5900el-ps2-elf-size .build/card_image-baseline.o .build/card_image-candidate.o; \
+                echo; \
+                echo "== MciCardImageExport symbols =="; \
+                mips64r5900el-ps2-elf-nm -S .build/card_image-baseline.o | grep MciCardImageExport || true; \
+                mips64r5900el-ps2-elf-nm -S .build/card_image-candidate.o | grep MciCardImageExport || true; \
+                echo; \
+                echo "== baseline MciFastCopy references =="; \
+                mips64r5900el-ps2-elf-nm .build/card_image-baseline.o | grep MciFastCopy || true; \
+                echo "== candidate MciFastCopy references =="; \
+                mips64r5900el-ps2-elf-nm .build/card_image-candidate.o | grep MciFastCopy || true; \
+              } > artifacts/p0-export-copy-elision/STATIC_REPORT.txt; \
+              if ! mips64r5900el-ps2-elf-nm .build/card_image-baseline.o | grep -q MciFastCopy; then \
+                echo "ERROR: baseline no longer demonstrates the redundant copy"; exit 1; \
+              fi; \
+              if mips64r5900el-ps2-elf-nm .build/card_image-candidate.o | grep -q MciFastCopy; then \
+                echo "ERROR: candidate still references MciFastCopy"; exit 1; \
+              fi; \
+              mips64r5900el-ps2-elf-objdump -dr --disassemble=MciCardImageExport .build/card_image-baseline.o > artifacts/p0-export-copy-elision/export-baseline.S; \
+              mips64r5900el-ps2-elf-objdump -dr --disassemble=MciCardImageExport .build/card_image-candidate.o > artifacts/p0-export-copy-elision/export-candidate.S; \
+              mips64r5900el-ps2-elf-size MC_INSPECTOR.ELF >> artifacts/p0-export-copy-elision/STATIC_REPORT.txt'
+
+      - name: Write hardware protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > artifacts/p0-export-copy-elision/README.txt <<'EOF'
+          P0 export copy-elision candidate
+
+          Bottleneck class: avoidable EE copy / cache and Main Bus traffic.
+          Qualified baseline: 850a4eb9bbc513787d456c8dc4d80de8c22f54bc.
+          Candidate changes only the card-image producer representation.
+
+          Baseline .ps2 path:
+            raw-card cache -> 512-byte page_data -> 512-byte copy into 528-byte raw -> write-behind
+
+          Candidate .ps2 path:
+            raw-card cache -> first 512 bytes of 528-byte raw -> append 16-byte spare -> write-behind
+
+          Eliminated traffic: 512 bytes per exported page.
+            4 MiB card   = 4 MiB copy removed
+            8 MiB card   = 8 MiB copy removed
+            16 MiB card  = 16 MiB copy removed
+            32 MiB card  = 32 MiB copy removed
+            64 MiB card  = 64 MiB copy removed
+            128 MiB card = 128 MiB copy removed
+
+          Correctness contract is unchanged: same raw-card page bytes, same logical CRC,
+          same generated .ps2 ECC/spare bytes, same write-behind interface, same full USB
+          reopen verification before success.
+
+          Hardware A/B: use the same console/card/USB device and .ps2 export workload.
+          Require identical final logical CRC, verified=1 and identical output size.
+          Record total export time plus RAW-BULK-PERF and IMAGE-IO tails. The expected
+          gain may be modest because card/USB latency can dominate; the optimization is
+          still structurally useful because it removes guaranteed work and reduces the
+          producer stack footprint without adding synchronization or ownership states.
+          EOF
+          printf 'Candidate revision: %s\n' "$GITHUB_SHA" > artifacts/p0-export-copy-elision/REVISION.txt
+          sha256sum artifacts/p0-export-copy-elision/MC_INSPECTOR-copy-elision.ELF > artifacts/p0-export-copy-elision/SHA256SUMS.txt
+          cat artifacts/p0-export-copy-elision/STATIC_REPORT.txt
+
+      - name: Upload copy-elision candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS2-MCI-P0-export-copy-elision-${{ github.sha }}
+          path: artifacts/p0-export-copy-elision/
+          if-no-files-found: error
+          retention-days: 30
