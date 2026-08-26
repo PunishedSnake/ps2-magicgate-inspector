@@ -74,6 +74,8 @@ jobs:
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/work" \
             -w /work \
+            -e BASE_SHA="$BASE_SHA" \
+            -e GITHUB_SHA="$GITHUB_SHA" \
             ps2dev/ps2dev:v2.0.0 \
             sh -c 'set -eu; \
               apk add --no-cache build-base >/dev/null; \
