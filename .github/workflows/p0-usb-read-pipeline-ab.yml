@@ -1,0 +1,152 @@
+name: P0 USB Read Pipeline A-B
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - perf/p0-usb-read-overlap
+    paths:
+      - 'src/image_read_ahead.c'
+      - 'src/image_read_ahead.h'
+      - 'src/image_write_behind.c'
+      - 'src/card_image.c'
+      - 'src/diag_wrap.c'
+      - 'tools/analyze_drebin_perf.py'
+      - 'Makefile'
+      - '.github/workflows/p0-usb-read-pipeline-ab.yml'
+
+permissions:
+  contents: read
+
+env:
+  PS2SDK_SECURITY_COMMIT: a13b5971ec0e39c7ba8b8559b80a4e81c8425352
+
+jobs:
+  build-ab-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Stage pinned PS2SDK personalities
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+          docker pull ps2dev/ps2dev:v2.0.0
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            -e PS2SDK_SECURITY_COMMIT="$PS2SDK_SECURITY_COMMIT" \
+            ps2dev/ps2dev:v2.0.0 \
+            sh -c 'set -eu; \
+              apk add --no-cache git python3 build-base >/dev/null; \
+              for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/ps2sdk2-mg/$f"; done; \
+              git init -q /tmp/ps2sdk-src; \
+              git -C /tmp/ps2sdk-src remote add origin https://github.com/ps2dev/ps2sdk.git; \
+              git -C /tmp/ps2sdk-src fetch -q --depth 1 origin "$PS2SDK_SECURITY_COMMIT"; \
+              git -C /tmp/ps2sdk-src checkout -q FETCH_HEAD; \
+              python3 /work/tools/patch_secrman14_diag.py /tmp/ps2sdk-src/iop/security/secrman; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrman clean all; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrsif clean all; \
+              cp /tmp/ps2sdk-src/iop/security/secrman/irx/secrman.irx /work/.build/ps2sdk2-secr14/secrman.irx; \
+              cp /tmp/ps2sdk-src/iop/security/secrsif/irx/secrsif.irx /work/.build/ps2sdk2-secr14/secrsif.irx; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman all MCMAN_BUILDING_XMCMAN=0 MCMAN_BUILDING_XMCMAN_V2=0; \
+              python3 /work/tools/patch_raw_mcserv_ports.py /tmp/ps2sdk-src/iop/memorycard/mcserv/src/mcserv.c; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv all MCMAN_BUILDING_XMCSERV=0; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcman/irx/mcman.irx /work/.build/ps2sdk2-raw/mcman.irx; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcserv/irx/mcserv.irx /work/.build/ps2sdk2-raw/mcserv.irx'
+
+      - name: Build controlled USB read matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/p0-usb-read-ab
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            ps2dev/ps2dev:v2.0.0 \
+            sh -c 'set -eu; \
+              apk add --no-cache build-base >/dev/null; \
+              build_variant() { \
+                name="$1"; pages="$2"; async="$3"; \
+                rm -f src/image_read_ahead.o src/image_write_behind.o MC_INSPECTOR.ELF; \
+                make R5900_BENCH=0 RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 IMAGE_READ_PAGES="$pages" IMAGE_READ_ASYNC="$async" IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0 MC_INSPECTOR.ELF; \
+                cp MC_INSPECTOR.ELF "/work/artifacts/p0-usb-read-ab/$name.ELF"; \
+              }; \
+              build_variant MC_INSPECTOR-read-sync32 32 0; \
+              build_variant MC_INSPECTOR-read-async32 32 1; \
+              build_variant MC_INSPECTOR-read-sync64 64 0; \
+              build_variant MC_INSPECTOR-read-async64 64 1'
+
+      - name: Verify invalid async combinations are rejected
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            ps2dev/ps2dev:v2.0.0 \
+            sh -c 'set -eu; \
+              if make -n IMAGE_READ_PAGES=16 IMAGE_READ_ASYNC=1 IMAGE_WRITE_ASYNC=0 MC_INSPECTOR.ELF >/tmp/read16.out 2>&1; then \
+                echo "ERROR: async 16-page read candidate unexpectedly accepted"; cat /tmp/read16.out; exit 1; \
+              fi; \
+              if make -n IMAGE_READ_PAGES=32 IMAGE_READ_ASYNC=1 IMAGE_WRITE_ASYNC=1 MC_INSPECTOR.ELF >/tmp/both.out 2>&1; then \
+                echo "ERROR: simultaneous read/write NOWAIT unexpectedly accepted"; cat /tmp/both.out; exit 1; \
+              fi'
+
+      - name: Write hardware A-B protocol
+        shell: bash
+        run: |
+          cat > artifacts/p0-usb-read-ab/README-P0-USB-READ-AB.txt <<'EOF'
+          P0 USB sequential image read pipeline hardware A/B matrix
+
+          Common source revision: this workflow's GITHUB_SHA.
+          Raw-card side is fixed to synchronous 16-page bulk reads.
+          USB image output is fixed to synchronous 32-record write-behind.
+          Synthetic R5900 benchmark is disabled.
+          Pinned PS2SDK source for staged personalities: a13b5971ec0e39c7ba8b8559b80a4e81c8425352.
+
+          A  MC_INSPECTOR-read-sync32.ELF   16896-byte blocking refill
+          B  MC_INSPECTOR-read-async32.ELF 16896-byte refill, one next NOWAIT read
+          C  MC_INSPECTOR-read-sync64.ELF   33792-byte blocking refill
+          D  MC_INSPECTOR-read-async64.ELF 33792-byte refill, one next NOWAIT read
+
+          A vs B isolates one-deep overlap at the qualified 16896-byte refill.
+          C vs D isolates one-deep overlap at 33792 bytes.
+          A vs C and B vs D expose the batch-size/cache-pressure trade-off.
+
+          Preferred workload: full manual verification of the same existing VMC
+          and PCSX2 image from the same physical USB device. Restore can be timed
+          separately, but do not mix destructive and verification rows.
+
+          Keep console SCPH/revision, USB device, filesystem, image, active IRX
+          set and build flags fixed. Correctness gate: identical image size,
+          logical CRC, ECC result and verified=1.
+
+          Record IMAGE-IO read-ahead lines. Compare operation_ticks, underlying
+          calls/bytes, p50/p95/p99/max service latency, async submits, ready hits,
+          waits, wait ticks, fallbacks and last_error. Async is useful only if it
+          lowers wall/operation time or blocking wait without worsening tails or
+          reliability. One final EOF-side prefetch may add a metadata/fileXio read
+          call; judge wall time and correctness, not call count alone.
+
+          Timing from PCSX2 is not sufficient for promotion. Final decision is
+          real-hardware only. Analyze logs with tools/analyze_drebin_perf.py.
+          EOF
+          printf 'Project revision: %s\n' "$GITHUB_SHA" > artifacts/p0-usb-read-ab/REVISION.txt
+          sha256sum artifacts/p0-usb-read-ab/*.ELF | tee artifacts/p0-usb-read-ab/SHA256SUMS.txt
+          file artifacts/p0-usb-read-ab/*.ELF
+          ls -lh artifacts/p0-usb-read-ab/*.ELF
+
+      - name: Upload P0 USB read matrix
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS2-MCI-P0-usb-read-AB-${{ github.sha }}
+          path: artifacts/p0-usb-read-ab/
+          if-no-files-found: error
+          retention-days: 30
