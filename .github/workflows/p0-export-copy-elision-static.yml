@@ -1,0 +1,67 @@
+name: P0 Export Copy Elision Static Audit
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - perf/p0-export-copy-elision
+    paths:
+      - 'src/card_image.c'
+      - 'src/r5900_memops.h'
+      - '.github/workflows/p0-export-copy-elision-static.yml'
+
+permissions:
+  contents: read
+
+env:
+  BASE_SHA: 850a4eb9bbc513787d456c8dc4d80de8c22f54bc
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Compile and inspect baseline vs candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/p0-export-copy-elision .build
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          git show "$BASE_SHA:src/card_image.c" > .build/card_image-baseline.c
+          docker pull ps2dev/ps2dev:v2.0.0
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" -w /work \
+            -e BASE_SHA="$BASE_SHA" -e GITHUB_SHA="$GITHUB_SHA" \
+            ps2dev/ps2dev:v2.0.0 sh -c 'set -eu; \
+              CFLAGS="-D_EE -G0 -O2 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections -DMG_SECR_PROFILE_PS2SDK14=1 -mtune=r5900"; \
+              INCS="-I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -Isrc -I."; \
+              mips64r5900el-ps2-elf-gcc $CFLAGS $INCS -c .build/card_image-baseline.c -o .build/card_image-baseline.o; \
+              mips64r5900el-ps2-elf-gcc $CFLAGS $INCS -c src/card_image.c -o .build/card_image-candidate.o; \
+              { \
+                echo "Qualified baseline: $BASE_SHA"; echo "Candidate: $GITHUB_SHA"; echo; \
+                mips64r5900el-ps2-elf-size .build/card_image-baseline.o .build/card_image-candidate.o; echo; \
+                echo "== export symbols =="; \
+                mips64r5900el-ps2-elf-nm -S .build/card_image-baseline.o | grep MciCardImageExport; \
+                mips64r5900el-ps2-elf-nm -S .build/card_image-candidate.o | grep MciCardImageExport; echo; \
+                echo "== baseline qword-copy refs =="; \
+                mips64r5900el-ps2-elf-nm .build/card_image-baseline.o | grep MciR5900CopyQwords || true; \
+                echo "== candidate qword-copy refs =="; \
+                mips64r5900el-ps2-elf-nm .build/card_image-candidate.o | grep MciR5900CopyQwords || true; \
+              } > artifacts/p0-export-copy-elision/STATIC_REPORT.txt; \
+              mips64r5900el-ps2-elf-nm .build/card_image-baseline.o | grep -q MciR5900CopyQwords || { echo "ERROR: baseline copy primitive not found"; exit 1; }; \
+              ! mips64r5900el-ps2-elf-nm .build/card_image-candidate.o | grep -q MciR5900CopyQwords || { echo "ERROR: candidate still calls copy primitive"; exit 1; }; \
+              mips64r5900el-ps2-elf-objdump -dr --disassemble=MciCardImageExport .build/card_image-baseline.o > artifacts/p0-export-copy-elision/export-baseline.S; \
+              mips64r5900el-ps2-elf-objdump -dr --disassemble=MciCardImageExport .build/card_image-candidate.o > artifacts/p0-export-copy-elision/export-candidate.S'
+          cat artifacts/p0-export-copy-elision/STATIC_REPORT.txt
+
+      - name: Upload audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS2-MCI-P0-export-copy-static-${{ github.sha }}
+          path: artifacts/p0-export-copy-elision/
+          if-no-files-found: error
+          retention-days: 30
