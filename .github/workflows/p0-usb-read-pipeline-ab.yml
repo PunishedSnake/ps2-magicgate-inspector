@@ -9,6 +9,7 @@ on:
       - 'src/image_read_ahead.c'
       - 'src/image_read_ahead.h'
       - 'src/image_write_behind.c'
+      - 'src/image_quick_verify.c'
       - 'src/card_image.c'
       - 'src/diag_wrap.c'
       - 'tools/analyze_drebin_perf.py'
@@ -74,7 +75,7 @@ jobs:
               apk add --no-cache build-base >/dev/null; \
               build_variant() { \
                 name="$1"; pages="$2"; async="$3"; \
-                rm -f src/image_read_ahead.o src/image_write_behind.o MC_INSPECTOR.ELF; \
+                rm -f src/image_read_ahead.o src/image_write_behind.o src/image_quick_verify.o MC_INSPECTOR.ELF; \
                 make R5900_BENCH=0 RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 IMAGE_READ_PAGES="$pages" IMAGE_READ_ASYNC="$async" IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0 MC_INSPECTOR.ELF; \
                 cp MC_INSPECTOR.ELF "/work/artifacts/p0-usb-read-ab/$name.ELF"; \
               }; \
@@ -92,12 +93,15 @@ jobs:
             -w /work \
             ps2dev/ps2dev:v2.0.0 \
             sh -c 'set -eu; \
-              if make -n IMAGE_READ_PAGES=16 IMAGE_READ_ASYNC=1 IMAGE_WRITE_ASYNC=0 MC_INSPECTOR.ELF >/tmp/read16.out 2>&1; then \
-                echo "ERROR: async 16-page read candidate unexpectedly accepted"; cat /tmp/read16.out; exit 1; \
+              rm -f src/image_read_ahead.o src/image_write_behind.o MC_INSPECTOR.ELF; \
+              if make IMAGE_READ_PAGES=16 IMAGE_READ_ASYNC=1 IMAGE_WRITE_ASYNC=0 MC_INSPECTOR.ELF >/tmp/read16.out 2>&1; then \
+                echo "ERROR: async 16-page read candidate unexpectedly compiled"; cat /tmp/read16.out; exit 1; \
               fi; \
+              grep -q "async image read-ahead requires 32 or 64 pages" /tmp/read16.out || { cat /tmp/read16.out; exit 1; }; \
               if make -n IMAGE_READ_PAGES=32 IMAGE_READ_ASYNC=1 IMAGE_WRITE_ASYNC=1 MC_INSPECTOR.ELF >/tmp/both.out 2>&1; then \
                 echo "ERROR: simultaneous read/write NOWAIT unexpectedly accepted"; cat /tmp/both.out; exit 1; \
-              fi'
+              fi; \
+              grep -q "IMAGE_READ_ASYNC=1 and IMAGE_WRITE_ASYNC=1 cannot be enabled together" /tmp/both.out || { cat /tmp/both.out; exit 1; }'
 
       - name: Write hardware A-B protocol
         shell: bash
