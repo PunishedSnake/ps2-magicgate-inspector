@@ -1,0 +1,171 @@
+name: P0 Image FS FAT Metadata Cache
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - perf/p0-image-fs-fat-cache
+    paths:
+      - 'src/card_image_fs.c'
+      - 'tools/patch_card_image_fs_meta_cache.py'
+      - '.github/workflows/p0-image-fs-fat-cache.yml'
+
+permissions:
+  contents: read
+
+env:
+  DIRECT_SLOT_BASE_SHA: c88f50787b15bf253e11e5bc75017ac1ed4cdd79
+  PS2SDK_SECURITY_COMMIT: a13b5971ec0e39c7ba8b8559b80a4e81c8425352
+
+jobs:
+  build-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout FAT-cache experiment
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Materialize baseline and probe worktrees
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$DIRECT_SLOT_BASE_SHA"
+          mkdir -p .build/worktrees artifacts/p0-image-fs-fat-cache
+          git worktree add --detach .build/worktrees/baseline "$DIRECT_SLOT_BASE_SHA"
+          git worktree add --detach .build/worktrees/probe "$GITHUB_SHA"
+
+      - name: Stage pinned PS2SDK personalities
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+          docker pull ps2dev/ps2dev:v2.0.0
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" -w /work \
+            -e PS2SDK_SECURITY_COMMIT="$PS2SDK_SECURITY_COMMIT" \
+            ps2dev/ps2dev:v2.0.0 sh -c 'set -eu; \
+              apk add --no-cache git python3 build-base >/dev/null; \
+              for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/ps2sdk2-mg/$f"; done; \
+              git init -q /tmp/ps2sdk-src; \
+              git -C /tmp/ps2sdk-src remote add origin https://github.com/ps2dev/ps2sdk.git; \
+              git -C /tmp/ps2sdk-src fetch -q --depth 1 origin "$PS2SDK_SECURITY_COMMIT"; \
+              git -C /tmp/ps2sdk-src checkout -q FETCH_HEAD; \
+              python3 /work/tools/patch_secrman14_diag.py /tmp/ps2sdk-src/iop/security/secrman; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrman clean all; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrsif clean all; \
+              cp /tmp/ps2sdk-src/iop/security/secrman/irx/secrman.irx /work/.build/ps2sdk2-secr14/secrman.irx; \
+              cp /tmp/ps2sdk-src/iop/security/secrsif/irx/secrsif.irx /work/.build/ps2sdk2-secr14/secrsif.irx; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman all MCMAN_BUILDING_XMCMAN=0 MCMAN_BUILDING_XMCMAN_V2=0; \
+              python3 /work/tools/patch_raw_mcserv_ports.py /tmp/ps2sdk-src/iop/memorycard/mcserv/src/mcserv.c; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv all MCMAN_BUILDING_XMCSERV=0; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcman/irx/mcman.irx /work/.build/ps2sdk2-raw/mcman.irx; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcserv/irx/mcserv.irx /work/.build/ps2sdk2-raw/mcserv.irx'
+          for tree in .build/worktrees/baseline .build/worktrees/probe; do
+            mkdir -p "$tree/.build"
+            cp -a .build/ps2sdk2-mg "$tree/.build/"
+            cp -a .build/ps2sdk2-secr14 "$tree/.build/"
+            cp -a .build/ps2sdk2-raw "$tree/.build/"
+          done
+
+      - name: Apply guarded candidate overlays
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp src/card_image_fs.c artifacts/p0-image-fs-fat-cache/card_image_fs-before.c
+          python3 tools/patch_card_image_fs_meta_cache.py src/card_image_fs.c
+          python3 .build/worktrees/probe/tools/patch_card_image_fs_meta_cache.py --probe .build/worktrees/probe/src/card_image_fs.c
+          diff -u artifacts/p0-image-fs-fat-cache/card_image_fs-before.c src/card_image_fs.c > artifacts/p0-image-fs-fat-cache/FAT_CACHE.patch || test $? -eq 1
+          grep -q 'ReadMetaClusterCached(image, indirect_cluster, 0' src/card_image_fs.c
+          grep -q 'ReadMetaClusterCached(image, fat_cluster, 1' src/card_image_fs.c
+          if grep -A40 'static int FatEntry' src/card_image_fs.c | grep -q 'unsigned char cluster\[FS_MAX_CLUSTER_BYTES\]'; then
+            echo 'ERROR: candidate FatEntry still owns the 1 KiB metadata scratch buffer'; exit 1
+          fi
+
+      - name: Build baseline, timing candidate and cache probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work \
+            -e GITHUB_SHA="$GITHUB_SHA" \
+            ps2dev/ps2dev:v2.0.0 sh -c 'set -eu; \
+              apk add --no-cache build-base >/dev/null; \
+              FLAGS="R5900_BENCH=0 RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 IMAGE_READ_PAGES=32 IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0 IMAGE_WRITE_PROBE=0"; \
+              build_one() { \
+                path="$1"; name="$2"; \
+                cd "/work/$path"; \
+                make $FLAGS MC_INSPECTOR.ELF; \
+                cp MC_INSPECTOR.ELF "/work/artifacts/p0-image-fs-fat-cache/$name.ELF"; \
+                cp src/card_image_fs.o "/work/artifacts/p0-image-fs-fat-cache/$name-card_image_fs.o"; \
+                mips64r5900el-ps2-elf-size MC_INSPECTOR.ELF src/card_image_fs.o > "/work/artifacts/p0-image-fs-fat-cache/$name.size.txt"; \
+                mips64r5900el-ps2-elf-nm -S src/card_image_fs.o | grep -E "FatEntry|ReadMetaClusterCached" > "/work/artifacts/p0-image-fs-fat-cache/$name.symbols.txt" || true; \
+                mips64r5900el-ps2-elf-objdump -dr --disassemble=FatEntry src/card_image_fs.o > "/work/artifacts/p0-image-fs-fat-cache/$name-FatEntry.S"; \
+                cd /work; \
+              }; \
+              build_one .build/worktrees/baseline direct-slot-fs-baseline; \
+              build_one . image-fs-fat-cache; \
+              build_one .build/worktrees/probe image-fs-fat-cache-probe'
+
+      - name: Static contract checks and hardware protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_OBJ=artifacts/p0-image-fs-fat-cache/direct-slot-fs-baseline-card_image_fs.o
+          CAND_OBJ=artifacts/p0-image-fs-fat-cache/image-fs-fat-cache-card_image_fs.o
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work ps2dev/ps2dev:v2.0.0 sh -c '
+            set -eu
+            if mips64r5900el-ps2-elf-nm "$CAND_OBJ" | grep -q " U ReadMetaClusterCached"; then exit 1; fi
+            echo "== baseline FatEntry =="
+            mips64r5900el-ps2-elf-nm -S "$BASE_OBJ" | grep FatEntry || true
+            echo "== candidate FatEntry/cache =="
+            mips64r5900el-ps2-elf-nm -S "$CAND_OBJ" | grep -E "FatEntry|ReadMetaClusterCached" || true
+          ' BASE_OBJ="$BASE_OBJ" CAND_OBJ="$CAND_OBJ" > artifacts/p0-image-fs-fat-cache/STATIC_REPORT.txt
+          cat > artifacts/p0-image-fs-fat-cache/README.txt <<'EOF'
+          P0 image-filesystem FAT metadata cache experiment
+
+          Bottleneck class:
+            repeated random USB seek/read RPCs while traversing immutable FAT chains.
+
+          Baseline FatEntry loads the indirect FAT cluster and the selected FAT
+          cluster on every chain step. Consecutive entries normally reuse both.
+          One 512-byte FAT cluster contains 128 u32 entries; a 1024-byte cluster
+          contains 256. Candidate retains exactly one indirect cluster and one FAT
+          cluster, keyed to the current immutable MciFsImage, and resets on OpenImage.
+
+          image-fs-fat-cache.ELF is the timing candidate.
+          image-fs-fat-cache-probe.ELF is instrumentation-only and logs IMAGE-FS-CACHE
+          hit/miss counts at CloseImage. Do not use the probe ELF for primary timing.
+
+          Correctness gate for image scan:
+            identical save count, names, titles, byte counts and filesystem result.
+          Correctness gate for selective restore:
+            identical selected/restored count, files, directories, bytes, rollback
+            behavior and destination verification. Source image must remain unchanged.
+
+          Hardware A/B:
+            same SCPH/revision, PS2SDK/IRX set, USB device/filesystem and source image.
+            Run full image scan and selective import as separate workloads. Record p50,
+            p95, p99 and max wall time across repeated runs, plus deadline/error counts.
+            Probe should show metadata hits > misses on any nontrivial FAT traversal;
+            low hit ratio means the hypothesis is weak and the cache should not promote.
+
+          PCSX2 may check correctness only. Real PlayStation 2 decides performance.
+          EOF
+          {
+            echo "baseline=$DIRECT_SLOT_BASE_SHA"
+            echo "candidate=$GITHUB_SHA"
+            echo "ps2sdk=$PS2SDK_SECURITY_COMMIT"
+          } > artifacts/p0-image-fs-fat-cache/REVISIONS.txt
+          sha256sum artifacts/p0-image-fs-fat-cache/*.ELF > artifacts/p0-image-fs-fat-cache/SHA256SUMS.txt
+          cat artifacts/p0-image-fs-fat-cache/*.size.txt
+
+      - name: Upload FAT-cache experiment
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS2-MCI-P0-image-fs-fat-cache-${{ github.sha }}
+          path: artifacts/p0-image-fs-fat-cache/
+          if-no-files-found: error
+          retention-days: 30
