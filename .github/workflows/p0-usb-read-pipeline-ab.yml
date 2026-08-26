@@ -73,11 +73,14 @@ jobs:
             ps2dev/ps2dev:v2.0.0 \
             sh -c 'set -eu; \
               apk add --no-cache build-base >/dev/null; \
+              : > /work/artifacts/p0-usb-read-ab/ELF_SIZES.txt; \
               build_variant() { \
                 name="$1"; pages="$2"; async="$3"; \
                 rm -f src/image_read_ahead.o src/image_write_behind.o src/image_quick_verify.o MC_INSPECTOR.ELF; \
                 make R5900_BENCH=0 RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 IMAGE_READ_PAGES="$pages" IMAGE_READ_ASYNC="$async" IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0 MC_INSPECTOR.ELF; \
                 cp MC_INSPECTOR.ELF "/work/artifacts/p0-usb-read-ab/$name.ELF"; \
+                printf "[%s] pages=%s async=%s\n" "$name" "$pages" "$async" >> /work/artifacts/p0-usb-read-ab/ELF_SIZES.txt; \
+                mips64r5900el-ps2-elf-size MC_INSPECTOR.ELF >> /work/artifacts/p0-usb-read-ab/ELF_SIZES.txt; \
               }; \
               build_variant MC_INSPECTOR-read-sync32 32 0; \
               build_variant MC_INSPECTOR-read-async32 32 1; \
@@ -93,6 +96,7 @@ jobs:
             -w /work \
             ps2dev/ps2dev:v2.0.0 \
             sh -c 'set -eu; \
+              apk add --no-cache build-base >/dev/null; \
               rm -f src/image_read_ahead.o src/image_write_behind.o MC_INSPECTOR.ELF; \
               if make IMAGE_READ_PAGES=16 IMAGE_READ_ASYNC=1 IMAGE_WRITE_ASYNC=0 MC_INSPECTOR.ELF >/tmp/read16.out 2>&1; then \
                 echo "ERROR: async 16-page read candidate unexpectedly compiled"; cat /tmp/read16.out; exit 1; \
@@ -123,6 +127,7 @@ jobs:
           A vs B isolates one-deep overlap at the qualified 16896-byte refill.
           C vs D isolates one-deep overlap at 33792 bytes.
           A vs C and B vs D expose the batch-size/cache-pressure trade-off.
+          ELF_SIZES.txt records text/data/bss impact for every candidate.
 
           Preferred workload: full manual verification of the same existing VMC
           and PCSX2 image from the same physical USB device. Restore can be timed
@@ -146,6 +151,7 @@ jobs:
           sha256sum artifacts/p0-usb-read-ab/*.ELF | tee artifacts/p0-usb-read-ab/SHA256SUMS.txt
           file artifacts/p0-usb-read-ab/*.ELF
           ls -lh artifacts/p0-usb-read-ab/*.ELF
+          cat artifacts/p0-usb-read-ab/ELF_SIZES.txt
 
       - name: Upload P0 USB read matrix
         uses: actions/upload-artifact@v4
