@@ -50,6 +50,12 @@ src/image_write_behind.o: EE_CFLAGS += \
 	-DMCI_IMAGE_WRITE_PAGES=$(IMAGE_WRITE_PAGES) \
 	-DMCI_IMAGE_WRITE_ASYNC=$(IMAGE_WRITE_ASYNC)
 
+# CURRENT IMPLEMENTATION: fileXio has one global block mode/completion state.
+# Read and write NOWAIT pipelines therefore cannot own it simultaneously.
+ifeq ($(IMAGE_READ_ASYNC)$(IMAGE_WRITE_ASYNC),11)
+$(error IMAGE_READ_ASYNC=1 and IMAGE_WRITE_ASYNC=1 cannot be enabled together)
+endif
+
 # These two v2 composition sources intentionally call low-level fileXio/newlib
 # side by side. Existing backend sources already opt in locally, so keep this
 # target-scoped instead of redefining NEWLIB_PORT_AWARE across the whole build.
