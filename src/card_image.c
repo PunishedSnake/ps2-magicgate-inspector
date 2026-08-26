@@ -22,6 +22,7 @@
 
 #include "card_image.h"
 #include "card_math.h"
+#include "image_write_behind.h"
 #include "progress.h"
 
 #define IMAGE_PAGE_DATA 512u
@@ -420,6 +421,9 @@ int MciCardImageExport(int port, MciCardImageFormat format,
     unsigned char raw[IMAGE_PAGE_RAW] __attribute__((aligned(64)));
     MciCardImageReport verify;
     MciCardGeometry geometry;
+    const int stride = format == MCI_CARD_IMAGE_PS2
+                           ? (int)IMAGE_PAGE_RAW
+                           : (int)IMAGE_PAGE_DATA;
     u32 page;
     u32 crc = 0u;
     int fd;
@@ -451,23 +455,42 @@ int MciCardImageExport(int port, MciCardImageFormat format,
     }
 
     for (page = 0u; page < geometry.total_pages; page++) {
-        /* The card page is already the final consumer representation for the
-         * first 512 bytes of both formats. Read it directly into the output
-         * record; .ps2 appends generated spare bytes in-place. This removes one
-         * redundant 512-byte EE copy per exported page. */
-        rc = ReadPage(port, page, raw);
+        void *record = raw;
+        int reserved;
+
+        /* Preferred producer/consumer representation: when the image write
+         * batcher is active, reserve its final record slot and let raw-card
+         * acquisition fill the first 512 bytes directly. The .ps2 spare then
+         * lands in the same final record. Reserve itself changes no ownership,
+         * so a failed card read cannot commit an uninitialized record. */
+        reserved = MciImageWriteBehindReserve(fd, stride, &record);
+        if (reserved < 0) {
+            fileXioClose(fd);
+            (void)fileXioRemove(report->path);
+            report->result = MCI_CARD_IMAGE_USB_ERROR;
+            return reserved;
+        }
+        if (reserved == 0)
+            record = raw;
+
+        rc = ReadPage(port, page, (unsigned char *)record);
         if (rc < 0) {
             fileXioClose(fd);
             (void)fileXioRemove(report->path);
             report->result = MCI_CARD_IMAGE_READ_ERROR;
             return rc;
         }
-        crc = MciCardMathCrc32Update(crc, raw, IMAGE_PAGE_DATA);
-        if (format == MCI_CARD_IMAGE_PS2) {
-            MciCardMathBuildSpare(raw, raw + IMAGE_PAGE_DATA);
-            rc = WriteExact(fd, raw, IMAGE_PAGE_RAW);
+        crc = MciCardMathCrc32Update(crc, record, IMAGE_PAGE_DATA);
+        if (format == MCI_CARD_IMAGE_PS2)
+            MciCardMathBuildSpare(record,
+                                  (unsigned char *)record + IMAGE_PAGE_DATA);
+
+        if (reserved > 0) {
+            rc = MciImageWriteBehindCommit(fd, record, stride);
+            if (rc >= 0)
+                rc = 0;
         } else {
-            rc = WriteExact(fd, raw, IMAGE_PAGE_DATA);
+            rc = WriteExact(fd, record, (unsigned int)stride);
         }
         if (rc < 0) {
             fileXioClose(fd);
@@ -493,8 +516,7 @@ int MciCardImageExport(int port, MciCardImageFormat format,
     }
 
     report->logical_crc32 = crc;
-    report->output_bytes = (u64)geometry.total_pages *
-                           (format == MCI_CARD_IMAGE_PS2 ? IMAGE_PAGE_RAW : IMAGE_PAGE_DATA);
+    report->output_bytes = (u64)geometry.total_pages * (unsigned int)stride;
     MciProgressUpdate(MCI_PROGRESS_CARD_TOOLS, 92,
                       "Verifying the completed image",
                       "Reopening the USB file and validating the complete stream before reporting success.");
