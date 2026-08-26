@@ -1,0 +1,171 @@
+name: P0 Image Discovery Batch
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - perf/p0-image-discovery-batch
+    paths:
+      - 'src/card_image.c'
+      - 'tools/patch_card_image_discovery_batch.py'
+      - '.github/workflows/p0-image-discovery-batch.yml'
+
+permissions:
+  contents: read
+
+env:
+  DIRECT_SLOT_BASE_SHA: c88f50787b15bf253e11e5bc75017ac1ed4cdd79
+  PS2SDK_SECURITY_COMMIT: a13b5971ec0e39c7ba8b8559b80a4e81c8425352
+
+jobs:
+  build-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout discovery experiment
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Materialize baseline and probe worktrees
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$DIRECT_SLOT_BASE_SHA"
+          mkdir -p .build/worktrees artifacts/p0-image-discovery-batch
+          git worktree add --detach .build/worktrees/baseline "$DIRECT_SLOT_BASE_SHA"
+          git worktree add --detach .build/worktrees/probe "$GITHUB_SHA"
+
+      - name: Stage pinned PS2SDK personalities
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+          docker pull ps2dev/ps2dev:v2.0.0
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" -w /work \
+            -e PS2SDK_SECURITY_COMMIT="$PS2SDK_SECURITY_COMMIT" \
+            ps2dev/ps2dev:v2.0.0 sh -c 'set -eu; \
+              apk add --no-cache git python3 build-base >/dev/null; \
+              for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/ps2sdk2-mg/$f"; done; \
+              git init -q /tmp/ps2sdk-src; \
+              git -C /tmp/ps2sdk-src remote add origin https://github.com/ps2dev/ps2sdk.git; \
+              git -C /tmp/ps2sdk-src fetch -q --depth 1 origin "$PS2SDK_SECURITY_COMMIT"; \
+              git -C /tmp/ps2sdk-src checkout -q FETCH_HEAD; \
+              python3 /work/tools/patch_secrman14_diag.py /tmp/ps2sdk-src/iop/security/secrman; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrman clean all; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrsif clean all; \
+              cp /tmp/ps2sdk-src/iop/security/secrman/irx/secrman.irx /work/.build/ps2sdk2-secr14/secrman.irx; \
+              cp /tmp/ps2sdk-src/iop/security/secrsif/irx/secrsif.irx /work/.build/ps2sdk2-secr14/secrsif.irx; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman all MCMAN_BUILDING_XMCMAN=0 MCMAN_BUILDING_XMCMAN_V2=0; \
+              python3 /work/tools/patch_raw_mcserv_ports.py /tmp/ps2sdk-src/iop/memorycard/mcserv/src/mcserv.c; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv all MCMAN_BUILDING_XMCSERV=0; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcman/irx/mcman.irx /work/.build/ps2sdk2-raw/mcman.irx; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcserv/irx/mcserv.irx /work/.build/ps2sdk2-raw/mcserv.irx'
+          for tree in .build/worktrees/baseline .build/worktrees/probe; do
+            mkdir -p "$tree/.build"
+            cp -a .build/ps2sdk2-mg "$tree/.build/"
+            cp -a .build/ps2sdk2-secr14 "$tree/.build/"
+            cp -a .build/ps2sdk2-raw "$tree/.build/"
+          done
+
+      - name: Apply guarded discovery overlays
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp src/card_image.c artifacts/p0-image-discovery-batch/card_image-before.c
+          python3 tools/patch_card_image_discovery_batch.py src/card_image.c
+          python3 .build/worktrees/probe/tools/patch_card_image_discovery_batch.py --probe .build/worktrees/probe/src/card_image.c
+          diff -u artifacts/p0-image-discovery-batch/card_image-before.c src/card_image.c > artifacts/p0-image-discovery-batch/DISCOVERY_BATCH.patch || test $? -eq 1
+          grep -q 'fileXioGetdir(directory, entries, count_limit)' src/card_image.c
+          grep -q '(unsigned int)count >= count_limit' src/card_image.c
+          grep -q 'fileXioGetStat(path, &stat)' src/card_image.c
+
+      - name: Build baseline, timing candidate and probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work \
+            ps2dev/ps2dev:v2.0.0 sh -c 'set -eu; \
+              apk add --no-cache build-base >/dev/null; \
+              FLAGS="R5900_BENCH=0 RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 IMAGE_READ_PAGES=32 IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0 IMAGE_WRITE_PROBE=0"; \
+              build_one() { \
+                path="$1"; name="$2"; \
+                cd "/work/$path"; \
+                make $FLAGS MC_INSPECTOR.ELF; \
+                cp MC_INSPECTOR.ELF "/work/artifacts/p0-image-discovery-batch/$name.ELF"; \
+                cp src/card_image.o "/work/artifacts/p0-image-discovery-batch/$name-card_image.o"; \
+                mips64r5900el-ps2-elf-size MC_INSPECTOR.ELF src/card_image.o > "/work/artifacts/p0-image-discovery-batch/$name.size.txt"; \
+                cd /work; \
+              }; \
+              build_one .build/worktrees/baseline direct-slot-discovery-baseline; \
+              build_one . image-discovery-batch; \
+              build_one .build/worktrees/probe image-discovery-batch-probe'
+
+      - name: Static contract and protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          CAND_OBJ=artifacts/p0-image-discovery-batch/image-discovery-batch-card_image.o
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work \
+            -e CAND_OBJ="$CAND_OBJ" ps2dev/ps2dev:v2.0.0 sh -c '
+              set -eu
+              test -s "$CAND_OBJ"
+              mips64r5900el-ps2-elf-nm -u "$CAND_OBJ" | grep -q fileXioGetdir
+              mips64r5900el-ps2-elf-nm -u "$CAND_OBJ" | grep -q fileXioGetStat
+              {
+                echo "candidate imports:"
+                mips64r5900el-ps2-elf-nm -u "$CAND_OBJ" | grep -E "fileXioGetdir|fileXioGetStat|malloc|free"
+                echo
+                echo "candidate object size:"
+                mips64r5900el-ps2-elf-size "$CAND_OBJ"
+              }
+            ' > artifacts/p0-image-discovery-batch/STATIC_REPORT.txt
+          cat > artifacts/p0-image-discovery-batch/README.txt <<'EOF'
+          P0 batched image-name discovery experiment
+
+          Bottleneck:
+            UniqueImagePath previously issued up to 100 fileXioGetStat RPCs.
+            MciCardImageFindLatest could issue up to 100 GetStat RPCs per mass root.
+
+          Candidate performs one bounded fileXioGetdir request for 128 compact entries,
+          scans exact mcN-XX.ps2/vmc names on EE, then frees the transient directory
+          array. If the request errors or returns 128 entries, enumeration is treated
+          as non-authoritative and the exact legacy GetStat loop runs unchanged.
+
+          FindLatest keeps an authoritative GetStat on each candidate name before it
+          can return it, because current PS2SDK fileXioGetdir exposes stat.attr rather
+          than full stat.mode. Regular-file and nonzero-size semantics remain intact.
+
+          image-discovery-batch.ELF is the timing candidate.
+          image-discovery-batch-probe.ELF logs IMAGE-DISCOVERY entry counts and whether
+          the fast path was authoritative. Do not use the probe ELF for primary timing.
+
+          Correctness matrix:
+            directories containing 0, 1, 10, 50, 99 and 100 matching image names;
+            gaps at 00, middle and 99; unrelated files; zero-length image-shaped files;
+            directories named like images; and >=128 total entries to force fallback.
+          Require identical UniqueImagePath and FindLatest results to baseline.
+
+          Hardware timing:
+            same console, IRX set, USB device/filesystem and directory contents.
+            Record p50/p95/p99/max latency separately for next-name selection and
+            latest-image lookup. This is control-plane optimization, not bulk USB rate.
+          EOF
+          {
+            echo "baseline=$DIRECT_SLOT_BASE_SHA"
+            echo "candidate=$GITHUB_SHA"
+            echo "ps2sdk=$PS2SDK_SECURITY_COMMIT"
+          } > artifacts/p0-image-discovery-batch/REVISIONS.txt
+          sha256sum artifacts/p0-image-discovery-batch/*.ELF > artifacts/p0-image-discovery-batch/SHA256SUMS.txt
+          cat artifacts/p0-image-discovery-batch/*.size.txt
+
+      - name: Upload discovery experiment
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS2-MCI-P0-image-discovery-batch-${{ github.sha }}
+          path: artifacts/p0-image-discovery-batch/
+          if-no-files-found: error
+          retention-days: 30
