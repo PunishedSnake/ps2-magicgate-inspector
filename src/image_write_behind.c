@@ -19,6 +19,14 @@
 #include "image_write_behind.h"
 #include "r5900_memops.h"
 
+#ifndef MCI_IMAGE_READ_AHEAD_ASYNC
+#define MCI_IMAGE_READ_AHEAD_ASYNC 0
+#endif
+
+#if MCI_IMAGE_READ_AHEAD_ASYNC
+#include "image_read_ahead.h"
+#endif
+
 #ifndef MCI_IMAGE_WRITE_PAGES
 #define MCI_IMAGE_WRITE_PAGES 32
 #endif
@@ -448,7 +456,14 @@ int __wrap_fileXioWrite(int fd, const void *buffer, int size)
 int __wrap_fileXioClose(int fd)
 {
     int drain_rc = 0;
+    int read_drain_rc = 0;
     int close_rc;
+
+#if MCI_IMAGE_READ_AHEAD_ASYNC
+    /* fileXio exposes one global NOWAIT completion state. A sequential read fd
+     * must not be closed while its next refill still owns that state. */
+    read_drain_rc = MciImageReadAheadDrain();
+#endif
 
     if (EnableDepth != 0u) {
         drain_rc = DrainAsync();
@@ -467,6 +482,8 @@ int __wrap_fileXioClose(int fd)
 
     fileXioSetBlockMode(FXIO_WAIT);
     close_rc = __real_fileXioClose(fd);
+    if (read_drain_rc < 0 && close_rc >= 0)
+        return read_drain_rc;
     if (drain_rc < 0 && close_rc >= 0)
         return drain_rc;
     return close_rc;
