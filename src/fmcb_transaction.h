@@ -57,6 +57,9 @@ typedef struct FmcbInstallFileReport {
     int selected;
     int skipped;
     int existed;
+    int inventory_exact_rc;
+    int inventory_parent_rc;
+    int inventory_open_rc;
     int backup_rc;
     int bind_rc;
     int write_rc;

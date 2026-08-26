@@ -1,18 +1,97 @@
 .DEFAULT_GOAL := MC_INSPECTOR.ELF
 
 EE_BIN = MC_INSPECTOR.ELF
-EE_OBJS = src/app_main.o src/gui.o src/progress.o src/card.o src/magicgate.o src/fmcb_install.o \
+EE_OBJS = src/app_main_v2.o src/gui_v2.o src/gui_message_compat.o src/progress.o src/diag_log.o src/diag_wrap.o src/raw_bulk_read.o src/r5900_memops.o src/r5900_perf.o src/r5900_bench.o src/card_math.o src/image_read_ahead.o src/image_write_behind.o src/image_quick_verify.o src/mass_sync_compat.o src/card_hot_swap.o src/card_hot_swap_wrap.o src/force_format_vmc.o src/save_transfer.o src/save_transfer_psu.o src/save_title.o src/image_save_title.o src/image_browser_titles.o src/usb_file_picker.o src/usb_file_picker_ui.o src/card_save_picker.o src/card_image_picker.o src/card.o src/magicgate.o src/fmcb_install.o \
 	src/usb_search.o src/fmcb_transaction.o src/fmcb_recovery.o src/fmcb_recovery_marker.o src/console_profile.o \
-	src/magicgate_session.o src/magicgate_diag.o src/video_mode.o src/ui_layout.o src/settings.o
+	src/magicgate_session.o src/magicgate_diag.o src/video_mode.o src/ui_layout.o src/settings.o \
+	src/kelf_cache.o src/card_raw_session.o src/card_image.o src/card_image_fs.o
 EE_LIBS = -ldebug -ldraw -lgraph -lpacket -ldma -lpad -lmc -lfileXio -lcdvd -lsecr \
 	-lioprpgen -liopreboot -lpatches -lkernel
 EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections \
 	-DMG_SECR_PROFILE_PS2SDK14=1
+
+# Synthetic R5900 counters are a Performance Lab feature, not part of ordinary
+# backup/restore latency. Production builds keep this at zero. CI can rebuild
+# raw_bulk_read.o with R5900_BENCH=1 for explicit hardware A/B artifacts.
+R5900_BENCH ?= 0
+
+# Raw-card streaming knobs are explicit hardware A/B inputs, not universal
+# truths. Production keeps the previously qualified synchronous 16-page batch.
+# Candidate builds can use NOWAIT one-batch read-ahead and/or a 4 KiB batch to
+# test whether reducing EE D-cache pressure beats the extra RPC frequency.
+RAW_BULK_PAGES ?= 16
+RAW_BULK_ASYNC ?= 0
+src/raw_bulk_read.o: EE_CFLAGS += \
+	-DMCI_ENABLE_R5900_BENCH=$(R5900_BENCH) \
+	-DMCI_RAW_BULK_PAGES=$(RAW_BULK_PAGES) \
+	-DMCI_RAW_BULK_ASYNC=$(RAW_BULK_ASYNC)
+
+# Sequential verification/readback batching is its own P0 axis. Production uses
+# the established 32-page refill while CI also builds 16/64-page candidates.
+# This remains synchronous for now so read batch size can be isolated from the
+# separate global fileXio NOWAIT experiment used by image output.
+IMAGE_READ_PAGES ?= 32
+src/image_read_ahead.o: EE_CFLAGS += \
+	-DMCI_IMAGE_READ_AHEAD_PAGES=$(IMAGE_READ_PAGES)
+
+# USB image output is a separate A/B axis. Keep production on the existing
+# synchronous 32-record batch until real hardware proves a different batch or
+# one-request-deep fileXio NOWAIT pipeline. BOT remains command-serialized, so
+# async means overlap with EE/card production, not multiple outstanding BOT I/O.
+IMAGE_WRITE_PAGES ?= 32
+IMAGE_WRITE_ASYNC ?= 0
+src/image_write_behind.o: EE_CFLAGS += \
+	-DMCI_IMAGE_WRITE_PAGES=$(IMAGE_WRITE_PAGES) \
+	-DMCI_IMAGE_WRITE_ASYNC=$(IMAGE_WRITE_ASYNC)
+
+# These two v2 composition sources intentionally call low-level fileXio/newlib
+# side by side. Existing backend sources already opt in locally, so keep this
+# target-scoped instead of redefining NEWLIB_PORT_AWARE across the whole build.
+src/app_main_v2.o src/card_save_picker.o: EE_CFLAGS += -DNEWLIB_PORT_AWARE
+
+# The 2026 research corpus points out an important distinction: current PS2DEV
+# GCC contains a dedicated R5900 pipeline model in gcc/config/mips/5900.md even
+# though `gcc -Q --help=target` reports the driver default tune value as mips1.
+# Keep -mtune=r5900 scoped to measured hot objects and let CI disassembly plus
+# real EE counters decide whether it is actually beneficial before widening it.
+R5900_HOT_OBJS = \
+	src/raw_bulk_read.o \
+	src/r5900_bench.o \
+	src/card_math.o \
+	src/image_read_ahead.o \
+	src/image_write_behind.o \
+	src/image_quick_verify.o \
+	src/card_image.o
+$(R5900_HOT_OBJS): EE_CFLAGS += -mtune=r5900
+
 EE_LDFLAGS = -Wl,--gc-sections \
 	-Wl,--wrap=SifExecModuleBuffer \
 	-Wl,--wrap=mcInit \
 	-Wl,--wrap=mcGetInfo \
 	-Wl,--wrap=mcSync \
+	-Wl,--wrap=mcReadPage \
+	-Wl,--wrap=fileXioRead \
+	-Wl,--wrap=fileXioWrite \
+	-Wl,--wrap=fileXioClose \
+	-Wl,--wrap=fileXioSync \
+	-Wl,--wrap=FmcbInitMassBackend \
+	-Wl,--wrap=FmcbShutdownMassBackend \
+	-Wl,--wrap=MciRawCardSessionStart \
+	-Wl,--wrap=MciRawCardSessionStop \
+	-Wl,--wrap=MciCardImageProbeGeometry \
+	-Wl,--wrap=MciCardImageExport \
+	-Wl,--wrap=MciCardImageVerifyFile \
+	-Wl,--wrap=MciCardImageFindLatest \
+	-Wl,--wrap=MciCardImageRestoreExact \
+	-Wl,--wrap=MciCardForceFormatWithBackup \
+	-Wl,--wrap=MciGuiRenderImageBrowser \
+	-Wl,--wrap=MciGuiRenderMessage \
+	-Wl,--wrap=MciImageFsScan \
+	-Wl,--wrap=MciImageFsRefreshTargetConflicts \
+	-Wl,--wrap=MciImageFsImportSelected \
+	-Wl,--wrap=MciSaveTransferImportFile \
+	-Wl,--wrap=MciCardSavePickerChoose \
+	-Wl,--wrap=FmcbInstallNormalTransactional \
 	-Wl,--wrap=sceSifBindRpc \
 	-Wl,--wrap=sceSifCallRpc \
 	-Wl,--wrap=MagicGateResultText \
@@ -22,25 +101,38 @@ EE_LDFLAGS = -Wl,--gc-sections \
 	-Wl,--wrap=FmcbRecoveryRun \
 	-Wl,--wrap=FmcbRecoveryFinish
 
-# 0.4.x keeps the single hardware-validated production security backend from
-# Briscoe: PS2SDK 2.0 SECRMAN 1.4, matching SECRSIF and the matching PS2SDK 2.0
-# SIO2/PAD/MCMAN generation. Display/settings and installer work do not weaken
-# the separation between ordinary ROM X filesystem I/O and the SECR session.
+# 0.4.x keeps the hardware-validated Briscoe security backend: PS2SDK 2.0
+# SECRMAN 1.4 plus the normal matching X-style card generation. Raw page RPCs
+# are a different interface contract. Modern PS2SDK's default mcserv is built
+# with BUILDING_XMCSERV=1, so libmc identifies it as XMC and deliberately blocks
+# mcReadPage/mcWritePage/mcEraseBlock. Drebin therefore embeds a second, pinned
+# legacy MCMAN/MCSERV pair built with the XMC compatibility switches disabled.
 MG_CARD_DIR ?= .build/ps2sdk2-mg
 MG_SECR_DIR ?= .build/ps2sdk2-secr14
+RAW_CARD_DIR ?= .build/ps2sdk2-raw
 MG_SECRMAN ?= $(MG_SECR_DIR)/secrman.irx
 MG_SECRSIF ?= $(MG_SECR_DIR)/secrsif.irx
+RAW_MCMAN ?= $(RAW_CARD_DIR)/mcman.irx
+RAW_MCSERV ?= $(RAW_CARD_DIR)/mcserv.irx
 
 MG_CARD_IRX_FILES = freesio2.irx freepad.irx mcman.irx mcserv.irx
 MG_CARD_OBJS = $(addprefix fmcb_,$(MG_CARD_IRX_FILES:.irx=_irx.o))
+RAW_CARD_OBJS = raw_mcman_irx.o raw_mcserv_irx.o
 PS2SDK_IRX_FILES = iomanX.irx fileXio.irx usbd.irx usbhdfsd.irx
 
-EE_OBJS += secrman_irx.o secrsif_irx.o $(MG_CARD_OBJS) $(PS2SDK_IRX_FILES:.irx=_irx.o)
+EE_OBJS += secrman_irx.o secrsif_irx.o $(MG_CARD_OBJS) $(RAW_CARD_OBJS) $(PS2SDK_IRX_FILES:.irx=_irx.o)
 
 $(MG_SECRMAN) $(MG_SECRSIF):
 	@test -f $@ || { \
 		echo "Missing staged PS2SDK 2.0 security module: $@"; \
 		echo "Run the CI staging step or stage the pinned PS2SDK 2.0 modules locally."; \
+		exit 1; \
+	}
+
+$(RAW_MCMAN) $(RAW_MCSERV):
+	@test -f $@ || { \
+		echo "Missing staged legacy raw-card module: $@"; \
+		echo "Build PS2SDK MCMAN/MCSERV with XMC compatibility disabled."; \
 		exit 1; \
 	}
 
@@ -50,8 +142,15 @@ secrman_irx.c: $(MG_SECRMAN)
 secrsif_irx.c: $(MG_SECRSIF)
 	$(PS2SDK)/bin/bin2c $< $@ secrsif_irx
 
+raw_mcman_irx.c: $(RAW_MCMAN)
+	$(PS2SDK)/bin/bin2c $< $@ raw_mcman_irx
+
+raw_mcserv_irx.c: $(RAW_MCSERV)
+	$(PS2SDK)/bin/bin2c $< $@ raw_mcserv_irx
+
 # The fmcb_* generated symbol prefix is retained for source compatibility with
-# the Briscoe runtime. The embedded files are PS2SDK 2.0 modules.
+# the Briscoe/MagicGate runtime. These are the normal PS2SDK 2.0 modules and are
+# not the legacy raw-page pair above.
 fmcb_%_irx.c: $(MG_CARD_DIR)/%.irx
 	@test -f $< || { echo "Missing staged MagicGate card-stack IRX: $<"; exit 1; }
 	$(PS2SDK)/bin/bin2c $< $@ fmcb_$*_irx

@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "usb_search.h"
+#include "kelf_cache.h"
 
 static const char *const SearchRoots[] = {
     "mass:/",
@@ -244,6 +245,7 @@ int MciUsbRememberVerifiedPackageRoot(const char *root)
     if (root == NULL || root[0] == '\0' ||
         strlen(root) >= sizeof(VerifiedPackageRoot))
         return -1;
+    MciKelfCacheInvalidate();
     snprintf(VerifiedPackageRoot, sizeof(VerifiedPackageRoot), "%s", root);
     return 0;
 }
