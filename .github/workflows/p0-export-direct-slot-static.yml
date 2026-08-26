@@ -28,6 +28,7 @@ jobs:
           mkdir -p artifacts/p0-export-direct-slot .build/direct-slot
           docker pull ps2dev/ps2dev:v2.0.0
           docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work \
+            -e GITHUB_SHA="$GITHUB_SHA" \
             ps2dev/ps2dev:v2.0.0 sh -c 'set -eu; \
               BASE="-D_EE -G0 -O2 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections -DMG_SECR_PROFILE_PS2SDK14=1 -mtune=r5900"; \
               INCS="-I/usr/local/ps2dev/ps2sdk/ee/include -I/usr/local/ps2dev/ps2sdk/common/include -Isrc -I."; \
