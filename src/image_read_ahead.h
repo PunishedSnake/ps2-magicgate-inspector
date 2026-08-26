@@ -13,8 +13,9 @@ void MciImageReadAheadSetEnabled(int enabled);
 /*
  * Completion boundary for the optional one-request-deep NOWAIT prefetch. The
  * fileXio client owns one global async completion state, so callers that are
- * about to close a sequential image fd must drain the read pipeline first.
- * Synchronous production builds compile this to a no-op returning zero.
+ * about to close a sequential image fd or issue unrelated fileXio work must
+ * drain the read pipeline first. Synchronous production builds compile this to
+ * a no-op returning zero.
  */
 int MciImageReadAheadDrain(void);
 
