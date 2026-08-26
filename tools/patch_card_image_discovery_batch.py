@@ -53,8 +53,8 @@ def main() -> None:
     if args.probe:
         text = replace_once(
             text,
-            '#include "card_image.h"\n#include "card_math.h"\n#include "progress.h"\n',
-            '#include "card_image.h"\n#include "card_math.h"\n#include "diag_log.h"\n#include "progress.h"\n',
+            '#include "card_image.h"\n#include "card_math.h"\n#include "image_write_behind.h"\n#include "progress.h"\n',
+            '#include "card_image.h"\n#include "card_math.h"\n#include "diag_log.h"\n#include "image_write_behind.h"\n#include "progress.h"\n',
             "probe include",
         )
 
