@@ -115,14 +115,22 @@ jobs:
           set -euo pipefail
           BASE_OBJ=artifacts/p0-image-fs-fat-cache/direct-slot-fs-baseline-card_image_fs.o
           CAND_OBJ=artifacts/p0-image-fs-fat-cache/image-fs-fat-cache-card_image_fs.o
-          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work ps2dev/ps2dev:v2.0.0 sh -c '
-            set -eu
-            if mips64r5900el-ps2-elf-nm "$CAND_OBJ" | grep -q " U ReadMetaClusterCached"; then exit 1; fi
-            echo "== baseline FatEntry =="
-            mips64r5900el-ps2-elf-nm -S "$BASE_OBJ" | grep FatEntry || true
-            echo "== candidate FatEntry/cache =="
-            mips64r5900el-ps2-elf-nm -S "$CAND_OBJ" | grep -E "FatEntry|ReadMetaClusterCached" || true
-          ' BASE_OBJ="$BASE_OBJ" CAND_OBJ="$CAND_OBJ" > artifacts/p0-image-fs-fat-cache/STATIC_REPORT.txt
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work \
+            -e BASE_OBJ="$BASE_OBJ" -e CAND_OBJ="$CAND_OBJ" \
+            ps2dev/ps2dev:v2.0.0 sh -c '
+              set -eu
+              test -s "$BASE_OBJ"
+              test -s "$CAND_OBJ"
+              mips64r5900el-ps2-elf-nm -S "$BASE_OBJ" | grep -q FatEntry
+              mips64r5900el-ps2-elf-nm -S "$CAND_OBJ" | grep -q FatEntry
+              if mips64r5900el-ps2-elf-nm "$CAND_OBJ" | grep -q " U ReadMetaClusterCached"; then
+                echo "ERROR: unresolved metadata-cache helper"; exit 1
+              fi
+              echo "== baseline FatEntry =="
+              mips64r5900el-ps2-elf-nm -S "$BASE_OBJ" | grep FatEntry
+              echo "== candidate FatEntry/cache =="
+              mips64r5900el-ps2-elf-nm -S "$CAND_OBJ" | grep -E "FatEntry|ReadMetaClusterCached" || true
+            ' > artifacts/p0-image-fs-fat-cache/STATIC_REPORT.txt
           cat > artifacts/p0-image-fs-fat-cache/README.txt <<'EOF'
           P0 image-filesystem FAT metadata cache experiment
 
