@@ -101,6 +101,18 @@ EE_LDFLAGS = -Wl,--gc-sections \
 	-Wl,--wrap=FmcbRecoveryRun \
 	-Wl,--wrap=FmcbRecoveryFinish
 
+# Optional execution probe for the zero-copy producer -> write-slot path.
+# Keep this out of primary timing builds: it intentionally adds per-record
+# counters so hardware logs can prove that Reserve/Commit actually executed.
+IMAGE_WRITE_PROBE ?= 0
+ifeq ($(IMAGE_WRITE_PROBE),1)
+EE_OBJS += src/image_write_slot_probe.o
+EE_LDFLAGS += \
+	-Wl,--wrap=MciImageWriteBehindSetEnabled \
+	-Wl,--wrap=MciImageWriteBehindReserve \
+	-Wl,--wrap=MciImageWriteBehindCommit
+endif
+
 # 0.4.x keeps the hardware-validated Briscoe security backend: PS2SDK 2.0
 # SECRMAN 1.4 plus the normal matching X-style card generation. Raw page RPCs
 # are a different interface contract. Modern PS2SDK's default mcserv is built
