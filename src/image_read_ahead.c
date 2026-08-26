@@ -210,6 +210,7 @@ static int TimedRead(int fd, unsigned char *buffer, int size)
     return rc;
 }
 
+#if MCI_IMAGE_READ_AHEAD_ASYNC
 static int FillSyncAtLeast(int index, int fd, int stride, int minimum)
 {
     MciImageReadSlot *slot = &Slots[index];
@@ -231,7 +232,6 @@ static int FillSyncAtLeast(int index, int fd, int stride, int minimum)
     return slot->length;
 }
 
-#if MCI_IMAGE_READ_AHEAD_ASYNC
 static int FinishAsync(void)
 {
     int poll_rc;
@@ -417,7 +417,6 @@ void MciImageReadAheadSetEnabled(int enabled)
 
 int __wrap_fileXioRead(int fd, void *buffer, int size)
 {
-    unsigned char *out = (unsigned char *)buffer;
     int rc;
 
     if (EnableDepth == 0u)
@@ -476,6 +475,8 @@ int __wrap_fileXioRead(int fd, void *buffer, int size)
     Slots[0].offset += rc;
     return rc;
 #else
+    unsigned char *out = (unsigned char *)buffer;
+
     if (fd != ActiveFd || size != ActiveStride) {
         rc = MciImageReadAheadDrain();
         if (rc < 0)
@@ -557,8 +558,11 @@ int __wrap_fileXioRead(int fd, void *buffer, int size)
 
             if (AsyncActive) {
                 rc = FinishAsync();
+                /* Completion failure leaves the IOP file-position semantics
+                 * unspecified for retry. Fail the logical record immediately
+                 * instead of returning a partial record to ReadExact(). */
                 if (rc < 0)
-                    return total > 0 ? total : rc;
+                    return rc;
             }
 
             if (ReadySlot < 0) {
