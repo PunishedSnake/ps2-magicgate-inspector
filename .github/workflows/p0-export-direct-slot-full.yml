@@ -9,6 +9,7 @@ on:
       - 'src/card_image.c'
       - 'src/image_write_behind.c'
       - 'src/image_write_behind.h'
+      - 'src/image_write_slot_probe.c'
       - 'Makefile'
       - '.github/workflows/p0-export-direct-slot-full.yml'
 
@@ -96,7 +97,7 @@ jobs:
               build_tree .build/worktrees/qualified qualified-sync32; \
               build_tree .build/worktrees/copy-elision copy-elision-sync32'
 
-      - name: Build direct-slot synchronous and async compatibility candidates
+      - name: Build direct-slot timing, probe and async compatibility candidates
         shell: bash
         run: |
           set -euo pipefail
@@ -104,11 +105,15 @@ jobs:
             ps2dev/ps2dev:v2.0.0 sh -c 'set -eu; \
               apk add --no-cache build-base >/dev/null; \
               COMMON="R5900_BENCH=0 RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 IMAGE_READ_PAGES=32 IMAGE_WRITE_PAGES=32"; \
-              make $COMMON IMAGE_WRITE_ASYNC=0 MC_INSPECTOR.ELF; \
+              make $COMMON IMAGE_WRITE_ASYNC=0 IMAGE_WRITE_PROBE=0 MC_INSPECTOR.ELF; \
               cp MC_INSPECTOR.ELF artifacts/p0-export-direct-slot-full/direct-slot-sync32.ELF; \
               mips64r5900el-ps2-elf-size MC_INSPECTOR.ELF > artifacts/p0-export-direct-slot-full/direct-slot-sync32.size.txt; \
-              rm -f src/image_write_behind.o MC_INSPECTOR.ELF; \
-              make $COMMON IMAGE_WRITE_ASYNC=1 MC_INSPECTOR.ELF; \
+              rm -f src/image_write_slot_probe.o MC_INSPECTOR.ELF; \
+              make $COMMON IMAGE_WRITE_ASYNC=0 IMAGE_WRITE_PROBE=1 MC_INSPECTOR.ELF; \
+              cp MC_INSPECTOR.ELF artifacts/p0-export-direct-slot-full/direct-slot-sync32-probe.ELF; \
+              mips64r5900el-ps2-elf-size MC_INSPECTOR.ELF > artifacts/p0-export-direct-slot-full/direct-slot-sync32-probe.size.txt; \
+              rm -f src/image_write_behind.o src/image_write_slot_probe.o MC_INSPECTOR.ELF; \
+              make $COMMON IMAGE_WRITE_ASYNC=1 IMAGE_WRITE_PROBE=0 MC_INSPECTOR.ELF; \
               cp MC_INSPECTOR.ELF artifacts/p0-export-direct-slot-full/direct-slot-async32-compat.ELF; \
               mips64r5900el-ps2-elf-size MC_INSPECTOR.ELF > artifacts/p0-export-direct-slot-full/direct-slot-async32-compat.size.txt'
 
@@ -128,6 +133,13 @@ jobs:
           C direct-slot-sync32.ELF
             inherits B and additionally lets card acquisition fill the final
             write-behind record directly, eliminating the record-to-batch copy
+
+          C-probe direct-slot-sync32-probe.ELF
+            instrumentation-only twin of C. Do not use it for primary timing.
+            IMAGE-IO-PROBE must report one successful direct commit per exported
+            page, zero reserve fallbacks/errors and zero commit errors. Its
+            direct_committed_bytes value is the exact wrapper-copy traffic
+            eliminated by the direct-slot path for that run.
 
           D direct-slot-async32-compat.ELF
             compile/runtime compatibility candidate only. It also enables the
