@@ -23,7 +23,6 @@
 #include "card_image.h"
 #include "card_math.h"
 #include "progress.h"
-#include "r5900_memops.h"
 
 #define IMAGE_PAGE_DATA 512u
 #define IMAGE_PAGE_SPARE 16u
@@ -418,7 +417,6 @@ int MciCardImageVerifyFile(const char *path, MciCardImageFormat format,
 int MciCardImageExport(int port, MciCardImageFormat format,
                        MciCardImageReport *report)
 {
-    unsigned char page_data[IMAGE_PAGE_DATA] __attribute__((aligned(64)));
     unsigned char raw[IMAGE_PAGE_RAW] __attribute__((aligned(64)));
     MciCardImageReport verify;
     MciCardGeometry geometry;
@@ -453,20 +451,23 @@ int MciCardImageExport(int port, MciCardImageFormat format,
     }
 
     for (page = 0u; page < geometry.total_pages; page++) {
-        rc = ReadPage(port, page, page_data);
+        /* The card page is already the final consumer representation for the
+         * first 512 bytes of both formats. Read it directly into the output
+         * record; .ps2 appends generated spare bytes in-place. This removes one
+         * redundant 512-byte EE copy per exported page. */
+        rc = ReadPage(port, page, raw);
         if (rc < 0) {
             fileXioClose(fd);
             (void)fileXioRemove(report->path);
             report->result = MCI_CARD_IMAGE_READ_ERROR;
             return rc;
         }
-        crc = MciCardMathCrc32Update(crc, page_data, sizeof(page_data));
+        crc = MciCardMathCrc32Update(crc, raw, IMAGE_PAGE_DATA);
         if (format == MCI_CARD_IMAGE_PS2) {
-            MciFastCopy(raw, page_data, IMAGE_PAGE_DATA);
-            MciCardMathBuildSpare(page_data, raw + IMAGE_PAGE_DATA);
-            rc = WriteExact(fd, raw, sizeof(raw));
+            MciCardMathBuildSpare(raw, raw + IMAGE_PAGE_DATA);
+            rc = WriteExact(fd, raw, IMAGE_PAGE_RAW);
         } else {
-            rc = WriteExact(fd, page_data, sizeof(page_data));
+            rc = WriteExact(fd, raw, IMAGE_PAGE_DATA);
         }
         if (rc < 0) {
             fileXioClose(fd);
