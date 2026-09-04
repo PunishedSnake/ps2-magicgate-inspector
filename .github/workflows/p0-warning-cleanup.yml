@@ -1,0 +1,115 @@
+name: P0 Warning and Correctness Cleanup
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [chore/p0-warning-cleanup]
+    paths:
+      - 'tools/patch_p0_warning_cleanup.py'
+      - '.github/workflows/p0-warning-cleanup.yml'
+
+permissions:
+  contents: read
+
+env:
+  BASE_SHA: c88f50787b15bf253e11e5bc75017ac1ed4cdd79
+  CLEANUP_SHA: f21ce4e6739f902a3deed7e6cb884f36e1e1c655
+  PS2SDK_SECURITY_COMMIT: a13b5971ec0e39c7ba8b8559b80a4e81c8425352
+  DISCOVERY_SHA: f82c536de1c872214699856df43652d509807295
+  CLUSTER_SHA: ec5416b29ff18f578a87c4a2ae123292635f8942
+  FAT_SHA: 613e73e411bba75e6670556b3114c4c48c0e4174
+  CONFLICT_SHA: 595594ed966981af5f43603ae8036269cf1e6e45
+  TRUSTED_VERIFY_SHA: 4053b7a2762ab229bf705a0bd70a28404d8ec54c
+  FUSION_SHA: 1cda25502170c875697f9f54f588045c3f0a54e9
+
+jobs:
+  clean-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+
+      - name: Syntax-check cleanup and source transformers
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=.build/cleanup-transformers; rm -rf "$out"; mkdir -p "$out"
+          git show "$CLEANUP_SHA:tools/patch_p0_warning_cleanup.py" > "$out/cleanup.py"
+          git show "$DISCOVERY_SHA:tools/patch_card_image_discovery_batch.py" > "$out/discovery.py"
+          git show "$CLUSTER_SHA:tools/patch_card_image_fs_cluster_batch.py" > "$out/cluster.py"
+          git show "$FAT_SHA:tools/patch_card_image_fs_meta_cache.py" > "$out/fat.py"
+          git show "$CONFLICT_SHA:tools/patch_card_image_fs_conflict_batch.py" > "$out/conflict.py"
+          git show "$TRUSTED_VERIFY_SHA:tools/patch_diag_wrap_trusted_verify_no_readahead.py" > "$out/trusted.py"
+          git show "$FUSION_SHA:tools/patch_trusted_quick_open_fusion.py" > "$out/fusion.py"
+          python3 -m py_compile "$out"/*.py
+          python3 tools/verify_card_math.py
+          sha256sum "$out"/*.py > "$out/SHA256SUMS"
+
+      - name: Stage pinned PS2SDK personalities
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+          mkdir -p .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+          docker pull ps2dev/ps2dev:v2.0.0
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work -e PS2SDK_SECURITY_COMMIT="$PS2SDK_SECURITY_COMMIT" ps2dev/ps2dev:v2.0.0 sh -c 'set -eu; \
+            apk add --no-cache git python3 build-base >/dev/null; \
+            for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/ps2sdk2-mg/$f"; done; \
+            git init -q /tmp/ps2sdk-src; git -C /tmp/ps2sdk-src remote add origin https://github.com/ps2dev/ps2sdk.git; git -C /tmp/ps2sdk-src fetch -q --depth 1 origin "$PS2SDK_SECURITY_COMMIT"; git -C /tmp/ps2sdk-src checkout -q FETCH_HEAD; \
+            python3 /work/tools/patch_secrman14_diag.py /tmp/ps2sdk-src/iop/security/secrman; PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrman clean all; PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrsif clean all; \
+            cp /tmp/ps2sdk-src/iop/security/secrman/irx/secrman.irx /work/.build/ps2sdk2-secr14/secrman.irx; cp /tmp/ps2sdk-src/iop/security/secrsif/irx/secrsif.irx /work/.build/ps2sdk2-secr14/secrsif.irx; \
+            PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman clean; PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman all MCMAN_BUILDING_XMCMAN=0 MCMAN_BUILDING_XMCMAN_V2=0; \
+            python3 /work/tools/patch_raw_mcserv_ports.py /tmp/ps2sdk-src/iop/memorycard/mcserv/src/mcserv.c; PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv clean; PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv all MCMAN_BUILDING_XMCSERV=0; \
+            cp /tmp/ps2sdk-src/iop/memorycard/mcman/irx/mcman.irx /work/.build/ps2sdk2-raw/mcman.irx; cp /tmp/ps2sdk-src/iop/memorycard/mcserv/irx/mcserv.irx /work/.build/ps2sdk2-raw/mcserv.irx'
+
+      - name: Materialize base-clean and FINAL-SAFE-v3-clean trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          t=.build/cleanup-transformers; trees=.build/cleanup-trees; rm -rf "$trees"; mkdir -p "$trees"
+          for v in base-clean final-clean; do mkdir -p "$trees/$v"; git archive "$BASE_SHA" | tar -x -C "$trees/$v"; mkdir -p "$trees/$v/.build"; cp -a .build/ps2sdk2-* "$trees/$v/.build/"; done
+          dir="$trees/final-clean"
+          python3 "$t/discovery.py" "$dir/src/card_image.c"
+          python3 "$t/cluster.py" "$dir/src/card_image_fs.c"
+          python3 "$t/fat.py" "$dir/src/card_image_fs.c"
+          python3 "$t/conflict.py" --batch-size 32 "$dir/src/card_image_fs.c"
+          python3 "$t/trusted.py" "$dir/src/diag_wrap.c"
+          python3 "$t/fusion.py" "$dir"
+          python3 "$t/cleanup.py" "$trees/base-clean"
+          python3 "$t/cleanup.py" "$trees/final-clean"
+          grep -q 'FMCB_RECOVERY_PATH_MAX (FMCB_SOURCE_ROOT_MAX + 32)' "$trees/final-clean/src/fmcb_recovery.h"
+          grep -q '__attribute__((nonstring))' "$trees/final-clean/src/card_image.c"
+          grep -q '#if MCI_RAW_BULK_ASYNC' "$trees/final-clean/src/raw_bulk_read.c"
+
+      - name: Build and require warning-free output
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/warning-cleanup/elf artifacts/warning-cleanup/logs artifacts/warning-cleanup/provenance
+          cp .build/cleanup-transformers/SHA256SUMS artifacts/warning-cleanup/provenance/
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work ps2dev/ps2dev:v2.0.0 sh -c 'set -eu; apk add --no-cache build-base >/dev/null; \
+            build_one() { v="$1"; out="$2"; dir="/work/.build/cleanup-trees/$v"; cd "$dir"; rm -f MC_INSPECTOR.ELF src/*.o ./*.o ./*_irx.c; \
+              make R5900_BENCH=0 RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 IMAGE_READ_PAGES=32 IMAGE_READ_ASYNC=0 IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0 IMAGE_WRITE_PROBE=0 MC_INSPECTOR.ELF 2>&1 | tee "/work/artifacts/warning-cleanup/logs/$out.log"; \
+              cp MC_INSPECTOR.ELF "/work/artifacts/warning-cleanup/elf/$out.ELF"; }; \
+            build_one base-clean BASE-CLEAN; build_one final-clean FINAL-SAFE-V3-CLEAN'
+          if grep -n 'warning:' artifacts/warning-cleanup/logs/*.log; then
+            echo 'Candidate cleanup build still emits compiler warnings' >&2
+            exit 1
+          fi
+          sha256sum artifacts/warning-cleanup/elf/*.ELF > artifacts/warning-cleanup/elf/ELF_SHA256SUMS.txt
+          cat > artifacts/warning-cleanup/README.txt <<'EOF'
+          This branch is intentionally excluded from P0 timing comparisons.
+          It fixes compiler-visible bounded-string diagnostics, the sync-build-only
+          raw `sequential` warning, explicit non-string 28-byte superblock magic,
+          and the real recovery-path capacity mismatch (192-byte source root vs the
+          old 128-byte recovery path). Promote only after the performance winner is
+          chosen so timing axes remain uncontaminated.
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PS2-MCI-P0-warning-cleanup-${{ github.sha }}
+          path: artifacts/warning-cleanup/
+          if-no-files-found: error
+          retention-days: 30
