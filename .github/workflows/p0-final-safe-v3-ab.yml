@@ -1,0 +1,263 @@
+name: P0 Final Safe v3 Hardware A-B
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - perf/p0-final-safe-v3
+    paths:
+      - '.github/workflows/p0-final-safe-v3-ab.yml'
+      - 'docs/P0_FINAL_SAFE_V3_MANIFEST.md'
+
+permissions:
+  contents: read
+
+env:
+  BASE_SHA: c88f50787b15bf253e11e5bc75017ac1ed4cdd79
+  PS2SDK_SECURITY_COMMIT: a13b5971ec0e39c7ba8b8559b80a4e81c8425352
+
+  DISCOVERY_BRANCH: perf/p0-image-discovery-batch
+  DISCOVERY_SHA: f82c536de1c872214699856df43652d509807295
+  CLUSTER_BRANCH: perf/p0-image-fs-cluster-batch
+  CLUSTER_SHA: ec5416b29ff18f578a87c4a2ae123292635f8942
+  FAT_BRANCH: perf/p0-image-fs-fat-cache
+  FAT_SHA: 613e73e411bba75e6670556b3114c4c48c0e4174
+  CONFLICT_BRANCH: perf/p0-image-fs-conflict-batch
+  CONFLICT_SHA: 595594ed966981af5f43603ae8036269cf1e6e45
+  TRUSTED_VERIFY_BRANCH: perf/p0-trusted-quick-verify-no-readahead
+  TRUSTED_VERIFY_SHA: 4053b7a2762ab229bf705a0bd70a28404d8ec54c
+  FUSION_BRANCH: perf/p0-trusted-quick-open-fusion
+  FUSION_SHA: 59500a2aa9866f1bbac3662236deeab67ee6f36a
+
+jobs:
+  compose-build:
+    name: Compose synchronous P0 v3 candidates
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout integration branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify pinned experiment heads
+        shell: bash
+        run: |
+          set -euo pipefail
+          verify_branch() {
+            branch="$1"; expected="$2"
+            remote_ref="refs/remotes/origin/$branch"
+            git fetch --no-tags origin "refs/heads/$branch:$remote_ref"
+            actual="$(git rev-parse "$remote_ref")"
+            printf '%-48s expected=%s actual=%s\n' "$branch" "$expected" "$actual"
+            test "$actual" = "$expected"
+            git cat-file -e "$expected^{commit}"
+          }
+          verify_branch "$DISCOVERY_BRANCH" "$DISCOVERY_SHA"
+          verify_branch "$CLUSTER_BRANCH" "$CLUSTER_SHA"
+          verify_branch "$FAT_BRANCH" "$FAT_SHA"
+          verify_branch "$CONFLICT_BRANCH" "$CONFLICT_SHA"
+          verify_branch "$TRUSTED_VERIFY_BRANCH" "$TRUSTED_VERIFY_SHA"
+          verify_branch "$FUSION_BRANCH" "$FUSION_SHA"
+          git cat-file -e "$BASE_SHA^{commit}"
+
+      - name: Extract exact fail-closed transformers
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=.build/p0-final-v3-transformers
+          rm -rf "$out" && mkdir -p "$out"
+          git show "$DISCOVERY_SHA:tools/patch_card_image_discovery_batch.py" > "$out/discovery.py"
+          git show "$CLUSTER_SHA:tools/patch_card_image_fs_cluster_batch.py" > "$out/cluster.py"
+          git show "$FAT_SHA:tools/patch_card_image_fs_meta_cache.py" > "$out/fat_cache.py"
+          git show "$CONFLICT_SHA:tools/patch_card_image_fs_conflict_batch.py" > "$out/conflict.py"
+          git show "$TRUSTED_VERIFY_SHA:tools/patch_diag_wrap_trusted_verify_no_readahead.py" > "$out/trusted_verify.py"
+          git show "$FUSION_SHA:tools/patch_trusted_quick_open_fusion.py" > "$out/fusion.py"
+          chmod +x "$out"/*.py
+          python3 -m py_compile "$out"/*.py
+          sha256sum "$out"/*.py | tee "$out/SHA256SUMS"
+
+      - name: Verify card-math correctness harness
+        shell: bash
+        run: python3 tools/verify_card_math.py
+
+      - name: Stage pinned PS2SDK personalities
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+          mkdir -p .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+          docker pull ps2dev/ps2dev:v2.0.0
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" -w /work \
+            -e PS2SDK_SECURITY_COMMIT="$PS2SDK_SECURITY_COMMIT" \
+            ps2dev/ps2dev:v2.0.0 \
+            sh -c 'set -eu; \
+              apk add --no-cache git python3 build-base >/dev/null; \
+              for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/ps2sdk2-mg/$f"; done; \
+              git init -q /tmp/ps2sdk-src; \
+              git -C /tmp/ps2sdk-src remote add origin https://github.com/ps2dev/ps2sdk.git; \
+              git -C /tmp/ps2sdk-src fetch -q --depth 1 origin "$PS2SDK_SECURITY_COMMIT"; \
+              git -C /tmp/ps2sdk-src checkout -q FETCH_HEAD; \
+              python3 /work/tools/patch_secrman14_diag.py /tmp/ps2sdk-src/iop/security/secrman; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrman clean all; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrsif clean all; \
+              cp /tmp/ps2sdk-src/iop/security/secrman/irx/secrman.irx /work/.build/ps2sdk2-secr14/secrman.irx; \
+              cp /tmp/ps2sdk-src/iop/security/secrsif/irx/secrsif.irx /work/.build/ps2sdk2-secr14/secrsif.irx; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman all MCMAN_BUILDING_XMCMAN=0 MCMAN_BUILDING_XMCMAN_V2=0; \
+              python3 /work/tools/patch_raw_mcserv_ports.py /tmp/ps2sdk-src/iop/memorycard/mcserv/src/mcserv.c; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv all MCMAN_BUILDING_XMCSERV=0; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcman/irx/mcman.irx /work/.build/ps2sdk2-raw/mcman.irx; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcserv/irx/mcserv.irx /work/.build/ps2sdk2-raw/mcserv.irx'
+          {
+            echo 'Normal MagicGate/X-style modules:'; sha256sum .build/ps2sdk2-mg/*.irx
+            echo 'Security modules:'; sha256sum .build/ps2sdk2-secr14/*.irx
+            echo 'Legacy raw-page modules:'; sha256sum .build/ps2sdk2-raw/*.irx
+          } | tee .build/P0_FINAL_SAFE_V3_IRX_SHA256.txt
+
+      - name: Materialize clean base trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          trees=.build/p0-final-v3-trees
+          rm -rf "$trees" && mkdir -p "$trees"
+          for variant in base final16 final32 final64; do
+            mkdir -p "$trees/$variant"
+            git archive "$BASE_SHA" | tar -x -C "$trees/$variant"
+            mkdir -p "$trees/$variant/.build"
+            cp -a .build/ps2sdk2-mg "$trees/$variant/.build/"
+            cp -a .build/ps2sdk2-secr14 "$trees/$variant/.build/"
+            cp -a .build/ps2sdk2-raw "$trees/$variant/.build/"
+          done
+
+      - name: Compose FINAL-SAFE v3 source variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          t=.build/p0-final-v3-transformers
+          trees=.build/p0-final-v3-trees
+          compose() {
+            batch="$1"; dir="$trees/final$batch"
+            python3 "$t/discovery.py" "$dir/src/card_image.c"
+            python3 "$t/cluster.py" "$dir/src/card_image_fs.c"
+            python3 "$t/fat_cache.py" "$dir/src/card_image_fs.c"
+            python3 "$t/conflict.py" --batch-size "$batch" "$dir/src/card_image_fs.c"
+            python3 "$t/trusted_verify.py" "$dir/src/diag_wrap.c"
+            python3 "$t/fusion.py" "$dir"
+          }
+          compose 16; compose 32; compose 64
+
+          for batch in 16 32 64; do
+            dir="$trees/final$batch"
+            grep -q '#define IMAGE_DISCOVERY_BATCH_ENTRIES 128u' "$dir/src/card_image.c"
+            grep -q 'static unsigned char ClusterBatchRaw' "$dir/src/card_image_fs.c"
+            grep -q 'static const MciFsImage \*MetaCacheOwner' "$dir/src/card_image_fs.c"
+            grep -q "#define FS_TARGET_CONFLICT_BATCH $batch" "$dir/src/card_image_fs.c"
+            grep -q 'MciCardImageQuickOpenVerify' "$dir/src/image_quick_verify.h"
+            grep -q 'ownership=quick-open' "$dir/src/diag_wrap.c"
+            grep -q -- '--wrap=MciCardImageQuickOpenVerify' "$dir/Makefile"
+            ! grep -q 'TrustedImportVerifyActive' "$dir/src/diag_wrap.c"
+            ! grep -q 'IMAGE-DISCOVERY' "$dir/src/card_image.c"
+            ! grep -q 'IMAGE-FS-CLUSTER' "$dir/src/card_image_fs.c"
+            ! grep -q 'IMAGE-FS-CACHE' "$dir/src/card_image_fs.c"
+            ! grep -q 'IMAGE-FS-CONFLICT' "$dir/src/card_image_fs.c"
+          done
+
+      - name: Prove fusion transformer is single-application only
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 .build/p0-final-v3-transformers/fusion.py .build/p0-final-v3-trees/final32 >.build/fusion-second-apply.log 2>&1; then
+            echo 'fusion transformer unexpectedly applied twice' >&2
+            exit 1
+          fi
+
+      - name: Archive exact composed source diffs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/final-safe-v3/source-diffs artifacts/final-safe-v3/provenance
+          cp .build/p0-final-v3-transformers/*.py artifacts/final-safe-v3/provenance/
+          cp .build/p0-final-v3-transformers/SHA256SUMS artifacts/final-safe-v3/provenance/TRANSFORMER_SHA256SUMS.txt
+          cp .build/P0_FINAL_SAFE_V3_IRX_SHA256.txt artifacts/final-safe-v3/provenance/
+          cp .build/fusion-second-apply.log artifacts/final-safe-v3/provenance/
+          cp docs/P0_FINAL_SAFE_V3_MANIFEST.md artifacts/final-safe-v3/provenance/
+          for batch in 16 32 64; do
+            for f in Makefile src/card_image.c src/card_image_fs.c src/diag_wrap.c src/image_quick_verify.c src/image_quick_verify.h; do
+              safe=$(echo "$f" | tr '/' '_')
+              diff -u ".build/p0-final-v3-trees/base/$f" ".build/p0-final-v3-trees/final$batch/$f" \
+                > "artifacts/final-safe-v3/source-diffs/${safe}-final$batch.diff" || test $? -eq 1
+            done
+          done
+          find .build/p0-final-v3-trees -type f \( -name 'card_image.c' -o -name 'card_image_fs.c' -o -name 'diag_wrap.c' -o -name 'image_quick_verify.c' -o -name 'image_quick_verify.h' -o -name 'Makefile' \) -print0 \
+            | sort -z | xargs -0 sha256sum > artifacts/final-safe-v3/provenance/COMPOSED_SOURCE_SHA256.txt
+
+      - name: Build BASE and FINAL-SAFE v3 timing ELFs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/final-safe-v3/elf
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" -w /work \
+            ps2dev/ps2dev:v2.0.0 \
+            sh -c 'set -eu; apk add --no-cache build-base >/dev/null; \
+              build_one() { \
+                variant="$1"; output="$2"; dir="/work/.build/p0-final-v3-trees/$variant"; cd "$dir"; \
+                rm -f MC_INSPECTOR.ELF src/*.o ./*.o ./*_irx.c; \
+                make R5900_BENCH=0 RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 \
+                     IMAGE_READ_PAGES=32 IMAGE_READ_ASYNC=0 \
+                     IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0 IMAGE_WRITE_PROBE=0 \
+                     MC_INSPECTOR.ELF; \
+                cp MC_INSPECTOR.ELF "/work/artifacts/final-safe-v3/elf/$output"; \
+                mips64r5900el-ps2-elf-size MC_INSPECTOR.ELF > "/work/artifacts/final-safe-v3/elf/$output.size.txt"; \
+              }; \
+              build_one base BASE-c88f507.ELF; \
+              build_one final16 FINAL-SAFE-V3-conflict16.ELF; \
+              build_one final32 FINAL-SAFE-V3-conflict32.ELF; \
+              build_one final64 FINAL-SAFE-V3-conflict64.ELF'
+          sha256sum artifacts/final-safe-v3/elf/*.ELF > artifacts/final-safe-v3/elf/ELF_SHA256SUMS.txt
+          for f in artifacts/final-safe-v3/elf/FINAL-SAFE-V3-conflict*.ELF; do
+            ! cmp -s artifacts/final-safe-v3/elf/BASE-c88f507.ELF "$f"
+          done
+
+      - name: Write hardware protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > artifacts/final-safe-v3/README.txt <<EOF
+          P0 FINAL-SAFE v3 real-hardware pack
+          ===================================
+          integration_sha=$GITHUB_SHA
+          base_sha=$BASE_SHA
+          discovery_sha=$DISCOVERY_SHA
+          cluster_sha=$CLUSTER_SHA
+          fat_sha=$FAT_SHA
+          conflict_sha=$CONFLICT_SHA
+          trusted_verify_sha=$TRUSTED_VERIFY_SHA
+          fusion_sha=$FUSION_SHA
+          ps2sdk_security_commit=$PS2SDK_SECURITY_COMMIT
+
+          FINAL-SAFE v3 adds explicit trusted quick-open ownership fusion to v2.
+          It removes the duplicate close/open/lseek/read(512) sequence after trusted
+          selected-save verification while preserving sync, validation, logging and
+          normal error/rollback descriptor ownership.
+
+          Keep correctness as a hard gate. Compare v2 and v3 selected-save import on
+          the same real PS2, card, USB device and image. Record p50/p95/p99/max,
+          correctness hash, verify result and fileXio/image-I/O errors. Conflict
+          batch 16/32/64 remains a hardware-selection axis.
+          EOF
+          cat > artifacts/final-safe-v3/RESULTS_TEMPLATE.csv <<'EOF'
+          variant,workload,run_index,scp_model,hardware_revision,card,usb_device,filesystem,image_format,image_bytes,cold_warm,operation_ticks,p50_ticks,p95_ticks,p99_ticks,max_ticks,correctness_hash,verify_result,filexio_errors,notes
+          EOF
+
+      - name: Upload P0 FINAL-SAFE v3 pack
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS2-MCI-P0-final-safe-v3-${{ github.sha }}
+          path: artifacts/final-safe-v3/
+          if-no-files-found: error
+          retention-days: 30
