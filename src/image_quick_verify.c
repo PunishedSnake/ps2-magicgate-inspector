@@ -35,6 +35,8 @@ typedef struct MciQuickSuperblock {
 
 static const char SuperblockMagic[28] = "Sony PS2 Memory Card Format ";
 
+int __real_fileXioRead(int fd, void *buffer, int size);
+
 static int ReadExact(int fd, void *buffer, unsigned int size)
 {
     unsigned char *p = (unsigned char *)buffer;
@@ -42,6 +44,25 @@ static int ReadExact(int fd, void *buffer, unsigned int size)
 
     while (done < size) {
         int rc = fileXioRead(fd, p + done, (int)(size - done));
+        if (rc <= 0)
+            return rc < 0 ? rc : -1;
+        done += (unsigned int)rc;
+    }
+    return 0;
+}
+
+/* Trusted reopen verification deliberately validates only the first logical
+ * page after a prior full scan. Calling the wrapped fileXioRead here would make
+ * the sequential read-ahead layer fetch a complete 16896-byte production batch
+ * merely to consume 512 bytes. Bypass that optional batching layer for this
+ * bounded one-page probe while retaining the normal fileXio RPC/cache contract. */
+static int ReadExactDirect(int fd, void *buffer, unsigned int size)
+{
+    unsigned char *p = (unsigned char *)buffer;
+    unsigned int done = 0u;
+
+    while (done < size) {
+        int rc = __real_fileXioRead(fd, p + done, (int)(size - done));
         if (rc <= 0)
             return rc < 0 ? rc : -1;
         done += (unsigned int)rc;
@@ -110,7 +131,7 @@ int MciCardImageQuickReopenVerify(const char *path,
         report->verify_rc = fd;
         return fd;
     }
-    rc = ReadExact(fd, first, sizeof(first));
+    rc = ReadExactDirect(fd, first, sizeof(first));
     fileXioClose(fd);
     if (rc < 0)
         goto invalid;

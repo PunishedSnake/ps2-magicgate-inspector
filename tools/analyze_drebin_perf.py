@@ -45,6 +45,12 @@ def parse_kv(line: str) -> Dict[str, str]:
     return {match.group(1): match.group(2).rstrip(",;") for match in KV_RE.finditer(line)}
 
 
+def ratio_text(numerator: Optional[int], denominator: Optional[int]) -> str:
+    if numerator is None or not denominator:
+        return ""
+    return f"{numerator / denominator:.4f}"
+
+
 @dataclass
 class Session:
     source: str
@@ -68,18 +74,16 @@ class Session:
         submits = parse_int(self.raw.get("async_submit"))
         ready = parse_int(self.raw.get("ready"))
         waits = parse_int(self.raw.get("waits"))
+        read_submits = parse_int(self.read_io.get("async_submits"))
+        read_ready = parse_int(self.read_io.get("async_ready"))
+        read_waits = parse_int(self.read_io.get("async_waits"))
+        write_submits = parse_int(self.write_io.get("async_submits"))
+        write_ready = parse_int(self.write_io.get("async_ready"))
+        write_waits = parse_int(self.write_io.get("async_waits"))
 
         pages_per_rpc = ""
         if rpc_calls and pages is not None:
             pages_per_rpc = f"{pages / rpc_calls:.3f}"
-
-        ready_ratio = ""
-        if submits and ready is not None:
-            ready_ratio = f"{ready / submits:.4f}"
-
-        wait_ratio = ""
-        if submits and waits is not None:
-            wait_ratio = f"{waits / submits:.4f}"
 
         return {
             "source": self.source,
@@ -100,8 +104,8 @@ class Session:
             "raw_async_ready": self.raw.get("ready", ""),
             "raw_async_waits": self.raw.get("waits", ""),
             "raw_async_discards": self.raw.get("discards", ""),
-            "raw_async_ready_ratio": ready_ratio,
-            "raw_async_wait_ratio": wait_ratio,
+            "raw_async_ready_ratio": ratio_text(ready, submits),
+            "raw_async_wait_ratio": ratio_text(waits, submits),
             "raw_rpc_p50_ms_floor": self.raw.get("rpc_p50_ms_floor", ""),
             "raw_rpc_p95_ms_floor": self.raw.get("rpc_p95_ms_floor", ""),
             "raw_rpc_p99_ms_floor": self.raw.get("rpc_p99_ms_floor", ""),
@@ -112,12 +116,21 @@ class Session:
             "raw_rpc_ticks": self.raw.get("rpc_ticks", ""),
             "raw_wait_ticks": self.raw.get("wait_ticks", ""),
             "read_batch_pages": self.read_io.get("batch_pages", ""),
+            "read_async": self.read_io.get("async", ""),
             "read_logical_calls": self.read_io.get("logical_calls", ""),
             "read_logical_bytes": self.read_io.get("logical_bytes", ""),
             "read_underlying_calls": self.read_io.get("underlying_calls", ""),
             "read_underlying_bytes": self.read_io.get("underlying_bytes", ""),
             "read_underlying_ticks": self.read_io.get("underlying_ticks", ""),
             "read_operation_ticks": self.read_io.get("operation_ticks", ""),
+            "read_async_submits": self.read_io.get("async_submits", ""),
+            "read_async_ready": self.read_io.get("async_ready", ""),
+            "read_async_waits": self.read_io.get("async_waits", ""),
+            "read_async_wait_ticks": self.read_io.get("async_wait_ticks", ""),
+            "read_async_fallbacks": self.read_io.get("async_fallbacks", ""),
+            "read_last_error": self.read_io.get("last_error", ""),
+            "read_async_ready_ratio": ratio_text(read_ready, read_submits),
+            "read_async_wait_ratio": ratio_text(read_waits, read_submits),
             "read_p50_ms_floor": self.read_io.get("batch_p50_ms_floor", ""),
             "read_p95_ms_floor": self.read_io.get("batch_p95_ms_floor", ""),
             "read_p99_ms_floor": self.read_io.get("batch_p99_ms_floor", ""),
@@ -130,9 +143,12 @@ class Session:
             "write_underlying_bytes": self.write_io.get("underlying_bytes", ""),
             "write_underlying_ticks": self.write_io.get("underlying_ticks", ""),
             "write_operation_ticks": self.write_io.get("operation_ticks", ""),
-            "write_async_submits": self.write_io.get("async_submit", ""),
-            "write_async_ready": self.write_io.get("ready", ""),
-            "write_async_waits": self.write_io.get("waits", ""),
+            "write_async_submits": self.write_io.get("async_submits", ""),
+            "write_async_ready": self.write_io.get("async_ready", ""),
+            "write_async_waits": self.write_io.get("async_waits", ""),
+            "write_async_wait_ticks": self.write_io.get("async_wait_ticks", ""),
+            "write_async_ready_ratio": ratio_text(write_ready, write_submits),
+            "write_async_wait_ratio": ratio_text(write_waits, write_submits),
             "write_p50_ms_floor": self.write_io.get("batch_p50_ms_floor", ""),
             "write_p95_ms_floor": self.write_io.get("batch_p95_ms_floor", ""),
             "write_p99_ms_floor": self.write_io.get("batch_p99_ms_floor", ""),
@@ -212,8 +228,10 @@ def print_summary(sessions: Iterable[Session]) -> None:
             f"p95={row['raw_rpc_p95_ms_floor'] or '?'}ms+ "
             f"p99={row['raw_rpc_p99_ms_floor'] or '?'}ms+ "
             f"max={row['raw_rpc_max_us'] or '?'}us | "
-            f"ready/wait={row['raw_async_ready'] or '0'}/{row['raw_async_waits'] or '0'} | "
-            f"read={row['read_batch_pages'] or '?'}p/{row['read_underlying_calls'] or '?'}calls | "
+            f"raw-ready/wait={row['raw_async_ready'] or '0'}/{row['raw_async_waits'] or '0'} | "
+            f"read={row['read_batch_pages'] or '?'}p/async{row['read_async'] or '0'}"
+            f"/{row['read_underlying_calls'] or '?'}calls "
+            f"ready/wait={row['read_async_ready'] or '0'}/{row['read_async_waits'] or '0'} | "
             f"write={row['write_batch_pages'] or '?'}p/async{row['write_async'] or '?'}"
             f"/{row['write_underlying_calls'] or '?'}calls | "
             f"crc={row['image_crc'] or '?'} verified={row['image_verified'] or '?'}"
