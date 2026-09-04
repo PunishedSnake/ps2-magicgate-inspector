@@ -1,0 +1,322 @@
+name: P0 Final Async Hardware A-B
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - perf/p0-final-async
+    paths:
+      - '.github/workflows/p0-final-async-ab.yml'
+      - 'Makefile'
+      - 'src/image_read_ahead.c'
+      - 'src/image_read_ahead.h'
+      - 'src/image_quick_verify.c'
+      - 'src/image_write_behind.c'
+      - 'src/image_write_behind.h'
+      - 'src/card_image.c'
+      - 'tools/patch_final_async_close_bridge.py'
+      - 'tools/analyze_drebin_perf.py'
+
+permissions:
+  contents: read
+
+env:
+  SAFE_BASE_SHA: c88f50787b15bf253e11e5bc75017ac1ed4cdd79
+  QUALIFIED_ASYNC_SHA: eca8ec24543d65f349b74b44544f3fa3cc159331
+  PS2SDK_SECURITY_COMMIT: a13b5971ec0e39c7ba8b8559b80a4e81c8425352
+
+  DISCOVERY_BRANCH: perf/p0-image-discovery-batch
+  DISCOVERY_SHA: f82c536de1c872214699856df43652d509807295
+  CLUSTER_BRANCH: perf/p0-image-fs-cluster-batch
+  CLUSTER_SHA: ec5416b29ff18f578a87c4a2ae123292635f8942
+  FAT_BRANCH: perf/p0-image-fs-fat-cache
+  FAT_SHA: 613e73e411bba75e6670556b3114c4c48c0e4174
+  CONFLICT_BRANCH: perf/p0-image-fs-conflict-batch
+  CONFLICT_SHA: 595594ed966981af5f43603ae8036269cf1e6e45
+
+  QUALIFIED_READ_C_BLOB: a0960222c52848c2d7570d95f9eff0bd9b97f131
+  QUALIFIED_READ_H_BLOB: a3e3c4298b1ebadeeffee2f4e8bbfc927acb02f7
+  QUALIFIED_QUICK_VERIFY_BLOB: 658b29a3bbdbab21fadfddc8db2cf08e6e3424be
+  QUALIFIED_ANALYZER_BLOB: e429febb29c16ebe6d70edcf77eb875cebf08cea
+
+jobs:
+  build-matrix:
+    name: Reconciled async candidates
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+
+    steps:
+      - name: Checkout reconciled async branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prove qualified read-side blobs and later write-side ownership
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$(git hash-object src/image_read_ahead.c)" = "$QUALIFIED_READ_C_BLOB"
+          test "$(git hash-object src/image_read_ahead.h)" = "$QUALIFIED_READ_H_BLOB"
+          test "$(git hash-object src/image_quick_verify.c)" = "$QUALIFIED_QUICK_VERIFY_BLOB"
+          test "$(git hash-object tools/analyze_drebin_perf.py)" = "$QUALIFIED_ANALYZER_BLOB"
+
+          grep -q '^IMAGE_READ_ASYNC ?= 0$' Makefile
+          grep -q 'IMAGE_READ_ASYNC=1 and IMAGE_WRITE_ASYNC=1 cannot be enabled together' Makefile
+          grep -q 'int MciImageWriteBehindReserve' src/image_write_behind.c
+          grep -q 'int MciImageWriteBehindCommit' src/image_write_behind.c
+          grep -q 'MciImageWriteBehindReserve(fd, stride, &record)' src/card_image.c
+          grep -q 'MciImageWriteBehindCommit(fd, record, stride)' src/card_image.c
+
+      - name: Fetch and pin synchronous transform sources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          verify_branch() {
+            branch="$1"
+            expected="$2"
+            remote_ref="refs/remotes/origin/$branch"
+            git fetch --no-tags origin "refs/heads/$branch:$remote_ref"
+            actual="$(git rev-parse "$remote_ref")"
+            printf '%-42s expected=%s actual=%s\n' "$branch" "$expected" "$actual"
+            test "$actual" = "$expected"
+          }
+
+          verify_branch "$DISCOVERY_BRANCH" "$DISCOVERY_SHA"
+          verify_branch "$CLUSTER_BRANCH" "$CLUSTER_SHA"
+          verify_branch "$FAT_BRANCH" "$FAT_SHA"
+          verify_branch "$CONFLICT_BRANCH" "$CONFLICT_SHA"
+
+          out=.build/p0-final-transformers
+          rm -rf "$out"
+          mkdir -p "$out"
+          git show "$DISCOVERY_SHA:tools/patch_card_image_discovery_batch.py" > "$out/discovery.py"
+          git show "$CLUSTER_SHA:tools/patch_card_image_fs_cluster_batch.py" > "$out/cluster.py"
+          git show "$FAT_SHA:tools/patch_card_image_fs_meta_cache.py" > "$out/fat_cache.py"
+          git show "$CONFLICT_SHA:tools/patch_card_image_fs_conflict_batch.py" > "$out/conflict.py"
+          cp tools/patch_final_async_close_bridge.py "$out/async_close_bridge.py"
+          chmod +x "$out"/*.py
+          sha256sum "$out"/*.py | tee "$out/SHA256SUMS"
+
+      - name: Verify card-math equivalence
+        shell: bash
+        run: python3 tools/verify_card_math.py
+
+      - name: Stage pinned PS2SDK personalities
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+          mkdir -p .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+
+          docker pull ps2dev/ps2dev:v2.0.0
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            -e PS2SDK_SECURITY_COMMIT="$PS2SDK_SECURITY_COMMIT" \
+            ps2dev/ps2dev:v2.0.0 \
+            sh -c 'set -eu; \
+              apk add --no-cache git python3 build-base >/dev/null; \
+              for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do \
+                cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/ps2sdk2-mg/$f"; \
+              done; \
+              git init -q /tmp/ps2sdk-src; \
+              git -C /tmp/ps2sdk-src remote add origin https://github.com/ps2dev/ps2sdk.git; \
+              git -C /tmp/ps2sdk-src fetch -q --depth 1 origin "$PS2SDK_SECURITY_COMMIT"; \
+              git -C /tmp/ps2sdk-src checkout -q FETCH_HEAD; \
+              python3 /work/tools/patch_secrman14_diag.py /tmp/ps2sdk-src/iop/security/secrman; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrman clean all; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrsif clean all; \
+              cp /tmp/ps2sdk-src/iop/security/secrman/irx/secrman.irx /work/.build/ps2sdk2-secr14/secrman.irx; \
+              cp /tmp/ps2sdk-src/iop/security/secrsif/irx/secrsif.irx /work/.build/ps2sdk2-secr14/secrsif.irx; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman all MCMAN_BUILDING_XMCMAN=0 MCMAN_BUILDING_XMCMAN_V2=0; \
+              python3 /work/tools/patch_raw_mcserv_ports.py /tmp/ps2sdk-src/iop/memorycard/mcserv/src/mcserv.c; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv all MCMAN_BUILDING_XMCSERV=0; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcman/irx/mcman.irx /work/.build/ps2sdk2-raw/mcman.irx; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcserv/irx/mcserv.irx /work/.build/ps2sdk2-raw/mcserv.irx'
+
+          {
+            echo 'Normal MagicGate/X-style modules:'
+            sha256sum .build/ps2sdk2-mg/*.irx
+            echo 'Security modules:'
+            sha256sum .build/ps2sdk2-secr14/*.irx
+            echo 'Legacy raw-page modules:'
+            sha256sum .build/ps2sdk2-raw/*.irx
+          } | tee .build/P0_FINAL_ASYNC_IRX_SHA256.txt
+
+      - name: Materialize and compose 16 / 32 / 64 conflict variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          trees=.build/p0-final-async-trees
+          t=.build/p0-final-transformers
+          rm -rf "$trees"
+          mkdir -p "$trees"
+
+          for batch in 16 32 64; do
+            dir="$trees/final$batch"
+            mkdir -p "$dir"
+            git archive HEAD | tar -x -C "$dir"
+            mkdir -p "$dir/.build"
+            cp -a .build/ps2sdk2-mg "$dir/.build/"
+            cp -a .build/ps2sdk2-secr14 "$dir/.build/"
+            cp -a .build/ps2sdk2-raw "$dir/.build/"
+
+            python3 "$t/async_close_bridge.py" "$dir/src/image_write_behind.c"
+            python3 "$t/discovery.py" "$dir/src/card_image.c"
+            python3 "$t/cluster.py" "$dir/src/card_image_fs.c"
+            python3 "$t/fat_cache.py" "$dir/src/card_image_fs.c"
+            python3 "$t/conflict.py" --batch-size "$batch" "$dir/src/card_image_fs.c"
+
+            grep -q 'MciImageReadAheadDrain()' "$dir/src/image_write_behind.c"
+            grep -q 'int MciImageWriteBehindReserve' "$dir/src/image_write_behind.c"
+            grep -q 'int MciImageWriteBehindCommit' "$dir/src/image_write_behind.c"
+            grep -q '#define IMAGE_DISCOVERY_BATCH_ENTRIES 128u' "$dir/src/card_image.c"
+            grep -q 'static unsigned char ClusterBatchRaw' "$dir/src/card_image_fs.c"
+            grep -q 'static const MciFsImage \*MetaCacheOwner' "$dir/src/card_image_fs.c"
+            grep -q "#define FS_TARGET_CONFLICT_BATCH $batch" "$dir/src/card_image_fs.c"
+          done
+
+      - name: Prove simultaneous read/write NOWAIT is rejected
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir=.build/p0-final-async-trees/final32
+          if make -C "$dir" IMAGE_READ_ASYNC=1 IMAGE_WRITE_ASYNC=1 -n MC_INSPECTOR.ELF \
+              > .build/dual-async-guard.log 2>&1; then
+            echo 'Dual async unexpectedly accepted by Makefile' >&2
+            cat .build/dual-async-guard.log >&2
+            exit 1
+          fi
+          grep -q 'cannot be enabled together' .build/dual-async-guard.log
+
+      - name: Archive reconciliation provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/final-async/provenance artifacts/final-async/source-diffs artifacts/final-async/elf
+          cp .build/p0-final-transformers/*.py artifacts/final-async/provenance/
+          cp .build/p0-final-transformers/SHA256SUMS artifacts/final-async/provenance/TRANSFORMER_SHA256SUMS.txt
+          cp .build/P0_FINAL_ASYNC_IRX_SHA256.txt artifacts/final-async/provenance/
+          cp .build/dual-async-guard.log artifacts/final-async/provenance/
+
+          for batch in 16 32 64; do
+            diff -u src/image_write_behind.c \
+              ".build/p0-final-async-trees/final$batch/src/image_write_behind.c" \
+              > "artifacts/final-async/source-diffs/image_write_behind-bridge-final$batch.diff" || test $? -eq 1
+          done
+
+          cat > artifacts/final-async/RECONCILIATION.txt <<EOF
+          integration_sha=$GITHUB_SHA
+          safe_base_sha=$SAFE_BASE_SHA
+          qualified_async_sha=$QUALIFIED_ASYNC_SHA
+          qualified_read_c_blob=$QUALIFIED_READ_C_BLOB
+          qualified_read_h_blob=$QUALIFIED_READ_H_BLOB
+          qualified_quick_verify_blob=$QUALIFIED_QUICK_VERIFY_BLOB
+          qualified_analyzer_blob=$QUALIFIED_ANALYZER_BLOB
+          discovery_sha=$DISCOVERY_SHA
+          cluster_sha=$CLUSTER_SHA
+          fat_sha=$FAT_SHA
+          conflict_sha=$CONFLICT_SHA
+          ps2sdk_security_commit=$PS2SDK_SECURITY_COMMIT
+          toolchain_container=ps2dev/ps2dev:v2.0.0
+          EOF
+
+      - name: Build sync-control, async-read and async-write ELFs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            ps2dev/ps2dev:v2.0.0 \
+            sh -c 'set -eu; \
+              apk add --no-cache build-base >/dev/null; \
+              build_mode() { \
+                batch="$1"; read_async="$2"; write_async="$3"; label="$4"; \
+                dir="/work/.build/p0-final-async-trees/final$batch"; \
+                cd "$dir"; \
+                make clean >/dev/null 2>&1 || true; \
+                make R5900_BENCH=0 \
+                     RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 \
+                     IMAGE_READ_PAGES=32 IMAGE_READ_ASYNC="$read_async" \
+                     IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC="$write_async" \
+                     IMAGE_WRITE_PROBE=0 \
+                     MC_INSPECTOR.ELF; \
+                cp MC_INSPECTOR.ELF "/work/artifacts/final-async/elf/${label}-conflict${batch}.ELF"; \
+                mips64r5900el-ps2-elf-size MC_INSPECTOR.ELF \
+                  > "/work/artifacts/final-async/elf/${label}-conflict${batch}.ELF.size.txt"; \
+                cd /work; \
+              }; \
+              for batch in 16 32 64; do \
+                build_mode "$batch" 0 0 FINAL-ASYNC-SOURCE-SYNC; \
+                build_mode "$batch" 1 0 FINAL-ASYNC-READ; \
+                build_mode "$batch" 0 1 FINAL-ASYNC-WRITE; \
+              done'
+
+          sha256sum artifacts/final-async/elf/*.ELF > artifacts/final-async/elf/ELF_SHA256SUMS.txt
+
+          for batch in 16 32 64; do
+            sync="artifacts/final-async/elf/FINAL-ASYNC-SOURCE-SYNC-conflict$batch.ELF"
+            read="artifacts/final-async/elf/FINAL-ASYNC-READ-conflict$batch.ELF"
+            write="artifacts/final-async/elf/FINAL-ASYNC-WRITE-conflict$batch.ELF"
+            ! cmp -s "$sync" "$read"
+            ! cmp -s "$sync" "$write"
+          done
+
+      - name: Write async A-B protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > artifacts/final-async/P0_FINAL_ASYNC_AB_README.txt <<'EOF'
+          P0 reconciled async real-hardware A/B
+          =====================================
+
+          Each conflict16/32/64 family uses identical composed source.
+
+          FINAL-ASYNC-SOURCE-SYNC:
+            IMAGE_READ_ASYNC=0, IMAGE_WRITE_ASYNC=0
+            This is the correct same-source control for judging async impact.
+
+          FINAL-ASYNC-READ:
+            IMAGE_READ_ASYNC=1, IMAGE_WRITE_ASYNC=0
+            One speculative sequential fileXio read may be outstanding while EE
+            consumes the current read buffer. The close bridge drains ownership
+            before fileXioClose and restores FXIO_WAIT.
+
+          FINAL-ASYNC-WRITE:
+            IMAGE_READ_ASYNC=0, IMAGE_WRITE_ASYNC=1
+            One fileXio write may be outstanding while the producer fills the
+            second write slot. Direct producer -> write-slot Reserve/Commit remains enabled.
+
+          There is deliberately no READ_ASYNC=1 + WRITE_ASYNC=1 ELF. The pinned
+          fileXio client exposes one global block/completion state, so simultaneous
+          read and write NOWAIT ownership is rejected at build time.
+
+          Correctness is a hard gate. Use the same console/card/USB/filesystem,
+          image, direction and workload. Record at least 20 valid runs per candidate
+          where practical and report p50/p95/p99/max plus full operation time.
+
+          For async-read compare IMAGE-IO read async_submits / async_ready / async_waits /
+          async_wait_ticks and read service percentiles against FINAL-ASYNC-SOURCE-SYNC.
+
+          For async-write compare IMAGE-IO write async_submits / async_ready / async_waits /
+          async_wait_ticks and write service percentiles against FINAL-ASYNC-SOURCE-SYNC.
+
+          A high async_wait count with little or no operation-time reduction means the
+          overlap window is too small or the consumer reaches the wait boundary too soon.
+          Ready hits are useful evidence of hidden latency, but only end-to-end real-PS2
+          operation timing decides whether the candidate is worth promoting.
+          EOF
+
+      - name: Upload reconciled async hardware pack
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS2-MCI-P0-final-async-${{ github.sha }}
+          path: artifacts/final-async/
+          if-no-files-found: error
+          retention-days: 30
