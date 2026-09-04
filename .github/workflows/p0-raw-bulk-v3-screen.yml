@@ -1,0 +1,132 @@
+name: P0 Raw Bulk v3 Screen Pack
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [perf/p0-raw-bulk-v3]
+    paths: ['.github/workflows/p0-raw-bulk-v3-screen.yml']
+
+permissions:
+  contents: read
+
+env:
+  BASE_SHA: c88f50787b15bf253e11e5bc75017ac1ed4cdd79
+  PS2SDK_SECURITY_COMMIT: a13b5971ec0e39c7ba8b8559b80a4e81c8425352
+  DISCOVERY_SHA: f82c536de1c872214699856df43652d509807295
+  CLUSTER_SHA: ec5416b29ff18f578a87c4a2ae123292635f8942
+  FAT_SHA: 613e73e411bba75e6670556b3114c4c48c0e4174
+  CONFLICT_SHA: 595594ed966981af5f43603ae8036269cf1e6e45
+  TRUSTED_VERIFY_SHA: 4053b7a2762ab229bf705a0bd70a28404d8ec54c
+  FUSION_SHA: 1cda25502170c875697f9f54f588045c3f0a54e9
+  FUSION_BLOB: 365a0aa45435884d30887625de023da162d8ea01
+
+jobs:
+  build-screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+
+      - name: Extract FINAL-SAFE v3 transforms
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git show "$FUSION_SHA:tools/patch_trusted_quick_open_fusion.py" | git hash-object --stdin)" = "$FUSION_BLOB"
+          t=.build/raw-v3-transformers; rm -rf "$t"; mkdir -p "$t"
+          git show "$DISCOVERY_SHA:tools/patch_card_image_discovery_batch.py" > "$t/discovery.py"
+          git show "$CLUSTER_SHA:tools/patch_card_image_fs_cluster_batch.py" > "$t/cluster.py"
+          git show "$FAT_SHA:tools/patch_card_image_fs_meta_cache.py" > "$t/fat.py"
+          git show "$CONFLICT_SHA:tools/patch_card_image_fs_conflict_batch.py" > "$t/conflict.py"
+          git show "$TRUSTED_VERIFY_SHA:tools/patch_diag_wrap_trusted_verify_no_readahead.py" > "$t/trusted.py"
+          git show "$FUSION_SHA:tools/patch_trusted_quick_open_fusion.py" > "$t/fusion.py"
+          python3 -m py_compile "$t"/*.py
+          sha256sum "$t"/*.py > "$t/SHA256SUMS"
+          python3 tools/verify_card_math.py
+
+      - name: Stage pinned PS2SDK personalities
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+          mkdir -p .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+          docker pull ps2dev/ps2dev:v2.0.0
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work -e PS2SDK_SECURITY_COMMIT="$PS2SDK_SECURITY_COMMIT" ps2dev/ps2dev:v2.0.0 sh -c 'set -eu; \
+            apk add --no-cache git python3 build-base >/dev/null; \
+            for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/ps2sdk2-mg/$f"; done; \
+            git init -q /tmp/ps2sdk-src; git -C /tmp/ps2sdk-src remote add origin https://github.com/ps2dev/ps2sdk.git; \
+            git -C /tmp/ps2sdk-src fetch -q --depth 1 origin "$PS2SDK_SECURITY_COMMIT"; git -C /tmp/ps2sdk-src checkout -q FETCH_HEAD; \
+            python3 /work/tools/patch_secrman14_diag.py /tmp/ps2sdk-src/iop/security/secrman; \
+            PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrman clean all; PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrsif clean all; \
+            cp /tmp/ps2sdk-src/iop/security/secrman/irx/secrman.irx /work/.build/ps2sdk2-secr14/secrman.irx; cp /tmp/ps2sdk-src/iop/security/secrsif/irx/secrsif.irx /work/.build/ps2sdk2-secr14/secrsif.irx; \
+            PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman clean; PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman all MCMAN_BUILDING_XMCMAN=0 MCMAN_BUILDING_XMCMAN_V2=0; \
+            python3 /work/tools/patch_raw_mcserv_ports.py /tmp/ps2sdk-src/iop/memorycard/mcserv/src/mcserv.c; PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv clean; \
+            PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv all MCMAN_BUILDING_XMCSERV=0; \
+            cp /tmp/ps2sdk-src/iop/memorycard/mcman/irx/mcman.irx /work/.build/ps2sdk2-raw/mcman.irx; cp /tmp/ps2sdk-src/iop/memorycard/mcserv/irx/mcserv.irx /work/.build/ps2sdk2-raw/mcserv.irx'
+          { sha256sum .build/ps2sdk2-mg/*.irx; sha256sum .build/ps2sdk2-secr14/*.irx; sha256sum .build/ps2sdk2-raw/*.irx; } > .build/RAW_V3_IRX_SHA256.txt
+
+      - name: Compose FINAL-SAFE v3 source for every conflict batch
+        shell: bash
+        run: |
+          set -euo pipefail
+          t=.build/raw-v3-transformers; trees=.build/raw-v3-trees; rm -rf "$trees"; mkdir -p "$trees"
+          for batch in 16 32 64; do
+            dir="$trees/final$batch"; mkdir -p "$dir"; git archive "$BASE_SHA" | tar -x -C "$dir"
+            mkdir -p "$dir/.build"; cp -a .build/ps2sdk2-* "$dir/.build/"
+            python3 "$t/discovery.py" "$dir/src/card_image.c"
+            python3 "$t/cluster.py" "$dir/src/card_image_fs.c"
+            python3 "$t/fat.py" "$dir/src/card_image_fs.c"
+            python3 "$t/conflict.py" --batch-size "$batch" "$dir/src/card_image_fs.c"
+            python3 "$t/trusted.py" "$dir/src/diag_wrap.c"
+            python3 "$t/fusion.py" "$dir"
+            grep -q "#define FS_TARGET_CONFLICT_BATCH $batch" "$dir/src/card_image_fs.c"
+            grep -q 'ownership=quick-open' "$dir/src/diag_wrap.c"
+          done
+
+      - name: Build controlled raw-bulk matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/raw-bulk-v3/elf artifacts/raw-bulk-v3/provenance
+          cp .build/raw-v3-transformers/SHA256SUMS artifacts/raw-bulk-v3/provenance/
+          cp .build/RAW_V3_IRX_SHA256.txt artifacts/raw-bulk-v3/provenance/
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work ps2dev/ps2dev:v2.0.0 sh -c 'set -eu; apk add --no-cache build-base >/dev/null; \
+            build_one() { cb="$1"; pages="$2"; async="$3"; dir="/work/.build/raw-v3-trees/final$cb"; cd "$dir"; rm -f MC_INSPECTOR.ELF src/*.o ./*.o ./*_irx.c; \
+              make R5900_BENCH=0 RAW_BULK_PAGES="$pages" RAW_BULK_ASYNC="$async" IMAGE_READ_PAGES=32 IMAGE_READ_ASYNC=0 IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0 IMAGE_WRITE_PROBE=0 MC_INSPECTOR.ELF; \
+              out="/work/artifacts/raw-bulk-v3/elf/FINAL-SAFE-V3-conflict${cb}-raw${pages}-async${async}.ELF"; cp MC_INSPECTOR.ELF "$out"; mips64r5900el-ps2-elf-size MC_INSPECTOR.ELF > "$out.size.txt"; }; \
+            for cb in 16 32 64; do build_one "$cb" 16 0; build_one "$cb" 8 0; build_one "$cb" 16 1; build_one "$cb" 8 1; done'
+          sha256sum artifacts/raw-bulk-v3/elf/*.ELF > artifacts/raw-bulk-v3/elf/ELF_SHA256SUMS.txt
+
+      - name: Write staged hardware protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > artifacts/raw-bulk-v3/README.txt <<'EOF'
+          P0 raw-bulk v3 screening pack
+          =============================
+
+          DO NOT benchmark all 12 candidates immediately.
+
+          1. First choose conflict16/32/64 using FINAL-SAFE v3.
+          2. For that winning conflict batch only, compare:
+             raw16 async0 = 8192-B blocking baseline
+             raw8  async0 = 4096-B blocking candidate
+             raw16 async1 = one-deep prefetch, 8192-B batch
+             raw8  async1 = one-deep prefetch, 4096-B batch
+          3. Use 5 alternating screening runs, then >=20 valid runs for survivors.
+          4. Correctness hash and full image verification are hard gates.
+          5. Report p50/p95/p99/max plus RAW-BULK-PERF rpc/wait counters.
+
+          The pack contains all conflict families so the hardware winner can be
+          tested later without rebuilding CI. It does not imply a 12-way hardware race.
+          EOF
+          cat > artifacts/raw-bulk-v3/RESULTS_TEMPLATE.csv <<'EOF'
+          conflict_batch,raw_pages,raw_async,run_index,operation_ticks,rpc_calls,rpc_ticks,async_submits,async_ready,async_waits,async_wait_ticks,p50_ticks,p95_ticks,p99_ticks,max_ticks,correctness_hash,verify_result,notes
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PS2-MCI-P0-raw-bulk-v3-screen-${{ github.sha }}
+          path: artifacts/raw-bulk-v3/
+          if-no-files-found: error
+          retention-days: 30
