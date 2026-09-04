@@ -240,7 +240,7 @@ jobs:
                 batch="$1"; read_async="$2"; write_async="$3"; label="$4"; \
                 dir="/work/.build/p0-final-async-trees/final$batch"; \
                 cd "$dir"; \
-                make clean >/dev/null 2>&1 || true; \
+                rm -f MC_INSPECTOR.ELF src/*.o ./*.o ./*_irx.c; \
                 make R5900_BENCH=0 \
                      RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 \
                      IMAGE_READ_PAGES=32 IMAGE_READ_ASYNC="$read_async" \
