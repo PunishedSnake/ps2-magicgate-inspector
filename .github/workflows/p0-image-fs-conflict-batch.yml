@@ -1,0 +1,198 @@
+name: P0 Image FS Conflict Batch
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - perf/p0-image-fs-conflict-batch
+    paths:
+      - 'src/card_image_fs.c'
+      - 'tools/patch_card_image_fs_conflict_batch.py'
+      - '.github/workflows/p0-image-fs-conflict-batch.yml'
+
+permissions:
+  contents: read
+
+env:
+  DIRECT_SLOT_BASE_SHA: c88f50787b15bf253e11e5bc75017ac1ed4cdd79
+  PS2SDK_SECURITY_COMMIT: a13b5971ec0e39c7ba8b8559b80a4e81c8425352
+
+jobs:
+  build-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout conflict-batch experiment
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Materialize controlled worktrees
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$DIRECT_SLOT_BASE_SHA"
+          mkdir -p .build/worktrees artifacts/p0-image-fs-conflict-batch
+          git worktree add --detach .build/worktrees/baseline "$DIRECT_SLOT_BASE_SHA"
+          git worktree add --detach .build/worktrees/batch16 "$GITHUB_SHA"
+          git worktree add --detach .build/worktrees/batch64 "$GITHUB_SHA"
+          git worktree add --detach .build/worktrees/probe32 "$GITHUB_SHA"
+
+      - name: Stage pinned PS2SDK personalities
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+          docker pull ps2dev/ps2dev:v2.0.0
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" -w /work \
+            -e PS2SDK_SECURITY_COMMIT="$PS2SDK_SECURITY_COMMIT" \
+            ps2dev/ps2dev:v2.0.0 sh -c 'set -eu; \
+              apk add --no-cache git python3 build-base >/dev/null; \
+              for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/ps2sdk2-mg/$f"; done; \
+              git init -q /tmp/ps2sdk-src; \
+              git -C /tmp/ps2sdk-src remote add origin https://github.com/ps2dev/ps2sdk.git; \
+              git -C /tmp/ps2sdk-src fetch -q --depth 1 origin "$PS2SDK_SECURITY_COMMIT"; \
+              git -C /tmp/ps2sdk-src checkout -q FETCH_HEAD; \
+              python3 /work/tools/patch_secrman14_diag.py /tmp/ps2sdk-src/iop/security/secrman; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrman clean all; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrsif clean all; \
+              cp /tmp/ps2sdk-src/iop/security/secrman/irx/secrman.irx /work/.build/ps2sdk2-secr14/secrman.irx; \
+              cp /tmp/ps2sdk-src/iop/security/secrsif/irx/secrsif.irx /work/.build/ps2sdk2-secr14/secrsif.irx; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman all MCMAN_BUILDING_XMCMAN=0 MCMAN_BUILDING_XMCMAN_V2=0; \
+              python3 /work/tools/patch_raw_mcserv_ports.py /tmp/ps2sdk-src/iop/memorycard/mcserv/src/mcserv.c; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv all MCMAN_BUILDING_XMCSERV=0; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcman/irx/mcman.irx /work/.build/ps2sdk2-raw/mcman.irx; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcserv/irx/mcserv.irx /work/.build/ps2sdk2-raw/mcserv.irx'
+          for tree in .build/worktrees/baseline .build/worktrees/batch16 .build/worktrees/batch64 .build/worktrees/probe32; do
+            mkdir -p "$tree/.build"
+            cp -a .build/ps2sdk2-mg "$tree/.build/"
+            cp -a .build/ps2sdk2-secr14 "$tree/.build/"
+            cp -a .build/ps2sdk2-raw "$tree/.build/"
+          done
+
+      - name: Apply guarded variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp src/card_image_fs.c artifacts/p0-image-fs-conflict-batch/card_image_fs-before.c
+          python3 tools/patch_card_image_fs_conflict_batch.py --batch-size 32 src/card_image_fs.c
+          python3 .build/worktrees/batch16/tools/patch_card_image_fs_conflict_batch.py --batch-size 16 .build/worktrees/batch16/src/card_image_fs.c
+          python3 .build/worktrees/batch64/tools/patch_card_image_fs_conflict_batch.py --batch-size 64 .build/worktrees/batch64/src/card_image_fs.c
+          python3 .build/worktrees/probe32/tools/patch_card_image_fs_conflict_batch.py --batch-size 32 --probe .build/worktrees/probe32/src/card_image_fs.c
+          diff -u artifacts/p0-image-fs-conflict-batch/card_image_fs-before.c src/card_image_fs.c > artifacts/p0-image-fs-conflict-batch/CONFLICT_BATCH32.patch || test $? -eq 1
+          python3 - <<'PY'
+          from pathlib import Path
+          checks = {
+              'src/card_image_fs.c': 32,
+              '.build/worktrees/batch16/src/card_image_fs.c': 16,
+              '.build/worktrees/batch64/src/card_image_fs.c': 64,
+          }
+          for path, batch in checks.items():
+              text = Path(path).read_text()
+              assert f'#define FS_TARGET_CONFLICT_BATCH {batch}' in text
+              start = text.index('int MciImageFsRefreshTargetConflicts(')
+              end = text.index('static int RecordCreated(', start)
+              fn = text[start:end]
+              assert 'mcGetDir(target_port, 0, "/*", mode, FS_TARGET_CONFLICT_BATCH' in fn
+              assert 'mode = 1;' in fn
+              assert 'TargetExists(' not in text
+              assert 'char path[MCI_IMAGE_SAVE_PATH_MAX]' not in fn
+          print('Conflict batch source contracts: PASS')
+          PY
+
+      - name: Build baseline, batch matrix and probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work \
+            ps2dev/ps2dev:v2.0.0 sh -c 'set -eu; \
+              apk add --no-cache build-base >/dev/null; \
+              FLAGS="R5900_BENCH=0 RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 IMAGE_READ_PAGES=32 IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0 IMAGE_WRITE_PROBE=0"; \
+              build_one() { \
+                path="$1"; name="$2"; \
+                cd "/work/$path"; \
+                make $FLAGS MC_INSPECTOR.ELF; \
+                cp MC_INSPECTOR.ELF "/work/artifacts/p0-image-fs-conflict-batch/$name.ELF"; \
+                cp src/card_image_fs.o "/work/artifacts/p0-image-fs-conflict-batch/$name-card_image_fs.o"; \
+                mips64r5900el-ps2-elf-size MC_INSPECTOR.ELF src/card_image_fs.o > "/work/artifacts/p0-image-fs-conflict-batch/$name.size.txt"; \
+                cd /work; \
+              }; \
+              build_one .build/worktrees/baseline direct-slot-fs-baseline; \
+              build_one .build/worktrees/batch16 image-fs-conflict-batch16; \
+              build_one . image-fs-conflict-batch32; \
+              build_one .build/worktrees/batch64 image-fs-conflict-batch64; \
+              build_one .build/worktrees/probe32 image-fs-conflict-batch32-probe; \
+              strings /work/artifacts/p0-image-fs-conflict-batch/image-fs-conflict-batch32-probe.ELF | grep -q IMAGE-FS-CONFLICT; \
+              for f in image-fs-conflict-batch16 image-fs-conflict-batch32 image-fs-conflict-batch64; do \
+                if strings "/work/artifacts/p0-image-fs-conflict-batch/$f.ELF" | grep -q IMAGE-FS-CONFLICT; then \
+                  echo "ERROR: timing candidate contains probe logging: $f"; exit 1; \
+                fi; \
+              done'
+
+      - name: Write hardware A-B protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > artifacts/p0-image-fs-conflict-batch/README.txt <<'EOF'
+          P0 selective-restore target conflict batching experiment
+
+          POTWIERDZONE - pinned PS2SDK a13b597:
+            EE libmc passes maxent and the output table through one mcGetDir RPC.
+            XMCSERV _McGetDir loops over entries inside that RPC and DMAs each
+            sceMcTblGetDir to EE. MCMAN mode=0 initializes the wildcard scan;
+            nonzero mode resumes the saved directory cursor.
+
+          Baseline application behavior:
+            one exact-path mcGetDir(maxent=1) + mcSync per source save name.
+            With N saves this creates up to N separate EE<->IOP round trips.
+
+          Candidate behavior:
+            scan target root with "/*" in batches and compare names in EE RAM.
+            Final import still repeats conflict refresh immediately before writes,
+            so the safety boundary against card changes/hot-swap is preserved.
+
+          Matrix:
+            batch16 = 1 KiB EE result table per RPC
+            batch32 = 2 KiB EE result table per RPC
+            batch64 = 4 KiB EE result table per RPC
+          sceMcTblGetDir is 64 bytes. Current libmc writes back the whole output
+          table before the RPC, so the largest batch is not assumed fastest on the
+          R5900 8 KiB D-cache. Real hardware decides.
+
+          Probe32 logs IMAGE-FS-CONFLICT with RPC-batch count, returned root entries,
+          EE name comparisons and conflicts. Do not use the probe ELF for timing.
+
+          Correctness gate:
+            for both mc0 and mc1, every source save must receive exactly the same
+            conflict bit as baseline, including zero-conflict, all-conflict and mixed
+            cases. Repeat after changing/swapping destination card before import.
+            Import must retain its independent final conflict refresh and must never
+            overwrite an existing top-level object.
+
+          Hardware A/B:
+            same SCPH/revision, destination card contents, source image/list, IRX set
+            and PS2SDK commit. Test lists of 1, 8, 32, 64 and >=100 source saves where
+            available, with sparse and dense target roots. Report p50/p95/p99/max of
+            destination refresh and whole selective-restore preflight plus errors.
+            A winning batch must reduce latency without changing any conflict result.
+
+          PCSX2 can validate behavior but cannot promote the timing winner.
+          EOF
+          {
+            echo "baseline=$DIRECT_SLOT_BASE_SHA"
+            echo "candidate=$GITHUB_SHA"
+            echo "ps2sdk=$PS2SDK_SECURITY_COMMIT"
+          } > artifacts/p0-image-fs-conflict-batch/REVISIONS.txt
+          sha256sum artifacts/p0-image-fs-conflict-batch/*.ELF > artifacts/p0-image-fs-conflict-batch/SHA256SUMS.txt
+          cat artifacts/p0-image-fs-conflict-batch/*.size.txt
+
+      - name: Upload conflict-batch experiment
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS2-MCI-P0-image-fs-conflict-batch-${{ github.sha }}
+          path: artifacts/p0-image-fs-conflict-batch/
+          if-no-files-found: error
+          retention-days: 30
