@@ -1,0 +1,117 @@
+name: P0 Hardware Campaign v3 Complete
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [perf/p0-hardware-campaign]
+    paths: ['.github/workflows/p0-hardware-campaign-v3-complete.yml']
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  V3_RUN_ID: '33918599735'
+  V3_SOURCE_SHA: a3e84f94485bd745736980ec99ccf0b2e2bcbe8a
+  V3_ARTIFACT_ID: '9954108143'
+  V3_ARTIFACT_DIGEST: sha256:dc0eb0ea13e28442192d3aff14a61aba4e174766faec6d9762f2a1a18b06fc5a
+  SAFE_V2_RUN_ID: '33914313656'
+  SAFE_V2_SOURCE_SHA: 445ddd31efc6f9c88f2652dcfafee6ca8ff32808
+  SAFE_V2_ARTIFACT_ID: '9952574690'
+  SAFE_V2_ARTIFACT_DIGEST: sha256:2edfd7e36cd2d056b64af286c0de58042a790d2897ed8f1db41f3c0fcddd6a09
+
+jobs:
+  complete:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify immutable source packs
+        env: {GH_TOKEN: '${{ github.token }}'}
+        shell: bash
+        run: |
+          set -euo pipefail
+          verify() {
+            id="$1"; digest="$2"; run_id="$3"; sha="$4"; file="$5"
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id" > "$file"
+            python3 - "$file" "$id" "$digest" "$run_id" "$sha" <<'PY'
+          import json,sys
+          f,i,d,r,s=sys.argv[1:]
+          x=json.load(open(f,encoding='utf-8')); wr=x.get('workflow_run') or {}
+          assert x['id']==int(i) and x.get('expired') is False and x.get('digest')==d
+          assert wr.get('id')==int(r) and wr.get('head_sha')==s
+          PY
+          }
+          mkdir -p .build/v3complete-meta
+          verify "$V3_ARTIFACT_ID" "$V3_ARTIFACT_DIGEST" "$V3_RUN_ID" "$V3_SOURCE_SHA" .build/v3complete-meta/v3.json
+          verify "$SAFE_V2_ARTIFACT_ID" "$SAFE_V2_ARTIFACT_DIGEST" "$SAFE_V2_RUN_ID" "$SAFE_V2_SOURCE_SHA" .build/v3complete-meta/safe-v2.json
+
+      - name: Download v3 campaign and exact BASE
+        env: {GH_TOKEN: '${{ github.token }}'}
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=.build/v3complete; rm -rf "$root"; mkdir -p "$root/campaign" "$root/safe-v2"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$V3_ARTIFACT_ID/zip" > "$root/v3.zip"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$SAFE_V2_ARTIFACT_ID/zip" > "$root/safe-v2.zip"
+          unzip -tq "$root/v3.zip"; unzip -tq "$root/safe-v2.zip"
+          unzip -q "$root/v3.zip" -d "$root/campaign"
+          unzip -q "$root/safe-v2.zip" -d "$root/safe-v2"
+          base=$(find "$root/safe-v2" -type f -name 'BASE-c88f507.ELF' -print)
+          test "$(printf '%s\n' "$base" | sed '/^$/d' | wc -l)" -eq 1
+          cp "$base" "$root/campaign/HARDWARE_ELFS/05_BASE-c88f507.ELF"
+          sha256sum "$root/campaign/HARDWARE_ELFS"/*.ELF "$root/campaign/HARDWARE_ELFS"/*.zip > "$root/campaign/HARDWARE_ELFS/HARDWARE_PAYLOAD_SHA256.txt"
+          sha256sum "$root/v3.zip" "$root/safe-v2.zip" > "$root/campaign/PROVENANCE/COMPLETE_SOURCE_ZIPS_SHA256.txt"
+          cp .build/v3complete-meta/*.json "$root/campaign/PROVENANCE/"
+
+      - name: Add offline results analyzer
+        shell: bash
+        run: |
+          cat > .build/v3complete/campaign/ANALYZE_RESULTS.py <<'PY'
+          #!/usr/bin/env python3
+          import csv, math, sys
+          from collections import defaultdict
+
+          METRICS = {'operation_ticks','p50_ticks','p95_ticks','p99_ticks','max_ticks','run_index','sequence'}
+
+          def percentile(values, q):
+              v=sorted(values)
+              if not v: return None
+              return v[max(0, math.ceil(q*len(v))-1)]
+
+          def key_for(row):
+              if row.get('variant'):
+                  return row['variant']
+              bits=[]
+              for k in ('conflict_batch','raw_pages','raw_async'):
+                  if row.get(k): bits.append(f'{k}={row[k]}')
+              return ','.join(bits) or 'all'
+
+          if len(sys.argv) < 2:
+              raise SystemExit('usage: ANALYZE_RESULTS.py results1.csv [results2.csv ...]')
+          for path in sys.argv[1:]:
+              groups=defaultdict(list)
+              with open(path,newline='',encoding='utf-8-sig') as f:
+                  for row in csv.DictReader(f):
+                      x=(row.get('operation_ticks') or '').strip()
+                      try: x=int(x)
+                      except ValueError: continue
+                      if x > 0: groups[key_for(row)].append(x)
+              print(f'\n{path}')
+              for key, vals in sorted(groups.items()):
+                  print(f'{key}: n={len(vals)} p50={percentile(vals,.50)} p95={percentile(vals,.95)} p99={percentile(vals,.99)} max={max(vals)}')
+          PY
+          chmod +x .build/v3complete/campaign/ANALYZE_RESULTS.py
+          cat > .build/v3complete/campaign/COMPLETE_NOTE.txt <<'EOF'
+          v3-complete adds the exact BASE-c88f507 ELF required by Stage 5 and an
+          offline standard-library analyzer for filled run sheets. No timing ELF
+          from the original v3 campaign was rebuilt or modified.
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PS2-MCI-P0-hardware-campaign-v3-COMPLETE-${{ github.sha }}
+          path: .build/v3complete/campaign/
+          if-no-files-found: error
+          retention-days: 30
