@@ -27,12 +27,18 @@ src/raw_bulk_read.o: EE_CFLAGS += \
 	-DMCI_RAW_BULK_ASYNC=$(RAW_BULK_ASYNC)
 
 # Sequential verification/readback batching is its own P0 axis. Production uses
-# the established 32-page refill while CI also builds 16/64-page candidates.
-# This remains synchronous for now so read batch size can be isolated from the
-# separate global fileXio NOWAIT experiment used by image output.
+# the established 16896-byte refill: 33 VMC records or 32 PCSX2 records, both
+# without splitting a record. Async candidates keep exactly one next refill in
+# flight while EE consumes the current buffer. The default remains synchronous.
 IMAGE_READ_PAGES ?= 32
+IMAGE_READ_ASYNC ?= 0
 src/image_read_ahead.o: EE_CFLAGS += \
-	-DMCI_IMAGE_READ_AHEAD_PAGES=$(IMAGE_READ_PAGES)
+	-DMCI_IMAGE_READ_AHEAD_PAGES=$(IMAGE_READ_PAGES) \
+	-DMCI_IMAGE_READ_AHEAD_ASYNC=$(IMAGE_READ_ASYNC)
+# fileXio block mode/completion state is global. The close wrapper only needs the
+# read-side drain hook in explicit async-read candidates; compile it out otherwise.
+src/image_write_behind.o: EE_CFLAGS += \
+	-DMCI_IMAGE_READ_AHEAD_ASYNC=$(IMAGE_READ_ASYNC)
 
 # USB image output is a separate A/B axis. Keep production on the existing
 # synchronous 32-record batch until real hardware proves a different batch or
@@ -43,6 +49,12 @@ IMAGE_WRITE_ASYNC ?= 0
 src/image_write_behind.o: EE_CFLAGS += \
 	-DMCI_IMAGE_WRITE_PAGES=$(IMAGE_WRITE_PAGES) \
 	-DMCI_IMAGE_WRITE_ASYNC=$(IMAGE_WRITE_ASYNC)
+
+# CURRENT IMPLEMENTATION: fileXio has one global block mode/completion state.
+# Read and write NOWAIT pipelines therefore cannot own it simultaneously.
+ifeq ($(IMAGE_READ_ASYNC)$(IMAGE_WRITE_ASYNC),11)
+$(error IMAGE_READ_ASYNC=1 and IMAGE_WRITE_ASYNC=1 cannot be enabled together)
+endif
 
 # These two v2 composition sources intentionally call low-level fileXio/newlib
 # side by side. Existing backend sources already opt in locally, so keep this
