@@ -1,0 +1,141 @@
+name: P0 Final Async v3 Qualified
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [perf/p0-final-async-v3]
+    paths: ['.github/workflows/p0-final-async-v3-qualified.yml']
+
+permissions:
+  contents: read
+
+env:
+  ASYNC_SOURCE_SHA: c0710d7bcda5a86a24d96a6156539610ec77dfa0
+  PS2SDK_SECURITY_COMMIT: a13b5971ec0e39c7ba8b8559b80a4e81c8425352
+  DISCOVERY_SHA: f82c536de1c872214699856df43652d509807295
+  CLUSTER_SHA: ec5416b29ff18f578a87c4a2ae123292635f8942
+  FAT_SHA: 613e73e411bba75e6670556b3114c4c48c0e4174
+  CONFLICT_SHA: 595594ed966981af5f43603ae8036269cf1e6e45
+  TRUSTED_VERIFY_SHA: 4053b7a2762ab229bf705a0bd70a28404d8ec54c
+  FUSION_BRANCH_HEAD: 1cda25502170c875697f9f54f588045c3f0a54e9
+  FUSION_TRANSFORM_ORIGIN: 59500a2aa9866f1bbac3662236deeab67ee6f36a
+  FUSION_TRANSFORM_BLOB: 365a0aa45435884d30887625de023da162d8ea01
+  READ_C_BLOB: a0960222c52848c2d7570d95f9eff0bd9b97f131
+  READ_H_BLOB: a3e3c4298b1ebadeeffee2f4e8bbfc927acb02f7
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+
+      - name: Verify immutable inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git show "$ASYNC_SOURCE_SHA:src/image_read_ahead.c" | git hash-object --stdin)" = "$READ_C_BLOB"
+          test "$(git show "$ASYNC_SOURCE_SHA:src/image_read_ahead.h" | git hash-object --stdin)" = "$READ_H_BLOB"
+          git fetch --no-tags origin "refs/heads/perf/p0-trusted-quick-open-fusion:refs/remotes/origin/perf/p0-trusted-quick-open-fusion"
+          test "$(git rev-parse refs/remotes/origin/perf/p0-trusted-quick-open-fusion)" = "$FUSION_BRANCH_HEAD"
+          test "$(git show "$FUSION_BRANCH_HEAD:tools/patch_trusted_quick_open_fusion.py" | git hash-object --stdin)" = "$FUSION_TRANSFORM_BLOB"
+          test "$(git show "$FUSION_TRANSFORM_ORIGIN:tools/patch_trusted_quick_open_fusion.py" | git hash-object --stdin)" = "$FUSION_TRANSFORM_BLOB"
+
+      - name: Extract transformers and correctness harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=.build/av3q-transformers; rm -rf "$out"; mkdir -p "$out"
+          git show "$ASYNC_SOURCE_SHA:tools/patch_final_async_close_bridge.py" > "$out/close.py"
+          git show "$DISCOVERY_SHA:tools/patch_card_image_discovery_batch.py" > "$out/discovery.py"
+          git show "$CLUSTER_SHA:tools/patch_card_image_fs_cluster_batch.py" > "$out/cluster.py"
+          git show "$FAT_SHA:tools/patch_card_image_fs_meta_cache.py" > "$out/fat.py"
+          git show "$CONFLICT_SHA:tools/patch_card_image_fs_conflict_batch.py" > "$out/conflict.py"
+          git show "$TRUSTED_VERIFY_SHA:tools/patch_diag_wrap_trusted_verify_no_readahead.py" > "$out/trusted.py"
+          git show "$FUSION_BRANCH_HEAD:tools/patch_trusted_quick_open_fusion.py" > "$out/fusion.py"
+          python3 -m py_compile "$out"/*.py
+          sha256sum "$out"/*.py > "$out/SHA256SUMS"
+          python3 tools/verify_card_math.py
+
+      - name: Stage pinned PS2SDK personalities
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+          mkdir -p .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+          docker pull ps2dev/ps2dev:v2.0.0
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work -e PS2SDK_SECURITY_COMMIT="$PS2SDK_SECURITY_COMMIT" ps2dev/ps2dev:v2.0.0 sh -c 'set -eu; \
+            apk add --no-cache git python3 build-base >/dev/null; \
+            for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/ps2sdk2-mg/$f"; done; \
+            git init -q /tmp/ps2sdk-src; git -C /tmp/ps2sdk-src remote add origin https://github.com/ps2dev/ps2sdk.git; \
+            git -C /tmp/ps2sdk-src fetch -q --depth 1 origin "$PS2SDK_SECURITY_COMMIT"; git -C /tmp/ps2sdk-src checkout -q FETCH_HEAD; \
+            python3 /work/tools/patch_secrman14_diag.py /tmp/ps2sdk-src/iop/security/secrman; \
+            PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrman clean all; PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrsif clean all; \
+            cp /tmp/ps2sdk-src/iop/security/secrman/irx/secrman.irx /work/.build/ps2sdk2-secr14/secrman.irx; cp /tmp/ps2sdk-src/iop/security/secrsif/irx/secrsif.irx /work/.build/ps2sdk2-secr14/secrsif.irx; \
+            PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman clean; PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman all MCMAN_BUILDING_XMCMAN=0 MCMAN_BUILDING_XMCMAN_V2=0; \
+            python3 /work/tools/patch_raw_mcserv_ports.py /tmp/ps2sdk-src/iop/memorycard/mcserv/src/mcserv.c; PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv clean; \
+            PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv all MCMAN_BUILDING_XMCSERV=0; \
+            cp /tmp/ps2sdk-src/iop/memorycard/mcman/irx/mcman.irx /work/.build/ps2sdk2-raw/mcman.irx; cp /tmp/ps2sdk-src/iop/memorycard/mcserv/irx/mcserv.irx /work/.build/ps2sdk2-raw/mcserv.irx'
+          { sha256sum .build/ps2sdk2-mg/*.irx; sha256sum .build/ps2sdk2-secr14/*.irx; sha256sum .build/ps2sdk2-raw/*.irx; } > .build/AV3Q_IRX_SHA256.txt
+
+      - name: Compose same-source conflict variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          trees=.build/av3q-trees; t=.build/av3q-transformers; rm -rf "$trees"; mkdir -p "$trees"
+          for batch in 16 32 64; do
+            dir="$trees/final$batch"; mkdir -p "$dir"; git archive "$ASYNC_SOURCE_SHA" | tar -x -C "$dir"
+            mkdir -p "$dir/.build"; cp -a .build/ps2sdk2-* "$dir/.build/"
+            python3 "$t/close.py" "$dir/src/image_write_behind.c"
+            python3 "$t/discovery.py" "$dir/src/card_image.c"
+            python3 "$t/cluster.py" "$dir/src/card_image_fs.c"
+            python3 "$t/fat.py" "$dir/src/card_image_fs.c"
+            python3 "$t/conflict.py" --batch-size "$batch" "$dir/src/card_image_fs.c"
+            python3 "$t/trusted.py" "$dir/src/diag_wrap.c"
+            python3 "$t/fusion.py" "$dir"
+            grep -q 'MciImageReadAheadDrain()' "$dir/src/image_write_behind.c"
+            grep -q "#define FS_TARGET_CONFLICT_BATCH $batch" "$dir/src/card_image_fs.c"
+            grep -q 'ownership=quick-open' "$dir/src/diag_wrap.c"
+            grep -q -- '--wrap=MciCardImageQuickOpenVerify' "$dir/Makefile"
+          done
+          dir="$trees/final32"
+          if make -C "$dir" IMAGE_READ_ASYNC=1 IMAGE_WRITE_ASYNC=1 -n MC_INSPECTOR.ELF >.build/dual-nowait.log 2>&1; then exit 1; fi
+          grep -q 'cannot be enabled together' .build/dual-nowait.log
+
+      - name: Build same-source sync/read/write matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/final-async-v3-qualified/elf artifacts/final-async-v3-qualified/provenance
+          cp .build/av3q-transformers/SHA256SUMS artifacts/final-async-v3-qualified/provenance/
+          cp .build/AV3Q_IRX_SHA256.txt artifacts/final-async-v3-qualified/provenance/
+          cp .build/dual-nowait.log artifacts/final-async-v3-qualified/provenance/
+          cp docs/P0_FINAL_ASYNC_V3_MANIFEST.md artifacts/final-async-v3-qualified/provenance/
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work ps2dev/ps2dev:v2.0.0 sh -c 'set -eu; apk add --no-cache build-base >/dev/null; \
+            build_one() { batch="$1"; ra="$2"; wa="$3"; label="$4"; dir="/work/.build/av3q-trees/final$batch"; cd "$dir"; rm -f MC_INSPECTOR.ELF src/*.o ./*.o ./*_irx.c; \
+              make R5900_BENCH=0 RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 IMAGE_READ_PAGES=32 IMAGE_READ_ASYNC="$ra" IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC="$wa" IMAGE_WRITE_PROBE=0 MC_INSPECTOR.ELF; \
+              cp MC_INSPECTOR.ELF "/work/artifacts/final-async-v3-qualified/elf/${label}-conflict${batch}.ELF"; \
+              mips64r5900el-ps2-elf-size MC_INSPECTOR.ELF > "/work/artifacts/final-async-v3-qualified/elf/${label}-conflict${batch}.ELF.size.txt"; }; \
+            for batch in 16 32 64; do build_one "$batch" 0 0 FINAL-ASYNC-V3-SOURCE-SYNC; build_one "$batch" 1 0 FINAL-ASYNC-V3-READ; build_one "$batch" 0 1 FINAL-ASYNC-V3-WRITE; done'
+          sha256sum artifacts/final-async-v3-qualified/elf/*.ELF > artifacts/final-async-v3-qualified/elf/ELF_SHA256SUMS.txt
+          for batch in 16 32 64; do
+            s="artifacts/final-async-v3-qualified/elf/FINAL-ASYNC-V3-SOURCE-SYNC-conflict$batch.ELF"
+            r="artifacts/final-async-v3-qualified/elf/FINAL-ASYNC-V3-READ-conflict$batch.ELF"
+            w="artifacts/final-async-v3-qualified/elf/FINAL-ASYNC-V3-WRITE-conflict$batch.ELF"
+            ! cmp -s "$s" "$r"; ! cmp -s "$s" "$w"
+          done
+          cat > artifacts/final-async-v3-qualified/README.txt <<EOF
+          FINAL-ASYNC v3 qualified same-source matrix.
+          integration_sha=$GITHUB_SHA
+          fusion_branch_head=$FUSION_BRANCH_HEAD
+          fusion_transform_blob=$FUSION_TRANSFORM_BLOB
+          Real PS2 remains the timing/correctness arbiter.
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PS2-MCI-P0-final-async-v3-qualified-${{ github.sha }}
+          path: artifacts/final-async-v3-qualified/
+          if-no-files-found: error
+          retention-days: 30
