@@ -1,0 +1,217 @@
+name: P0 Trusted Quick Open Fusion
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - perf/p0-trusted-quick-open-fusion
+    paths:
+      - '.github/workflows/p0-trusted-quick-open-fusion.yml'
+      - 'tools/patch_trusted_quick_open_fusion.py'
+
+permissions:
+  contents: read
+
+env:
+  BASE_SHA: c88f50787b15bf253e11e5bc75017ac1ed4cdd79
+  FUSION_SHA: 59500a2aa9866f1bbac3662236deeab67ee6f36a
+  PS2SDK_SECURITY_COMMIT: a13b5971ec0e39c7ba8b8559b80a4e81c8425352
+
+  DISCOVERY_SHA: f82c536de1c872214699856df43652d509807295
+  CLUSTER_SHA: ec5416b29ff18f578a87c4a2ae123292635f8942
+  FAT_SHA: 613e73e411bba75e6670556b3114c4c48c0e4174
+  CONFLICT_SHA: 595594ed966981af5f43603ae8036269cf1e6e45
+  TRUSTED_VERIFY_SHA: 4053b7a2762ab229bf705a0bd70a28404d8ec54c
+
+jobs:
+  qualify:
+    name: FINAL-SAFE-v2 vs fused trusted quick-open
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+
+    steps:
+      - name: Checkout experiment branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract and syntax-check exact transformers
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=.build/fusion-transformers
+          rm -rf "$out" && mkdir -p "$out"
+          git show "$DISCOVERY_SHA:tools/patch_card_image_discovery_batch.py" > "$out/discovery.py"
+          git show "$CLUSTER_SHA:tools/patch_card_image_fs_cluster_batch.py" > "$out/cluster.py"
+          git show "$FAT_SHA:tools/patch_card_image_fs_meta_cache.py" > "$out/fat_cache.py"
+          git show "$CONFLICT_SHA:tools/patch_card_image_fs_conflict_batch.py" > "$out/conflict.py"
+          git show "$TRUSTED_VERIFY_SHA:tools/patch_diag_wrap_trusted_verify_no_readahead.py" > "$out/trusted_verify.py"
+          git show "$FUSION_SHA:tools/patch_trusted_quick_open_fusion.py" > "$out/fusion.py"
+          chmod +x "$out"/*.py
+          python3 -m py_compile "$out"/*.py
+          sha256sum "$out"/*.py | tee "$out/SHA256SUMS"
+
+      - name: Verify card-math correctness harness
+        shell: bash
+        run: python3 tools/verify_card_math.py
+
+      - name: Stage pinned PS2SDK personalities
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+          mkdir -p .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+          docker pull ps2dev/ps2dev:v2.0.0
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" -w /work \
+            -e PS2SDK_SECURITY_COMMIT="$PS2SDK_SECURITY_COMMIT" \
+            ps2dev/ps2dev:v2.0.0 \
+            sh -c 'set -eu; \
+              apk add --no-cache git python3 build-base >/dev/null; \
+              for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/ps2sdk2-mg/$f"; done; \
+              git init -q /tmp/ps2sdk-src; \
+              git -C /tmp/ps2sdk-src remote add origin https://github.com/ps2dev/ps2sdk.git; \
+              git -C /tmp/ps2sdk-src fetch -q --depth 1 origin "$PS2SDK_SECURITY_COMMIT"; \
+              git -C /tmp/ps2sdk-src checkout -q FETCH_HEAD; \
+              python3 /work/tools/patch_secrman14_diag.py /tmp/ps2sdk-src/iop/security/secrman; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrman clean all; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrsif clean all; \
+              cp /tmp/ps2sdk-src/iop/security/secrman/irx/secrman.irx /work/.build/ps2sdk2-secr14/secrman.irx; \
+              cp /tmp/ps2sdk-src/iop/security/secrsif/irx/secrsif.irx /work/.build/ps2sdk2-secr14/secrsif.irx; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman all MCMAN_BUILDING_XMCMAN=0 MCMAN_BUILDING_XMCMAN_V2=0; \
+              python3 /work/tools/patch_raw_mcserv_ports.py /tmp/ps2sdk-src/iop/memorycard/mcserv/src/mcserv.c; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv all MCMAN_BUILDING_XMCSERV=0; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcman/irx/mcman.irx /work/.build/ps2sdk2-raw/mcman.irx; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcserv/irx/mcserv.irx /work/.build/ps2sdk2-raw/mcserv.irx'
+          {
+            echo 'Normal MagicGate/X-style modules:'; sha256sum .build/ps2sdk2-mg/*.irx
+            echo 'Security modules:'; sha256sum .build/ps2sdk2-secr14/*.irx
+            echo 'Legacy raw-page modules:'; sha256sum .build/ps2sdk2-raw/*.irx
+          } | tee .build/P0_FUSION_IRX_SHA256.txt
+
+      - name: Materialize identical FINAL-SAFE-v2 conflict32 trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          trees=.build/fusion-ab
+          t=.build/fusion-transformers
+          rm -rf "$trees" && mkdir -p "$trees/baseline" "$trees/candidate"
+          for variant in baseline candidate; do
+            git archive "$BASE_SHA" | tar -x -C "$trees/$variant"
+            mkdir -p "$trees/$variant/.build"
+            cp -a .build/ps2sdk2-mg "$trees/$variant/.build/"
+            cp -a .build/ps2sdk2-secr14 "$trees/$variant/.build/"
+            cp -a .build/ps2sdk2-raw "$trees/$variant/.build/"
+            python3 "$t/discovery.py" "$trees/$variant/src/card_image.c"
+            python3 "$t/cluster.py" "$trees/$variant/src/card_image_fs.c"
+            python3 "$t/fat_cache.py" "$trees/$variant/src/card_image_fs.c"
+            python3 "$t/conflict.py" --batch-size 32 "$trees/$variant/src/card_image_fs.c"
+            python3 "$t/trusted_verify.py" "$trees/$variant/src/diag_wrap.c"
+          done
+
+          python3 "$t/fusion.py" "$trees/candidate"
+
+          # Fail closed if someone tries to stack the ownership transform twice.
+          if python3 "$t/fusion.py" "$trees/candidate" >.build/fusion-second-apply.log 2>&1; then
+            echo 'fusion transformer unexpectedly applied twice' >&2
+            exit 1
+          fi
+
+          grep -q 'MciCardImageQuickOpenVerify' "$trees/candidate/src/image_quick_verify.h"
+          grep -q 'ownership=quick-open' "$trees/candidate/src/diag_wrap.c"
+          grep -q 'OpenImage(list->path, list->format, &image, NULL, 1)' "$trees/candidate/src/card_image_fs.c"
+          grep -q -- '--wrap=MciCardImageQuickOpenVerify' "$trees/candidate/Makefile"
+          ! grep -q 'TrustedImportVerifyActive' "$trees/candidate/src/diag_wrap.c"
+
+      - name: Prove fusion touches only expected ownership files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/fusion/source-diffs artifacts/fusion/provenance
+          for f in Makefile src/image_quick_verify.h src/image_quick_verify.c src/card_image_fs.c src/diag_wrap.c; do
+            safe=$(echo "$f" | tr '/' '_')
+            diff -u ".build/fusion-ab/baseline/$f" ".build/fusion-ab/candidate/$f" \
+              > "artifacts/fusion/source-diffs/$safe.diff" || test $? -eq 1
+            test -s "artifacts/fusion/source-diffs/$safe.diff"
+          done
+          cmp .build/fusion-ab/baseline/src/card_image.c .build/fusion-ab/candidate/src/card_image.c
+          cmp .build/fusion-ab/baseline/src/image_read_ahead.c .build/fusion-ab/candidate/src/image_read_ahead.c
+          cmp .build/fusion-ab/baseline/src/image_write_behind.c .build/fusion-ab/candidate/src/image_write_behind.c
+
+      - name: Build FINAL-SAFE-v2 baseline and fused candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/fusion/elf
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" -w /work \
+            ps2dev/ps2dev:v2.0.0 \
+            sh -c 'set -eu; apk add --no-cache build-base >/dev/null; \
+              build_one() { \
+                variant="$1"; output="$2"; dir="/work/.build/fusion-ab/$variant"; cd "$dir"; \
+                rm -f MC_INSPECTOR.ELF src/*.o ./*.o ./*_irx.c; \
+                make R5900_BENCH=0 RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 \
+                     IMAGE_READ_PAGES=32 IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0 \
+                     IMAGE_WRITE_PROBE=0 MC_INSPECTOR.ELF; \
+                cp MC_INSPECTOR.ELF "/work/artifacts/fusion/elf/$output"; \
+                mips64r5900el-ps2-elf-size MC_INSPECTOR.ELF > "/work/artifacts/fusion/elf/$output.size.txt"; \
+              }; \
+              build_one baseline FINAL-SAFE-V2-conflict32.ELF; \
+              build_one candidate P0-TRUSTED-QUICK-OPEN-FUSED-conflict32.ELF'
+          ! cmp -s artifacts/fusion/elf/FINAL-SAFE-V2-conflict32.ELF \
+                   artifacts/fusion/elf/P0-TRUSTED-QUICK-OPEN-FUSED-conflict32.ELF
+          sha256sum artifacts/fusion/elf/*.ELF > artifacts/fusion/elf/ELF_SHA256SUMS.txt
+
+      - name: Archive provenance and hardware protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .build/fusion-transformers/*.py artifacts/fusion/provenance/
+          cp .build/fusion-transformers/SHA256SUMS artifacts/fusion/provenance/TRANSFORMER_SHA256SUMS.txt
+          cp .build/P0_FUSION_IRX_SHA256.txt artifacts/fusion/provenance/
+          cp .build/fusion-second-apply.log artifacts/fusion/provenance/
+          cat > artifacts/fusion/README.txt <<EOF
+          P0 trusted quick-open ownership fusion
+          ======================================
+          baseline_base_sha=$BASE_SHA
+          fusion_transform_sha=$FUSION_SHA
+          ps2sdk_security_commit=$PS2SDK_SECURITY_COMMIT
+          toolchain_container=ps2dev/ps2dev:v2.0.0
+
+          Baseline is FINAL-SAFE-v2 conflict32: same five synchronous transforms.
+          Candidate adds only explicit quick-open ownership transfer.
+
+          Source-level operation delta for selected-save trusted reopen:
+          baseline after quick validation:
+            close(verified fd) -> open(same path) -> lseek(0) -> read(512)
+          candidate:
+            verified fd + already-read page0 ownership transfers directly to OpenImage
+
+          Preserved contracts:
+          - preverify fileXioSync remains in diagnostic wrapper
+          - quick GetStat/known-size/page-zero geometry validation remains
+          - existing filesystem superblock validation remains
+          - full scan/full verify path remains unchanged
+          - logger mass-write pause remains depth-based
+          - on helper error any locally opened fd is closed
+          - on success MciFsImage owns the fd until normal CloseImage/rollback
+
+          This proves removal of duplicate work and build correctness only. Real PS2
+          timing must compare selected-save import p50/p95/p99/max, fileXio telemetry,
+          correctness hash and verify result before promotion.
+          EOF
+          cat > artifacts/fusion/RESULTS_TEMPLATE.csv <<'EOF'
+          variant,run_index,operation_ticks,p50_ticks,p95_ticks,p99_ticks,max_ticks,correctness_hash,verify_result,filexio_errors,notes
+          FINAL-SAFE-V2-conflict32,,,,,,,,,
+          P0-TRUSTED-QUICK-OPEN-FUSED-conflict32,,,,,,,,,
+          EOF
+
+      - name: Upload fusion A-B pack
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS2-MCI-P0-trusted-quick-open-fusion-${{ github.sha }}
+          path: artifacts/fusion/
+          if-no-files-found: error
+          retention-days: 30
