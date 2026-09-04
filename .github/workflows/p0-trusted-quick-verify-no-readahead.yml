@@ -1,0 +1,208 @@
+name: P0 Trusted Quick Verify Read-Ahead Elision
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - perf/p0-trusted-quick-verify-no-readahead
+    paths:
+      - '.github/workflows/p0-trusted-quick-verify-no-readahead.yml'
+      - 'tools/patch_diag_wrap_trusted_verify_no_readahead.py'
+
+permissions:
+  contents: read
+
+env:
+  SAFE_BASE_SHA: c88f50787b15bf253e11e5bc75017ac1ed4cdd79
+  PS2SDK_SECURITY_COMMIT: a13b5971ec0e39c7ba8b8559b80a4e81c8425352
+
+jobs:
+  qualify:
+    name: Same-source trusted verify A-B
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+
+    steps:
+      - name: Checkout experiment branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify baseline ancestry and transformer
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$SAFE_BASE_SHA" HEAD
+          test -x tools/patch_diag_wrap_trusted_verify_no_readahead.py || \
+            chmod +x tools/patch_diag_wrap_trusted_verify_no_readahead.py
+          python3 -m py_compile tools/patch_diag_wrap_trusted_verify_no_readahead.py
+
+      - name: Verify card-math equivalence
+        shell: bash
+        run: python3 tools/verify_card_math.py
+
+      - name: Stage pinned PS2SDK personalities
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+          mkdir -p .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+
+          docker pull ps2dev/ps2dev:v2.0.0
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            -e PS2SDK_SECURITY_COMMIT="$PS2SDK_SECURITY_COMMIT" \
+            ps2dev/ps2dev:v2.0.0 \
+            sh -c 'set -eu; \
+              apk add --no-cache git python3 build-base >/dev/null; \
+              for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do \
+                cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/ps2sdk2-mg/$f"; \
+              done; \
+              git init -q /tmp/ps2sdk-src; \
+              git -C /tmp/ps2sdk-src remote add origin https://github.com/ps2dev/ps2sdk.git; \
+              git -C /tmp/ps2sdk-src fetch -q --depth 1 origin "$PS2SDK_SECURITY_COMMIT"; \
+              git -C /tmp/ps2sdk-src checkout -q FETCH_HEAD; \
+              python3 /work/tools/patch_secrman14_diag.py /tmp/ps2sdk-src/iop/security/secrman; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrman clean all; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrsif clean all; \
+              cp /tmp/ps2sdk-src/iop/security/secrman/irx/secrman.irx /work/.build/ps2sdk2-secr14/secrman.irx; \
+              cp /tmp/ps2sdk-src/iop/security/secrsif/irx/secrsif.irx /work/.build/ps2sdk2-secr14/secrsif.irx; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman all MCMAN_BUILDING_XMCMAN=0 MCMAN_BUILDING_XMCMAN_V2=0; \
+              python3 /work/tools/patch_raw_mcserv_ports.py /tmp/ps2sdk-src/iop/memorycard/mcserv/src/mcserv.c; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv all MCMAN_BUILDING_XMCSERV=0; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcman/irx/mcman.irx /work/.build/ps2sdk2-raw/mcman.irx; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcserv/irx/mcserv.irx /work/.build/ps2sdk2-raw/mcserv.irx'
+
+          {
+            echo 'Normal MagicGate/X-style modules:'
+            sha256sum .build/ps2sdk2-mg/*.irx
+            echo 'Security modules:'
+            sha256sum .build/ps2sdk2-secr14/*.irx
+            echo 'Legacy raw-page modules:'
+            sha256sum .build/ps2sdk2-raw/*.irx
+          } | tee .build/P0_TRUSTED_VERIFY_IRX_SHA256.txt
+
+      - name: Materialize same-source baseline and candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .build/trusted-verify-ab
+          mkdir -p .build/trusted-verify-ab/baseline .build/trusted-verify-ab/candidate
+
+          git archive "$SAFE_BASE_SHA" | tar -x -C .build/trusted-verify-ab/baseline
+          git archive "$SAFE_BASE_SHA" | tar -x -C .build/trusted-verify-ab/candidate
+          for tree in baseline candidate; do
+            mkdir -p ".build/trusted-verify-ab/$tree/.build"
+            cp -a .build/ps2sdk2-mg ".build/trusted-verify-ab/$tree/.build/"
+            cp -a .build/ps2sdk2-secr14 ".build/trusted-verify-ab/$tree/.build/"
+            cp -a .build/ps2sdk2-raw ".build/trusted-verify-ab/$tree/.build/"
+          done
+
+          python3 tools/patch_diag_wrap_trusted_verify_no_readahead.py \
+            .build/trusted-verify-ab/candidate/src/diag_wrap.c
+
+          grep -q 'if (!trusted)' .build/trusted-verify-ab/candidate/src/diag_wrap.c
+          grep -q 'MciCardImageQuickReopenVerify(path, format, report)' \
+            .build/trusted-verify-ab/candidate/src/diag_wrap.c
+
+          # Fail closed: a second application must not silently succeed.
+          if python3 tools/patch_diag_wrap_trusted_verify_no_readahead.py \
+               .build/trusted-verify-ab/candidate/src/diag_wrap.c \
+               >.build/trusted-verify-second-apply.log 2>&1; then
+            echo 'transformer unexpectedly applied twice' >&2
+            exit 1
+          fi
+
+          # The experiment may change only diag_wrap.c in the materialized tree.
+          diff -u .build/trusted-verify-ab/baseline/src/diag_wrap.c \
+                  .build/trusted-verify-ab/candidate/src/diag_wrap.c \
+            > .build/trusted-verify-diag_wrap.diff || test $? -eq 1
+          test -s .build/trusted-verify-diag_wrap.diff
+
+          cmp .build/trusted-verify-ab/baseline/src/image_quick_verify.c \
+              .build/trusted-verify-ab/candidate/src/image_quick_verify.c
+          cmp .build/trusted-verify-ab/baseline/src/image_read_ahead.c \
+              .build/trusted-verify-ab/candidate/src/image_read_ahead.c
+
+      - name: Build same-source baseline and candidate ELFs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/trusted-verify/elf artifacts/trusted-verify/provenance
+
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            ps2dev/ps2dev:v2.0.0 \
+            sh -c 'set -eu; \
+              apk add --no-cache build-base >/dev/null; \
+              build_one() { \
+                tree="$1"; label="$2"; \
+                dir="/work/.build/trusted-verify-ab/$tree"; \
+                cd "$dir"; \
+                rm -f MC_INSPECTOR.ELF src/*.o ./*.o ./*_irx.c; \
+                make R5900_BENCH=0 \
+                     RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 \
+                     IMAGE_READ_PAGES=32 IMAGE_READ_ASYNC=0 \
+                     IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0 \
+                     IMAGE_WRITE_PROBE=0 MC_INSPECTOR.ELF; \
+                cp MC_INSPECTOR.ELF "/work/artifacts/trusted-verify/elf/$label.ELF"; \
+                mips64r5900el-ps2-elf-size MC_INSPECTOR.ELF \
+                  > "/work/artifacts/trusted-verify/elf/$label.ELF.size.txt"; \
+              }; \
+              build_one baseline BASE-c88f507; \
+              build_one candidate P0-TRUSTED-VERIFY-NO-READAHEAD'
+
+          ! cmp -s artifacts/trusted-verify/elf/BASE-c88f507.ELF \
+                   artifacts/trusted-verify/elf/P0-TRUSTED-VERIFY-NO-READAHEAD.ELF
+          sha256sum artifacts/trusted-verify/elf/*.ELF \
+            > artifacts/trusted-verify/elf/ELF_SHA256SUMS.txt
+
+      - name: Archive provenance and hardware protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp tools/patch_diag_wrap_trusted_verify_no_readahead.py \
+             artifacts/trusted-verify/provenance/
+          cp .build/P0_TRUSTED_VERIFY_IRX_SHA256.txt artifacts/trusted-verify/provenance/
+          cp .build/trusted-verify-diag_wrap.diff artifacts/trusted-verify/provenance/
+          cp .build/trusted-verify-second-apply.log artifacts/trusted-verify/provenance/
+
+          cat > artifacts/trusted-verify/README.txt <<EOF
+          P0 trusted quick-reopen read-ahead elision
+          =========================================
+
+          baseline_sha=$SAFE_BASE_SHA
+          experiment_sha=$GITHUB_SHA
+          ps2sdk_security_commit=$PS2SDK_SECURITY_COMMIT
+          toolchain_container=ps2dev/ps2dev:v2.0.0
+
+          Confirmed source behavior:
+          - trusted selected-save import uses MciCardImageQuickReopenVerify
+          - quick reopen consumes exactly the first 512-byte page after stat/open
+          - baseline IMAGE_READ_PAGES=32 read-ahead backing is 528*32 = 16896 bytes
+          - candidate does not create a read-ahead scope for the trusted quick path
+          - full MciCardImageVerifyFile keeps its existing read-ahead scope
+          - no image_read_ahead.c or image_quick_verify.c implementation changed
+
+          Requested-byte delta for the first trusted reopen read:
+            baseline underlying refill: 16896 bytes
+            candidate direct logical read: 512 bytes
+            eliminated request bytes: 16384
+
+          This proves removal of unnecessary requested I/O, not a real-hardware
+          speedup. For timing, compare identical selected-save imports on real PS2.
+          Record operation time p50/p95/p99/max, correctness, file count/bytes and
+          IMAGE-IO read telemetry. At least 20 valid runs for promotion.
+          EOF
+
+      - name: Upload trusted verify A-B pack
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS2-MCI-P0-trusted-verify-${{ github.sha }}
+          path: artifacts/trusted-verify/
+          if-no-files-found: error
+          retention-days: 30
