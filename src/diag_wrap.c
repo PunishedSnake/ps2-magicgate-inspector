@@ -4,6 +4,7 @@
 #define NEWLIB_PORT_AWARE
 
 #include <fileXio_rpc.h>
+#include <delaythread.h>
 #include <libmc.h>
 #include <stdio.h>
 #include <string.h>
@@ -424,6 +425,10 @@ int __wrap_FmcbInstallCrossRegionTransactional(int target_port,
     rc = __real_FmcbInstallCrossRegionTransactional(target_port, package, options,
                                                 bind_kelf, bind_userdata,
                                                 recovery, report);
+    if (package != NULL && package->source_root[0] != '\0') {
+        (void)SyncPathDevice(package->source_root);
+        DelayThread(10000);
+    }
     MciDiagLogSetMassWritePaused(0);
 
     if (report == NULL) {
