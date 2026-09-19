@@ -460,7 +460,7 @@ static int RunVerifiedInstaller(int target_port)
     int rc;
 
     MciGuiRenderMessage("Revalidating before installation",
-                        "The selected card, MagicGate capability, active ROMVER/MechaCon policy and USB package are re-tested immediately before the first destination write.",
+                        "The selected card, hardware-validated MagicGate capability, active ROMVER/MechaCon policy and complete cross-region USB package are re-tested immediately before the first destination write.",
                         NULL, MCI_GUI_TONE_WARNING);
     rc = RevalidateInstallerPreconditions(target_port, reason, sizeof(reason));
     if (rc < 0) {
@@ -474,7 +474,7 @@ static int RunVerifiedInstaller(int target_port)
 
     options.preserve_existing_cnfs = Settings.preserve_existing_cnfs;
     options.verify_mode = Settings.install_verify_mode;
-    rc = FmcbInstallNormalTransactional(target_port,
+    rc = FmcbInstallCrossRegionTransactional(target_port,
                                         &FmcbReports[target_port],
                                         &options,
                                         BindKelfForInstaller, NULL,
@@ -493,7 +493,7 @@ static int RunVerifiedInstaller(int target_port)
             tone = MCI_GUI_TONE_WARNING;
         }
         snprintf(result, sizeof(result),
-                 "Normal FMCB installation completed on mc%d. %d/%d selected entries committed or intentionally preserved. %s Space check: free=%d, payload=%u, reclaimable=%u, reserve=%u clusters. Persistent recovery state was committed and removed.",
+                 "Cross-region FMCB installation completed on mc%d. %d/%d selected entries committed or intentionally preserved across BI/BE/BA/BC. %s Space check: free=%d, payload=%u, reclaimable=%u, reserve=%u clusters. Persistent recovery state was committed and removed.",
                  target_port, report->files_committed, report->files_total,
                  verify_summary, report->free_clusters, report->payload_clusters,
                  report->reclaimable_clusters, report->reserve_clusters);
@@ -803,7 +803,7 @@ int main(int argc, char *argv[])
                     }
                 } else if (FmcbReports[selected].status != FMCB_PACKAGE_READY) {
                     MciGuiRenderMessage("Installer locked",
-                                        "Run FMCB Preflight with CROSS first. The normal installer is armed only for a package that resolves every required source and destination.",
+                                        "Run FMCB Preflight with CROSS first. The cross-region installer is armed only after every I/A/E/C destination and required source has been resolved.",
                                         "CROSS or CIRCLE returns to the dashboard.",
                                         MCI_GUI_TONE_WARNING);
                     install_result_modal = 1;
