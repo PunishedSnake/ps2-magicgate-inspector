@@ -500,14 +500,30 @@ static int RunVerifiedInstaller(int target_port)
         MciGuiRenderMessage(FmcbInstallResultText(report->result), result,
                             "CROSS or CIRCLE returns to the dashboard.", tone);
     } else {
-        char result[420];
-        snprintf(result, sizeof(result),
-                 "Install failed at %s: %s. Files committed before failure: %d/%d. space rc=%d, recovery rc=%d, rollback rc=%d. If recovery remains present, do not start another install; restore the recorded transaction first.",
-                 FmcbInstallStageText(report->stage),
-                 FmcbInstallResultText(report->result),
-                 report->files_committed, report->files_total,
-                 report->space_rc, report->recovery_rc,
-                 report->rollback_rc);
+        char result[640];
+        if (report->current_file >= 0 &&
+            report->current_file < FMCB_TX_MAX_FILES) {
+            const FmcbInstallFileReport *failed =
+                &report->files[report->current_file];
+            snprintf(result, sizeof(result),
+                     "Install failed at %s: %s. Entry %d: %s -> mc%d:%s. rc: backup=%d bind=%d write=%d verify=%d; committed=%d/%d; space=%d recovery=%d rollback=%d. If recovery remains present, restore it before another install.",
+                     FmcbInstallStageText(report->stage),
+                     FmcbInstallResultText(report->result),
+                     report->current_file, failed->source, target_port,
+                     failed->destination, failed->backup_rc, failed->bind_rc,
+                     failed->write_rc, failed->verify_rc,
+                     report->files_committed, report->files_total,
+                     report->space_rc, report->recovery_rc,
+                     report->rollback_rc);
+        } else {
+            snprintf(result, sizeof(result),
+                     "Install failed at %s: %s. committed=%d/%d; space=%d recovery=%d rollback=%d. If recovery remains present, restore it before another install.",
+                     FmcbInstallStageText(report->stage),
+                     FmcbInstallResultText(report->result),
+                     report->files_committed, report->files_total,
+                     report->space_rc, report->recovery_rc,
+                     report->rollback_rc);
+        }
         (void)RefreshRecoveryStatus();
         MciGuiRenderMessage("FMCB install failed", result,
                             "CROSS or CIRCLE returns to the dashboard.",
