@@ -495,6 +495,7 @@ int __wrap_FmcbRecoveryProbe(const FmcbMassBackendStatus *backend,
     int rc;
     int residual_rc;
 
+    fileXioSetBlockMode(FXIO_WAIT);
     MciDiagLogSetMassWritePaused(1);
 
     rc = __real_FmcbRecoveryProbe(backend, status);
@@ -534,6 +535,7 @@ int __wrap_FmcbRecoveryBegin(const FmcbPackageReport *package,
     int rollback_rc = 0;
     int rc;
 
+    fileXioSetBlockMode(FXIO_WAIT);
     MciDiagLogSetMassWritePaused(1);
 
     rc = __real_FmcbRecoveryBegin(package, status);
@@ -576,6 +578,7 @@ int __wrap_FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc)
     if (status == NULL)
         return -1;
 
+    fileXioSetBlockMode(FXIO_WAIT);
     MciDiagLogSetMassWritePaused(1);
 
     {
@@ -623,6 +626,7 @@ int __wrap_FmcbRecoveryFinish(FmcbRecoveryStatus *status)
     if (status == NULL)
         return -1;
 
+    fileXioSetBlockMode(FXIO_WAIT);
     MciDiagLogSetMassWritePaused(1);
 
     /* Verify that the card being declared committed is still the card that was
