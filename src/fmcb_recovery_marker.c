@@ -28,6 +28,7 @@
 #include <string.h>
 
 #include "fmcb_recovery.h"
+#include "diag_log.h"
 #include "usb_search.h"
 
 #define MARKER_MAGIC 0x4D434954u /* MCIT */
@@ -556,13 +557,21 @@ int __wrap_FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc)
     if (status == NULL)
         return -1;
 
+    /* Recovery itself owns mass: while it reads journal/backup files and may
+     * rewrite card targets. Keep durable Drebin writes out of that ownership
+     * window for the same real-hardware USBHDFSD/fileXio reason as install. */
+    MciDiagLogSetMassWritePaused(1);
+
     {
         int discard_rc = TryDiscardUnarmedEmptyJournal(status);
-        if (discard_rc < 0)
+        if (discard_rc < 0) {
+            MciDiagLogSetMassWritePaused(0);
             return discard_rc;
+        }
         if (discard_rc > 0) {
             if (rollback_rc != NULL)
                 *rollback_rc = 0;
+            MciDiagLogSetMassWritePaused(0);
             return 0;
         }
     }
@@ -572,7 +581,8 @@ int __wrap_FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc)
      * agree before any destination from the journal can be restored/deleted. */
     rc = FmcbRecoveryCheckCard(status, status->target_port);
     if (rc < 0)
-        return rc;
+        MciDiagLogSetMassWritePaused(0);
+    return rc;
 
     saved = *status;
     rc = __real_FmcbRecoveryRun(status, rollback_rc);
@@ -582,6 +592,7 @@ int __wrap_FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc)
         if (marker_rc < 0)
             return marker_rc;
     }
+    MciDiagLogSetMassWritePaused(0);
     return rc;
 }
 
