@@ -733,8 +733,19 @@ int FmcbRecoveryBegin(const FmcbPackageReport *package,
         FillStatus(status, package->source_root, root, &existing);
         return -5140; /* Explicit recovery/discard is required first. */
     }
-    if (present_slots > 0)
+    if (present_slots > 0) {
+        memset(status, 0, sizeof(*status));
+        status->present = 1;
+        status->valid = 0;
+        status->target_port = package->plan.target_port;
+        status->state = FMCB_RECOVERY_CORRUPT;
+        status->probe_rc = rc;
+        snprintf(status->source_root, sizeof(status->source_root), "%s",
+                 package->source_root);
+        snprintf(status->recovery_root, sizeof(status->recovery_root), "%s",
+                 root);
         return -5140;
+    }
 
     rc = EnsureRecoveryDirectory(root);
     if (rc < 0)
