@@ -453,7 +453,14 @@ static int PrepareInventory(int target_port,
             file->reclaimable_clusters = 0;
         }
     }
-    return report->files_total > 0 ? 0 : -4601;
+    if (report->files_total <= 0)
+        return -4601;
+
+    /* current_file is meaningful only while a file-scoped stage is active.
+     * Leaving the final inventory index here made later space/recovery errors
+     * falsely accuse the last manifest entry (typically USBHDFSD.IRX). */
+    report->current_file = -1;
+    return 0;
 }
 
 static int CheckSpace(int target_port, const FmcbPackageReport *package,
