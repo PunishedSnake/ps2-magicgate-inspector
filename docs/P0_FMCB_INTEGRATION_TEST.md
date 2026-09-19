@@ -113,6 +113,25 @@ A bind failure on this branch is therefore materially different from the old
 reference-installer `Failed to bind MagicGate`: it occurs inside the security
 path already validated by the standalone Inspector probe.
 
+The installer binder now reports stage-specific negative codes:
+
+```text
+-4710  invalid KELF/layout or BIT bounds
+-4711  target-card check inside the security personality
+-4712  SECRSIF RPC binding/unavailable
+-4713  KELF header download/encryption
+-4714  encrypted BIT block download
+-4715  Kbit/CardAuth exchange
+-4716  Kc/CardAuth exchange
+-4717  ICVPS2 query
+-4718  returned key-material layout/store bounds
+-4720  normal stack returned without a usable mass: recovery backend
+```
+
+`SYSTEM/ENDVDPL.XRX` is a special 128-byte CEX KELF used by FMCB to enable
+DVD-player support. Keep it in the normal retail/CEX qualification; do not
+silently skip it merely because a MechaPwn configuration is region-unlocked.
+
 ## Stage E: reboot/boot validation
 
 After a PASS/VERIFIED install:
@@ -147,11 +166,16 @@ point. The persistent journal is a safety path, not a carnival attraction.
 
 If a real failure leaves an ACTIVE/ROLLING_BACK journal:
 
-1. preserve the USB recovery directory;
-2. do not begin another install;
-3. run the built-in recovery path;
-4. record rollback rc and all destination diagnostics;
+1. preserve the USB recovery directory and keep the exact same target card;
+2. do not format the card, delete the card marker, or begin another install;
+3. run the built-in recovery path before any new installation attempt;
+4. record recovery rc, rollback rc and all destination diagnostics;
 5. verify the card contents after recovery.
+
+The USB backend is considered restored only after a real mass:/mass0:/mass1:
+root can be opened. Recovery identity reads retry only short ENODEV/card-detect
+readiness windows; missing markers, token mismatch and corrupt metadata remain
+fail-closed.
 
 ## Pass criteria
 
