@@ -58,6 +58,10 @@ jobs:
         shell: bash
         run: python3 tools/verify_card_math.py
 
+      - name: Verify FMCB cross-region integration invariants
+        shell: bash
+        run: python3 tools/verify_fmcb_cross_region.py
+
       - name: Stage PS2SDK 2.0 security and card personalities
         shell: bash
         run: |
