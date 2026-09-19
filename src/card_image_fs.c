@@ -102,7 +102,7 @@ typedef struct MciImportTxn {
     int created_count;
 } MciImportTxn;
 
-static const char SuperblockMagic[28] = "Sony PS2 Memory Card Format ";
+static const char SuperblockMagic[28] __attribute__((nonstring)) = "Sony PS2 Memory Card Format ";
 
 static int McResult(void)
 {
