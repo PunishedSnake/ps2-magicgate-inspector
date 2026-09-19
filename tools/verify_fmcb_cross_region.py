@@ -201,6 +201,19 @@ assert ensure_path and "fileXioSetBlockMode(FXIO_WAIT)" in ensure_path.group(0),
 assert diag_log_c.count("fileXioSetBlockMode(FXIO_WAIT)") >= 3, (
     "Drebin durable open/write paths must not inherit global NOWAIT"
 )
+set_io = re.search(
+    r"void MciDiagLogSetIoAvailable\(int available\).*?\n\}",
+    diag_log_c,
+    re.S,
+)
+assert set_io, "MciDiagLogSetIoAvailable not found"
+set_io_text = set_io.group(0)
+assert "MassWritePauseDepth != 0u" in set_io_text, (
+    "logger attach must be deferred while another subsystem owns mass:"
+)
+assert set_io_text.index("MassWritePauseDepth != 0u") < set_io_text.index("for (attempt = 0u"), (
+    "ownership check must happen before EnsurePath retry loop"
+)
 
 # Recovery path must remain at least as large as the package-root producer.
 assert "FMCB_RECOVERY_PATH_MAX (FMCB_SOURCE_ROOT_MAX + 32)" in recovery_h
