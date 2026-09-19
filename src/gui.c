@@ -75,7 +75,7 @@ static qword_t *render_fmcb(qword_t *q, int selected,
         const char *root_tail = root_len > 43u
                                     ? r->source_root + root_len - 43u
                                     : r->source_root;
-        snprintf(line, sizeof(line), "Found at: %s%s",
+        snprintf(line, sizeof(line), "Found at: %s%.43s",
                  root_len > 43u ? "..." : "", root_tail);
     } else {
         snprintf(line, sizeof(line), "Package location: not found yet");
@@ -168,7 +168,8 @@ void MciGuiRenderDashboard(int selected,
             MarqueeEpoch = GetTimerSystemTime();
             LastMagicGateMarqueeSlot = selected;
             snprintf(LastMagicGateMarqueeSource,
-                     sizeof(LastMagicGateMarqueeSource), "%s", source);
+                     sizeof(LastMagicGateMarqueeSource), "%.*s",
+                     (int)sizeof(LastMagicGateMarqueeSource) - 1, source);
         }
     } else {
         LastMagicGateMarqueeSlot = -1;
@@ -375,7 +376,7 @@ void MciGuiRenderImageBrowser(int target_port,
     q = rect_outline(q, 16, 52, 624, 79, Theme.border);
     tail = strlen(list->path) > 47u ? list->path + strlen(list->path) - 47u
                                    : list->path;
-    snprintf(line, sizeof(line), "SOURCE  %s  %s%s",
+    snprintf(line, sizeof(line), "SOURCE  %s  %s%.47s",
              MciCardImageFormatName(list->format),
              strlen(list->path) > 47u ? "..." : "", tail);
     q = text_box(q, 28, 58, 612, 66, line, Theme.text);
