@@ -16,6 +16,7 @@ recovery_c = (ROOT / "src/fmcb_recovery.c").read_text(encoding="utf-8")
 recovery_h = (ROOT / "src/fmcb_recovery.h").read_text(encoding="utf-8")
 marker_c = (ROOT / "src/fmcb_recovery_marker.c").read_text(encoding="utf-8")
 diag_c = (ROOT / "src/diag_wrap.c").read_text(encoding="utf-8")
+diag_log_c = (ROOT / "src/diag_log.c").read_text(encoding="utf-8")
 makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
 app_c = (ROOT / "src/app_main.c").read_text(encoding="utf-8")
 
@@ -171,6 +172,18 @@ for wrapper_name in (
 
 assert "--wrap=FmcbInstallCrossRegionTransactional" in makefile
 assert "--wrap=FmcbInstallNormalTransactional" not in makefile
+
+ensure_path = re.search(
+    r"static int EnsurePath\(void\).*?\n\}",
+    diag_log_c,
+    re.S,
+)
+assert ensure_path and "fileXioSetBlockMode(FXIO_WAIT)" in ensure_path.group(0), (
+    "Drebin path discovery must force synchronous fileXio"
+)
+assert diag_log_c.count("fileXioSetBlockMode(FXIO_WAIT)") >= 3, (
+    "Drebin durable open/write paths must not inherit global NOWAIT"
+)
 
 # Recovery path must remain at least as large as the package-root producer.
 assert "FMCB_RECOVERY_PATH_MAX (FMCB_SOURCE_ROOT_MAX + 32)" in recovery_h
