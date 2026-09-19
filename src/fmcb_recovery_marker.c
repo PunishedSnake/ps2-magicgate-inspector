@@ -170,6 +170,8 @@ static int MassMarkerAlreadyExists(const FmcbRecoveryStatus *status)
  * no FMCB destination could have been touched yet. */
 static int TryDiscardUnarmedEmptyJournal(FmcbRecoveryStatus *status)
 {
+    FmcbRecoveryStatus saved;
+    char token_path[FMCB_RECOVERY_PATH_MAX + 32];
     int mass_marker;
     int card_marker;
     int rc;
@@ -185,11 +187,48 @@ static int TryDiscardUnarmedEmptyJournal(FmcbRecoveryStatus *status)
     if (card_marker < 0)
         return card_marker;
 
-    if (mass_marker != 0 || card_marker != 0)
-        return 0;
+    if (!mass_marker && !card_marker) {
+        rc = FmcbRecoveryDiscardEmptyJournal(status);
+        return rc == 0 ? 1 : rc;
+    }
 
-    rc = FmcbRecoveryDiscardEmptyJournal(status);
-    return rc == 0 ? 1 : rc;
+    if (mass_marker && !card_marker) {
+        /* Arm writes the USB token before the card token. If the durable
+         * journal itself proves that zero destinations/directories were
+         * prepared, absence of the card token means there is no card-side
+         * transaction identity left to preserve. This also covers a freshly
+         * formatted card after an aborted pre-write attempt. Validate/remove
+         * the journal first, then discard the now-orphaned USB token. */
+        saved = *status;
+        rc = FmcbRecoveryDiscardEmptyJournal(status);
+        if (rc < 0)
+            return rc;
+        TokenPath(&saved, token_path, sizeof(token_path));
+        rc = fileXioRemove(token_path);
+        if (rc < 0 && rc != -ENOENT)
+            return rc;
+        (void)fileXioRmdir(saved.recovery_root);
+        return 1;
+    }
+
+    if (mass_marker && card_marker) {
+        /* Both markers exist. Only remove them automatically if their tokens
+         * match, proving that the empty journal and this card belong to the
+         * same never-started transaction. */
+        rc = FmcbRecoveryCheckCard(status, status->target_port);
+        if (rc < 0)
+            return 0;
+        saved = *status;
+        rc = FmcbRecoveryDiscardEmptyJournal(status);
+        if (rc < 0)
+            return rc;
+        rc = FmcbRecoveryClearCardMarker(&saved, saved.target_port);
+        return rc == 0 ? 1 : rc;
+    }
+
+    /* Card marker without the matching USB token is ambiguous. Preserve it and
+     * require explicit inspection instead of deleting evidence by guesswork. */
+    return 0;
 }
 
 static int WriteCardMarker(int target_port,
