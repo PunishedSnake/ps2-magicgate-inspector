@@ -51,6 +51,19 @@ typedef enum MagicGateResult {
     MG_RESULT_TARGET_NOT_PS2
 } MagicGateResult;
 
+typedef enum MagicGateBindRc {
+    MG_BIND_OK = 0,
+    MG_BIND_ERR_INVALID = -4710,
+    MG_BIND_ERR_CARD = -4711,
+    MG_BIND_ERR_RPC = -4712,
+    MG_BIND_ERR_HEADER = -4713,
+    MG_BIND_ERR_BLOCK = -4714,
+    MG_BIND_ERR_KBIT = -4715,
+    MG_BIND_ERR_KC = -4716,
+    MG_BIND_ERR_ICVPS2 = -4717,
+    MG_BIND_ERR_KEY_LAYOUT = -4718
+} MagicGateBindRc;
+
 typedef struct MagicGateIopStatus {
     int secrman_load_rc;
     int secrman_start_rc;
