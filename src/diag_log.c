@@ -314,6 +314,19 @@ void MciDiagLogSetIoAvailable(int available)
     if (IoAvailable && PathReady)
         return;
 
+    /* A subsystem may rebind fileXio while an outer transaction still owns
+     * mass:. Mark the client usable, but do not even Dopen/GetStat/Mkdir the
+     * logger path until the outermost ownership guard is released. */
+    if (MassWritePauseDepth != 0u) {
+        IoAvailable = 1;
+        PathReady = 0;
+        LogPath[0] = '\0';
+        LogDevice[0] = '\0';
+        MciDiagLogTracePrintf("LOGGER",
+                              "mass/fileXio returned inside protected ownership scope; path attach deferred");
+        return;
+    }
+
     /* This is called only after the application has explicitly allowed USB
      * enumeration time. Failure is non-fatal: stay RAM-only and try again at
      * the next safe lifecycle boundary. */
