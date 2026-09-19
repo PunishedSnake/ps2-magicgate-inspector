@@ -114,7 +114,12 @@ assert "system_dirs[FMCB_CROSS_REGION_SYSTEM_DIRS][48]" in recovery_c
 assert "MciUsbGetVerifiedPackageRoot" in recovery_c
 assert "ProbeRecoverySourceRoot" in recovery_c
 assert "FmcbRecoveryDiscardEmptyJournal" in recovery_c
+assert "LEGACY_RECOVERY_VERSION 1u" in recovery_c
+assert "LegacyRecoveryJournalV1" in recovery_c
+assert "LegacyJournalValidV1" in recovery_c
+assert "ConvertLegacyJournalV1" in recovery_c
 assert "TryDiscardUnarmedEmptyJournal" in marker_c
+assert "status->prepared_files == 0" in marker_c
 assert "MciUsbGetVerifiedPackageRoot" in marker_c
 assert "ReconcileResidualRoot" in marker_c
 
