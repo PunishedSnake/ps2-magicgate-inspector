@@ -796,9 +796,23 @@ int MagicGateBindPrepared(int target_port, unsigned char *data, int size,
     if (report == NULL)
         return MG_BIND_ERR_INVALID;
 
-    MagicGateResetReport(report, target_port);
+    /* The caller has already created the isolated security session and
+     * populated session_setup_rc/session_mcinit_rc. Reset only bind-stage
+     * telemetry so those setup facts survive into the forensic record. */
+    report->target_port = target_port;
     report->source_size = size;
     report->source_io_rc = 0;
+    report->rpc_rc = -999;
+    report->header_rc = -999;
+    report->header_reply_size = -1;
+    report->block_count = 0;
+    report->encrypted_blocks = 0;
+    report->blocks_completed = 0;
+    report->failed_block = -1;
+    report->kbit_rc = -999;
+    report->kc_rc = -999;
+    report->icvps2_rc = -999;
+    report->result = MG_RESULT_NOT_RUN;
 
     rc = ValidateKelf(data, size);
     if (rc < 0) {
