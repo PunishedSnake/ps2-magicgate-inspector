@@ -74,9 +74,14 @@ void MciProgressUpdate(MciProgressDomain domain,
         const char *arrow = strstr(safe_detail, " -> ");
         if (arrow != NULL) {
             unsigned int prefix = (unsigned int)(arrow - safe_detail);
-            if (prefix + strlen(arrow + 4) + 12u < sizeof(normalized_detail)) {
-                snprintf(normalized_detail, sizeof(normalized_detail),
-                         "%.*s | format: %s", (int)prefix, safe_detail, arrow + 4);
+            unsigned int suffix = (unsigned int)strlen(arrow + 4);
+            static const char separator[] = " | format: ";
+            if (prefix + (sizeof(separator) - 1u) + suffix + 1u <=
+                sizeof(normalized_detail)) {
+                memcpy(normalized_detail, safe_detail, prefix);
+                memcpy(normalized_detail + prefix, separator, sizeof(separator) - 1u);
+                memcpy(normalized_detail + prefix + sizeof(separator) - 1u,
+                       arrow + 4, suffix + 1u);
                 safe_detail = normalized_detail;
             }
         }
