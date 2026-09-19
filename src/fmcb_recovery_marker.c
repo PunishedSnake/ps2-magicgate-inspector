@@ -495,26 +495,35 @@ int __wrap_FmcbRecoveryProbe(const FmcbMassBackendStatus *backend,
     int rc;
     int residual_rc;
 
+    MciDiagLogSetMassWritePaused(1);
+
     rc = __real_FmcbRecoveryProbe(backend, status);
-    if (status == NULL)
+    if (status == NULL) {
+        MciDiagLogSetMassWritePaused(0);
         return rc;
+    }
 
     if (status->present && status->valid && status->prepared_files == 0) {
         int discard_rc = TryDiscardUnarmedEmptyJournal(status);
-        if (discard_rc < 0)
+        if (discard_rc < 0) {
+            MciDiagLogSetMassWritePaused(0);
             return discard_rc;
+        }
         if (discard_rc > 0)
             rc = __real_FmcbRecoveryProbe(backend, status);
     }
 
-    if (status->present)
+    if (status->present) {
+        MciDiagLogSetMassWritePaused(0);
         return rc;
+    }
 
     /* The real probe intentionally treats COMMITTED as cleanup-only and may
      * remove its journals. card-token.bin survives that cleanup, allowing this
      * wrapper to remove the card marker only after proving the original card is
      * still present. If not, the residual token becomes a blocking condition. */
     residual_rc = ReconcileResidualMarkers(status);
+    MciDiagLogSetMassWritePaused(0);
     return residual_rc < 0 ? residual_rc : rc;
 }
 
@@ -525,16 +534,23 @@ int __wrap_FmcbRecoveryBegin(const FmcbPackageReport *package,
     int rollback_rc = 0;
     int rc;
 
+    MciDiagLogSetMassWritePaused(1);
+
     rc = __real_FmcbRecoveryBegin(package, status);
     if (rc == -5140 && status != NULL && status->present) {
         int discard_rc = TryDiscardUnarmedEmptyJournal(status);
-        if (discard_rc < 0)
+        if (discard_rc < 0) {
+            MciDiagLogSetMassWritePaused(0);
             return discard_rc;
+        }
         if (discard_rc > 0)
             rc = __real_FmcbRecoveryBegin(package, status);
     }
-    if (rc < 0)
+    if (rc < 0) {
+        MciDiagLogSetMassWritePaused(0);
         return rc;
+    }
+
     saved = *status;
     rc = FmcbRecoveryArmCard(status, status->target_port);
     if (rc < 0) {
@@ -544,8 +560,11 @@ int __wrap_FmcbRecoveryBegin(const FmcbPackageReport *package,
         (void)__real_FmcbRecoveryRun(status, &rollback_rc);
         if (rc != -5168)
             DiscardFailedArmArtifacts(&saved);
+        MciDiagLogSetMassWritePaused(0);
         return rc;
     }
+
+    MciDiagLogSetMassWritePaused(0);
     return 0;
 }
 
@@ -557,9 +576,6 @@ int __wrap_FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc)
     if (status == NULL)
         return -1;
 
-    /* Recovery itself owns mass: while it reads journal/backup files and may
-     * rewrite card targets. Keep durable Drebin writes out of that ownership
-     * window for the same real-hardware USBHDFSD/fileXio reason as install. */
     MciDiagLogSetMassWritePaused(1);
 
     {
@@ -576,22 +592,25 @@ int __wrap_FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc)
         }
     }
 
-    /* This check is deliberately before the first real rollback operation.
-     * Slot number alone is not card identity; both USB and card tokens must
+    /* Slot number alone is not card identity; both USB and card tokens must
      * agree before any destination from the journal can be restored/deleted. */
     rc = FmcbRecoveryCheckCard(status, status->target_port);
-    if (rc < 0)
+    if (rc < 0) {
         MciDiagLogSetMassWritePaused(0);
-    return rc;
+        return rc;
+    }
 
     saved = *status;
     rc = __real_FmcbRecoveryRun(status, rollback_rc);
     if (rc == 0) {
         int marker_rc = FmcbRecoveryClearCardMarker(&saved,
                                                     saved.target_port);
-        if (marker_rc < 0)
+        if (marker_rc < 0) {
+            MciDiagLogSetMassWritePaused(0);
             return marker_rc;
+        }
     }
+
     MciDiagLogSetMassWritePaused(0);
     return rc;
 }
@@ -604,20 +623,29 @@ int __wrap_FmcbRecoveryFinish(FmcbRecoveryStatus *status)
     if (status == NULL)
         return -1;
 
+    MciDiagLogSetMassWritePaused(1);
+
     /* Verify that the card being declared committed is still the card that was
      * armed at transaction start. The real finish removes journals/backups but
      * deliberately leaves card-token.bin for the post-commit marker cleanup. */
     rc = FmcbRecoveryCheckCard(status, status->target_port);
-    if (rc < 0)
+    if (rc < 0) {
+        MciDiagLogSetMassWritePaused(0);
         return rc;
+    }
 
     saved = *status;
     rc = __real_FmcbRecoveryFinish(status);
     if (rc == 0) {
         int marker_rc = FmcbRecoveryClearCardMarker(&saved,
                                                     saved.target_port);
-        if (marker_rc < 0)
+        if (marker_rc < 0) {
+            MciDiagLogSetMassWritePaused(0);
             return marker_rc;
+        }
     }
+
+    MciDiagLogSetMassWritePaused(0);
     return rc;
 }
+
