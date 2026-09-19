@@ -112,6 +112,13 @@ void MagicGateReleaseKelf(MagicGateKelfBuffer *buffer);
 int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
                            MagicGateReport *report);
 
+/* Bind an arbitrary validated KELF already resident in EE RAM. This uses the
+ * same instrumented SECRSIF path as the capability probe, but commits returned
+ * Kbit/Kc/ICVPS2 values back into the caller's buffer. No card filesystem write
+ * occurs here; the caller still owns destination commit/verification. */
+int MagicGateBindPrepared(int target_port, unsigned char *data, int size,
+                          MagicGateReport *report);
+
 const char *MagicGateStageText(MagicGateStage stage);
 const char *MagicGateResultText(MagicGateResult result);
 
