@@ -601,14 +601,18 @@ int MciRawBulkReadTryPage(int port, int slot, int page, void *buffer)
     u32 start;
     u32 offset;
     int rc;
+#if MCI_RAW_BULK_ASYNC
     int sequential;
+#endif
 
     if (!Stats.bound || buffer == NULL || page < 0 || Pending)
         return 0;
 
     requested = (u32)page;
+#if MCI_RAW_BULK_ASYNC
     sequential = LastPageValid && LastPort == port && LastSlot == slot &&
                  requested == LastPage + 1u;
+#endif
 
     if (!CacheContains(CurrentCache, port, slot, requested)) {
         start = BatchStart(requested);
