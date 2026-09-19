@@ -21,6 +21,8 @@
 #include <libmc.h>
 #include <fileXio_rpc.h>
 #include <io_common.h>
+#include <iox_stat.h>
+#include <errno.h>
 #include <timer.h>
 #include <stdio.h>
 #include <string.h>
@@ -141,6 +143,52 @@ static int MarkerAlreadyExists(int target_port)
     if (rc < 0)
         return rc;
     return 1;
+}
+
+static int MassMarkerAlreadyExists(const FmcbRecoveryStatus *status)
+{
+    char path[FMCB_RECOVERY_PATH_MAX + 32];
+    iox_stat_t stat;
+    int rc;
+
+    if (status == NULL)
+        return -1;
+    TokenPath(status, path, sizeof(path));
+    memset(&stat, 0, sizeof(stat));
+    rc = fileXioGetStat(path, &stat);
+    if (rc >= 0)
+        return 1;
+    if (rc == -ENOENT)
+        return 0;
+    return rc;
+}
+
+/* The Begin wrapper cannot return success until the card marker has been
+ * written and read back. Therefore an ACTIVE journal with no captured target,
+ * no recorded card directory and no USB/card marker is provably pre-arm state:
+ * no FMCB destination could have been touched yet. */
+static int TryDiscardUnarmedEmptyJournal(FmcbRecoveryStatus *status)
+{
+    int mass_marker;
+    int card_marker;
+    int rc;
+
+    if (status == NULL || !status->present || !status->valid ||
+        status->prepared_files != 0)
+        return 0;
+
+    mass_marker = MassMarkerAlreadyExists(status);
+    if (mass_marker < 0)
+        return mass_marker;
+    card_marker = MarkerAlreadyExists(status->target_port);
+    if (card_marker < 0)
+        return card_marker;
+
+    if (mass_marker != 0 || card_marker != 0)
+        return 0;
+
+    rc = FmcbRecoveryDiscardEmptyJournal(status);
+    return rc == 0 ? 1 : rc;
 }
 
 static int WriteCardMarker(int target_port,
@@ -403,6 +451,13 @@ int __wrap_FmcbRecoveryBegin(const FmcbPackageReport *package,
     int rc;
 
     rc = __real_FmcbRecoveryBegin(package, status);
+    if (rc == -5140 && status != NULL && status->present) {
+        int discard_rc = TryDiscardUnarmedEmptyJournal(status);
+        if (discard_rc < 0)
+            return discard_rc;
+        if (discard_rc > 0)
+            rc = __real_FmcbRecoveryBegin(package, status);
+    }
     if (rc < 0)
         return rc;
     saved = *status;
@@ -426,6 +481,17 @@ int __wrap_FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc)
 
     if (status == NULL)
         return -1;
+
+    {
+        int discard_rc = TryDiscardUnarmedEmptyJournal(status);
+        if (discard_rc < 0)
+            return discard_rc;
+        if (discard_rc > 0) {
+            if (rollback_rc != NULL)
+                *rollback_rc = 0;
+            return 0;
+        }
+    }
 
     /* This check is deliberately before the first real rollback operation.
      * Slot number alone is not card identity; both USB and card tokens must
