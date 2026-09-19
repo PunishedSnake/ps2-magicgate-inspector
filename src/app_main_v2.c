@@ -100,7 +100,7 @@ static void ShowSaveTransferResultV2(const char *title,
                                      const MciSaveTransferReport *report,
                                      int rc)
 {
-    char message[760];
+    char message[1024];
     MciGuiTone tone;
 
     if (report->result == MCI_SAVE_TRANSFER_OK)
@@ -337,7 +337,7 @@ static void RunSelectiveRestorePickerV2(int *active_port)
 
     rc = MciImageFsScan(path, format, &list);
     if (rc < 0 || list.save_count <= 0) {
-        char message[320];
+        char message[384];
         snprintf(message, sizeof(message),
                  "The selected image could not be indexed as a PS2 save filesystem.\n\n%s\nResult: %s (rc=%d)",
                  path, MciImageFsResultText(list.result), rc);
@@ -742,7 +742,7 @@ int main(int argc, char *argv[])
                                             MCI_GUI_TONE_DANGER);
                         install_result_modal = 1;
                     } else {
-                        char message[360];
+                        char message[512];
                         snprintf(message, sizeof(message),
                                  "Recover the interrupted FMCB transaction recorded for mc%d?\n\nState: %s\nPrepared destinations: %d\nUSB root: %s\n\nRecovery validates the card transaction marker, restores every captured destination in reverse order, verifies restored files, then removes the journal.",
                                  RecoveryStatus.target_port,
