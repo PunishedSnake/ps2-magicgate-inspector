@@ -50,7 +50,7 @@ typedef struct MciPs2Superblock {
 } MciPs2Superblock;
 #pragma pack(pop)
 
-static const char SuperblockMagic[28] = "Sony PS2 Memory Card Format ";
+static const char SuperblockMagic[28] __attribute__((nonstring)) = "Sony PS2 Memory Card Format ";
 static const char *const MassRoots[] = {"mass:/", "mass0:/", "mass1:/"};
 
 static int CompleteMcCommand(int issue_rc)
