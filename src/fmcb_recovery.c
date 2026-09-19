@@ -729,8 +729,12 @@ int FmcbRecoveryBegin(const FmcbPackageReport *package,
 
     memset(&existing, 0, sizeof(existing));
     rc = LoadLatestJournal(root, &existing, &valid_slots, &present_slots);
-    if (rc == 0 || present_slots > 0)
+    if (rc == 0) {
+        FillStatus(status, package->source_root, root, &existing);
         return -5140; /* Explicit recovery/discard is required first. */
+    }
+    if (present_slots > 0)
+        return -5140;
 
     rc = EnsureRecoveryDirectory(root);
     if (rc < 0)
