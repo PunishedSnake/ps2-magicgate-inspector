@@ -35,7 +35,7 @@ int __real_MciRawCardSessionStart(MciRawCardSessionStatus *status);
 void __real_MciRawCardSessionStop(MciRawCardSessionStatus *status);
 int __real_FmcbInitMassBackend(FmcbMassBackendStatus *status);
 void __real_FmcbShutdownMassBackend(FmcbMassBackendStatus *status);
-int __real_FmcbInstallNormalTransactional(int target_port,
+int __real_FmcbInstallCrossRegionTransactional(int target_port,
                                           const FmcbPackageReport *package,
                                           const FmcbInstallOptions *options,
                                           FmcbBindKelfCallback bind_kelf,
@@ -380,7 +380,7 @@ int __wrap_MciImageFsImportSelected(int target_port, MciImageSaveList *list,
     return rc;
 }
 
-int __wrap_FmcbInstallNormalTransactional(int target_port,
+int __wrap_FmcbInstallCrossRegionTransactional(int target_port,
                                           const FmcbPackageReport *package,
                                           const FmcbInstallOptions *options,
                                           FmcbBindKelfCallback bind_kelf,
@@ -404,7 +404,7 @@ int __wrap_FmcbInstallNormalTransactional(int target_port,
                      recovery != NULL ? recovery->present : -1,
                      recovery != NULL ? recovery->valid : -1);
 
-    rc = __real_FmcbInstallNormalTransactional(target_port, package, options,
+    rc = __real_FmcbInstallCrossRegionTransactional(target_port, package, options,
                                                 bind_kelf, bind_userdata,
                                                 recovery, report);
 
