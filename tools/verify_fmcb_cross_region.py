@@ -126,6 +126,41 @@ assert "ReconcileResidualRoot" in marker_c
 assert "__wrap_FmcbInstallCrossRegionTransactional" in diag_c
 assert "__real_FmcbInstallCrossRegionTransactional" in diag_c
 assert "FmcbInstallNormalTransactional" not in diag_c
+
+install_wrap = re.search(
+    r"int __wrap_FmcbInstallCrossRegionTransactional\(.*?\n\}",
+    diag_c,
+    re.S,
+)
+assert install_wrap, "cross-region diagnostic wrapper not found"
+install_wrap_text = install_wrap.group(0)
+assert install_wrap_text.index("MciDiagLogSetMassWritePaused(1)") < install_wrap_text.index(
+    "__real_FmcbInstallCrossRegionTransactional"
+), "Drebin must pause before installer mass I/O"
+assert install_wrap_text.index("__real_FmcbInstallCrossRegionTransactional") < install_wrap_text.index(
+    "MciDiagLogSetMassWritePaused(0)"
+), "Drebin must resume only after installer mass I/O returns"
+
+for wrapper_name in (
+    "__wrap_FmcbRecoveryProbe",
+    "__wrap_FmcbRecoveryBegin",
+    "__wrap_FmcbRecoveryRun",
+    "__wrap_FmcbRecoveryFinish",
+):
+    match = re.search(
+        rf"int {wrapper_name}\(.*?\n\}}",
+        marker_c,
+        re.S,
+    )
+    assert match, f"{wrapper_name} not found"
+    body = match.group(0)
+    assert "MciDiagLogSetMassWritePaused(1)" in body, (
+        f"{wrapper_name} must acquire mass-log ownership guard"
+    )
+    assert "MciDiagLogSetMassWritePaused(0)" in body, (
+        f"{wrapper_name} must release mass-log ownership guard"
+    )
+
 assert "--wrap=FmcbInstallCrossRegionTransactional" in makefile
 assert "--wrap=FmcbInstallNormalTransactional" not in makefile
 
