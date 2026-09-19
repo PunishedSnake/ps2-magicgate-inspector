@@ -76,6 +76,51 @@ static int CloseCardFile(int fd)
     return McResult();
 }
 
+/* Protected EXEC-SYSTEM directories can reject an exact mcGetDir even when
+ * their files are readable. Keep recovery discovery consistent with P0's
+ * fail-closed transaction inventory by falling back to a read-only open/seek. */
+static int ProbeCardFileForRecovery(int port, const char *path,
+                                    int *exists, unsigned int *size)
+{
+    int fd;
+    int end;
+    int close_rc;
+    int rc;
+
+    *exists = 0;
+    *size = 0u;
+
+    memset(&info, 0, sizeof(info));
+    mcGetDir(port, 0, path, 0, 1, &info);
+    rc = McResult();
+    if (rc > 0) {
+        *exists = 1;
+        *size = info.FileSizeByte;
+        return 0;
+    }
+    if (rc == 0 || rc == sceMcResNoEntry)
+        return 0;
+
+    mcOpen(port, 0, path, FIO_O_RDONLY);
+    fd = McResult();
+    if (fd == sceMcResNoEntry)
+        return 0;
+    if (fd < 0)
+        return fd;
+
+    mcSeek(fd, 0, SEEK_END);
+    end = McResult();
+    close_rc = CloseCardFile(fd);
+    if (end < 0)
+        return end;
+    if (close_rc < 0)
+        return close_rc;
+
+    *exists = 1;
+    *size = (unsigned int)end;
+    return 0;
+}
+
 static u32 FnvUpdate(u32 hash, const unsigned char *data, unsigned int size)
 {
     unsigned int i;
@@ -695,17 +740,21 @@ int FmcbRecoveryCaptureTarget(FmcbRecoveryStatus *status,
     if (journal.entry_count >= FMCB_MAX_PACKAGE_ENTRIES)
         return -5141;
 
-    memset(&info, 0, sizeof(info));
-    mcGetDir(target_port, 0, destination, 0, 1, &info);
-    rc = McResult();
-    if (rc < 0 && rc != sceMcResNoEntry)
-        return rc;
+    {
+        int target_exists = 0;
+        unsigned int target_size = 0u;
 
-    entry = &journal.entries[journal.entry_count];
-    memset(entry, 0, sizeof(*entry));
-    entry->manifest_index = (u32)manifest_index;
-    entry->existed = rc > 0 ? 1u : 0u;
-    entry->backup_size = entry->existed ? info.FileSizeByte : 0u;
+        rc = ProbeCardFileForRecovery(target_port, destination,
+                                      &target_exists, &target_size);
+        if (rc < 0)
+            return rc;
+
+        entry = &journal.entries[journal.entry_count];
+        memset(entry, 0, sizeof(*entry));
+        entry->manifest_index = (u32)manifest_index;
+        entry->existed = target_exists ? 1u : 0u;
+        entry->backup_size = target_exists ? target_size : 0u;
+    }
     snprintf(entry->destination, sizeof(entry->destination), "%s", destination);
 
     BackupPath(status->recovery_root, (unsigned int)manifest_index, 1,
