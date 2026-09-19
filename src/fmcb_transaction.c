@@ -64,7 +64,9 @@ void FmcbInstallResetReport(FmcbInstallReport *report, int target_port)
     report->stage = FMCB_INSTALL_NOT_RUN;
     report->result = FMCB_INSTALL_RESULT_NOT_RUN;
     report->current_file = -1;
-    report->rollback_rc = 0;
+    /* -999 means rollback has not entered the core restore path yet.
+     * FmcbRecoveryRun sets this to 0 only once rollback actually starts. */
+    report->rollback_rc = -999;
     report->recovery_rc = -999;
     report->space_rc = -999;
     report->free_clusters = -1;
