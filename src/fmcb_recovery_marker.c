@@ -581,7 +581,7 @@ int __wrap_FmcbRecoveryBegin(const FmcbPackageReport *package,
         (void)__real_FmcbRecoveryRun(status, &rollback_rc);
         if (rc != -5168)
             DiscardFailedArmArtifacts(&saved);
-        ResumeMassLogAfterRecovery(status);
+        ResumeMassLogAfterRecovery(&saved);
         return rc;
     }
 
@@ -628,12 +628,12 @@ int __wrap_FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc)
         int marker_rc = FmcbRecoveryClearCardMarker(&saved,
                                                     saved.target_port);
         if (marker_rc < 0) {
-            ResumeMassLogAfterRecovery(status);
+            ResumeMassLogAfterRecovery(&saved);
             return marker_rc;
         }
     }
 
-    ResumeMassLogAfterRecovery(status);
+    ResumeMassLogAfterRecovery(&saved);
     return rc;
 }
 
@@ -663,12 +663,12 @@ int __wrap_FmcbRecoveryFinish(FmcbRecoveryStatus *status)
         int marker_rc = FmcbRecoveryClearCardMarker(&saved,
                                                     saved.target_port);
         if (marker_rc < 0) {
-            ResumeMassLogAfterRecovery(status);
+            ResumeMassLogAfterRecovery(&saved);
             return marker_rc;
         }
     }
 
-    ResumeMassLogAfterRecovery(status);
+    ResumeMassLogAfterRecovery(&saved);
     return rc;
 }
 
