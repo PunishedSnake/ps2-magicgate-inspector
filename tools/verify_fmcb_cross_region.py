@@ -112,6 +112,7 @@ for token in (
     assert token in tx_c or token in tx_h, f"P0 inventory invariant missing: {token}"
 
 assert "created_system_dirs[FMCB_CROSS_REGION_SYSTEM_DIRS]" in tx_h
+assert "report->rollback_rc = -999" in tx_c
 assert "FmcbRecoveryRecordSystemDirectory" in tx_c
 assert "FmcbRecoveryRecordSysconfDirectory" in tx_c
 assert "FmcbRecoveryRecordDirectories" not in tx_c
