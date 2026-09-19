@@ -32,6 +32,7 @@
 #include "card_image.h"
 #include "card_image_fs.h"
 #include "card_raw_session.h"
+#include "diag_log.h"
 #include "magicgate.h"
 #include "fmcb_install.h"
 #include "fmcb_transaction.h"
@@ -309,11 +310,9 @@ static int BindKelfForInstaller(int target_port, unsigned char *buffer,
                                 unsigned int size, void *userdata)
 {
     MagicGateReport scratch;
-    void *bound;
     int rc;
     int restore_rc;
 
-    (void)size;
     (void)userdata;
     MagicGateResetReport(&scratch, target_port);
     MciProgressUpdate(MCI_PROGRESS_FMCB, 35,
@@ -321,14 +320,21 @@ static int BindKelfForInstaller(int target_port, unsigned char *buffer,
                       "The source is already in EE RAM. Normal clients are closing before the isolated SECRMAN 1.4 session.");
     ShutdownNormalClients();
     rc = InitMagicGateSession(&scratch);
-    if (rc >= 0) {
-        rc = SecrInit();
-        if (rc >= 0) {
-            bound = SecrDownloadFile(target_port, 0, buffer);
-            SecrDeinit();
-            rc = (bound == buffer) ? 0 : -4700;
-        }
-    }
+    if (rc >= 0)
+        rc = MagicGateBindPrepared(target_port, buffer, (int)size, &scratch);
+
+    MciDiagLogPrintf("FMCB-BIND",
+                     "target=mc%d size=%u rc=%d stage=%s result=%s setup=%d mcinit=%d mcinfo=%d type=%d rpc=%d header=%d reply=%d blocks=%d encrypted=%d completed=%d failed_block=%d kbit=%d kc=%d icv_required=%d icv=%d",
+                     target_port, size, rc,
+                     MagicGateStageText(scratch.stage),
+                     MagicGateResultText(scratch.result),
+                     scratch.session_setup_rc, scratch.session_mcinit_rc,
+                     scratch.session_mcinfo_rc, scratch.session_type,
+                     scratch.rpc_rc, scratch.header_rc,
+                     scratch.header_reply_size, scratch.block_count,
+                     scratch.encrypted_blocks, scratch.blocks_completed,
+                     scratch.failed_block, scratch.kbit_rc, scratch.kc_rc,
+                     scratch.icvps2_required, scratch.icvps2_rc);
 
     restore_rc = RestoreNormalEnvironment();
     if (restore_rc < 0) {
