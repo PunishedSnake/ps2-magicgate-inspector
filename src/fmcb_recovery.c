@@ -22,6 +22,7 @@
 
 #include "fmcb_recovery.h"
 #include "progress.h"
+#include "usb_search.h"
 
 #define RECOVERY_MAGIC 0x4D434952u /* MCIR */
 #define RECOVERY_VERSION 2u
@@ -623,10 +624,56 @@ static int RemoveRecoveryFiles(const FmcbRecoveryStatus *status,
     return 0;
 }
 
+static int ProbeRecoverySourceRoot(const char *source_root,
+                                   FmcbRecoveryStatus *status)
+{
+    RecoveryJournal journal;
+    FmcbRecoveryStatus found;
+    char root[FMCB_RECOVERY_PATH_MAX];
+    int valid_slots = 0;
+    int present_slots = 0;
+    int rc;
+
+    if (source_root == NULL || source_root[0] == '\0')
+        return 0;
+
+    snprintf(root, sizeof(root), "%s/%s", source_root, RECOVERY_DIR);
+    memset(&journal, 0, sizeof(journal));
+    rc = LoadLatestJournal(root, &journal, &valid_slots, &present_slots);
+    if (rc == 0) {
+        FillStatus(&found, source_root, root, &journal);
+        if (journal.state == JOURNAL_STATE_COMMITTED) {
+            /* All card writes were already verified before this state was
+             * published. A power cut during cleanup must not turn a good
+             * installation into an apparent rollback request. */
+            RemoveRecoveryFiles(&found, &journal);
+            return 0;
+        }
+        *status = found;
+        status->probe_rc = 0;
+        return 1;
+    }
+
+    if (present_slots > 0 && valid_slots == 0) {
+        status->present = 1;
+        status->valid = 0;
+        status->state = FMCB_RECOVERY_CORRUPT;
+        status->probe_rc = rc;
+        snprintf(status->source_root, sizeof(status->source_root), "%s",
+                 source_root);
+        snprintf(status->recovery_root, sizeof(status->recovery_root), "%s",
+                 root);
+        return -1;
+    }
+    return 0;
+}
+
 int FmcbRecoveryProbe(const FmcbMassBackendStatus *backend,
                       FmcbRecoveryStatus *status)
 {
+    char verified_root[FMCB_SOURCE_ROOT_MAX];
     unsigned int i;
+    int rc;
 
     if (status == NULL)
         return -1;
@@ -639,41 +686,29 @@ int FmcbRecoveryProbe(const FmcbMassBackendStatus *backend,
         return -2;
     }
 
-    for (i = 0; i < sizeof(KnownRoots) / sizeof(KnownRoots[0]); i++) {
-        RecoveryJournal journal;
-        FmcbRecoveryStatus found;
-        char root[FMCB_RECOVERY_PATH_MAX];
-        int valid_slots = 0;
-        int present_slots = 0;
-        int rc;
-
-        snprintf(root, sizeof(root), "%s/%s", KnownRoots[i], RECOVERY_DIR);
-        memset(&journal, 0, sizeof(journal));
-        rc = LoadLatestJournal(root, &journal, &valid_slots, &present_slots);
-        if (rc == 0) {
-            FillStatus(&found, KnownRoots[i], root, &journal);
-            if (journal.state == JOURNAL_STATE_COMMITTED) {
-                /* All card writes were already verified before this state was
-                 * published. A power cut during cleanup must not turn a good
-                 * installation into an apparent rollback request. */
-                RemoveRecoveryFiles(&found, &journal);
-                continue;
-            }
-            *status = found;
-            status->probe_rc = 0;
+    /* The installer accepts recursively discovered FMCB packages, so recovery
+     * must search that exact verified root before falling back to the three
+     * historical mass?:/FMCB locations. Otherwise the dashboard can claim that
+     * no recovery exists while FmcbRecoveryBegin() immediately sees one. */
+    verified_root[0] = '\0';
+    if (MciUsbGetVerifiedPackageRoot(verified_root,
+                                     sizeof(verified_root)) == 0) {
+        rc = ProbeRecoverySourceRoot(verified_root, status);
+        if (rc > 0)
             return 0;
-        }
-        if (present_slots > 0 && valid_slots == 0) {
-            status->present = 1;
-            status->valid = 0;
-            status->state = FMCB_RECOVERY_CORRUPT;
-            status->probe_rc = rc;
-            snprintf(status->source_root, sizeof(status->source_root), "%s",
-                     KnownRoots[i]);
-            snprintf(status->recovery_root, sizeof(status->recovery_root), "%s",
-                     root);
-            return rc;
-        }
+        if (rc < 0)
+            return status->probe_rc;
+    }
+
+    for (i = 0; i < sizeof(KnownRoots) / sizeof(KnownRoots[0]); i++) {
+        if (verified_root[0] != '\0' &&
+            strcmp(verified_root, KnownRoots[i]) == 0)
+            continue;
+        rc = ProbeRecoverySourceRoot(KnownRoots[i], status);
+        if (rc > 0)
+            return 0;
+        if (rc < 0)
+            return status->probe_rc;
     }
     return -ENOENT;
 }
@@ -713,6 +748,31 @@ int FmcbRecoveryBegin(const FmcbPackageReport *package,
         return rc;
 
     FillStatus(status, package->source_root, root, &journal);
+    return 0;
+}
+
+int FmcbRecoveryDiscardEmptyJournal(FmcbRecoveryStatus *status)
+{
+    RecoveryJournal journal;
+    int rc;
+
+    if (status == NULL || !status->present || !status->valid)
+        return -1;
+
+    rc = LoadLatestJournal(status->recovery_root, &journal, NULL, NULL);
+    if (rc < 0)
+        return rc;
+    if (journal.state != JOURNAL_STATE_ACTIVE ||
+        journal.entry_count != 0u ||
+        journal.created_system_dir_mask != 0u ||
+        journal.created_sysconf_dir != 0u)
+        return -5144;
+
+    RemoveRecoveryFiles(status, &journal);
+    memset(status, 0, sizeof(*status));
+    status->target_port = -1;
+    status->state = FMCB_RECOVERY_NONE;
+    status->probe_rc = -ENOENT;
     return 0;
 }
 
