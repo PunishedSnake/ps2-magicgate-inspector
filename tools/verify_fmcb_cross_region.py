@@ -104,6 +104,8 @@ assert "MciUsbGetVerifiedPackageRoot" in recovery_c
 assert "ProbeRecoverySourceRoot" in recovery_c
 assert "FmcbRecoveryDiscardEmptyJournal" in recovery_c
 assert "TryDiscardUnarmedEmptyJournal" in marker_c
+assert "MciUsbGetVerifiedPackageRoot" in marker_c
+assert "ReconcileResidualRoot" in marker_c
 
 assert "__wrap_FmcbInstallCrossRegionTransactional" in diag_c
 assert "__real_FmcbInstallCrossRegionTransactional" in diag_c
