@@ -83,6 +83,17 @@ assert "FmcbInstallNormalTransactional" not in tx_h
 assert "FmcbInstallNormalTransactional" not in tx_c
 assert "FmcbInstallNormalTransactional" not in app_c
 
+revalidate = re.search(
+    r"static int RevalidateInstallerPreconditions\(.*?\n\}",
+    app_c,
+    re.S,
+)
+assert revalidate, "RevalidateInstallerPreconditions not found"
+revalidate_text = revalidate.group(0)
+assert revalidate_text.index("FmcbProbeMassPackage") < revalidate_text.index("RefreshRecoveryStatus"), (
+    "package root must be resolved before recovery revalidation"
+)
+
 # Preserve the stronger P0 inventory path while extending directory ownership.
 for token in (
     "inventory_exact_rc",
