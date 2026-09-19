@@ -5,11 +5,11 @@
 void MciDiagLogReset(void);
 void MciDiagLogSetIoAvailable(int available);
 /*
- * Temporarily prevent durable log writes while another long-lived mass: file
- * descriptor is active. Trace lines continue to accumulate in EE RAM and are
- * flushed after resume. This avoids USBHDFSD/fileXio descriptor-position
- * corruption observed when DREBIN.LOG was opened/appended/closed while a card
- * image file remained open for streaming export or verification.
+ * Temporarily prevent durable log writes while another subsystem owns mass:
+ * for a streaming or transactional filesystem scope. Trace lines continue to
+ * accumulate in EE RAM and are flushed after resume. Real hardware reproduced
+ * USBHDFSD/fileXio cross-file corruption when DREBIN.LOG was opened/appended
+ * around card-image and FMCB recovery traffic.
  */
 void MciDiagLogSetMassWritePaused(int paused);
 
