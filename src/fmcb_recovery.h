@@ -37,6 +37,11 @@ int FmcbRecoveryProbe(const FmcbMassBackendStatus *backend,
 int FmcbRecoveryBegin(const FmcbPackageReport *package,
                       FmcbRecoveryStatus *status);
 
+/* Remove a validated ACTIVE journal only when it has not captured a single
+ * destination and has not recorded any created card directory. This is used to
+ * recover from an interruption before the transaction becomes armed. */
+int FmcbRecoveryDiscardEmptyJournal(FmcbRecoveryStatus *status);
+
 /* After the USB journal exists, write and read-back a tiny transaction token to
  * the target card. Recovery refuses to modify a card without the matching
  * token, preventing a stale journal from being applied to a different card. */
