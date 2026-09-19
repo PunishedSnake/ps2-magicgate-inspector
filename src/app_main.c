@@ -337,15 +337,20 @@ static int BindKelfForInstaller(int target_port, unsigned char *buffer,
                      scratch.icvps2_required, scratch.icvps2_rc);
 
     restore_rc = RestoreNormalEnvironment();
+    if (restore_rc >= 0 && !FmcbMassStatus.available)
+        restore_rc = -4720;
     if (restore_rc < 0) {
-        MciGuiRenderFatal("Installer environment restore failed",
-                          "KELF binding ended but the normal Sony ROM X environment could not be restored. No destination write is safe.",
-                          restore_rc);
-        SleepThread();
+        MciDiagLogPrintf("FMCB-BIND",
+                         "normal environment restored without usable mass backend rc=%d available=%d",
+                         restore_rc, FmcbMassStatus.available);
+        /* Do not attempt a destination write when the recovery journal cannot
+         * be reopened. Return to the transaction engine, which will retain the
+         * durable journal instead of pretending that rollback is possible. */
+        return restore_rc;
     }
     if (rc < 0)
         return rc;
-    return restore_rc;
+    return 0;
 }
 
 static void ResetCardReport(int port)
