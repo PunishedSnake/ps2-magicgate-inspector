@@ -75,6 +75,13 @@ static int EnsurePath(void)
 {
     unsigned int i;
 
+    /* Drebin's open/write/close code is strictly synchronous. Current PS2SDK
+     * fileXio block mode is global, and fileXioOpen() returns 0 for an accepted
+     * NOWAIT RPC instead of a real descriptor. Never allow the logger to
+     * interpret that transient zero as fd 0. Ownership guards ensure no valid
+     * async mass request should still be outstanding when this runs. */
+    fileXioSetBlockMode(FXIO_WAIT);
+
     if (PathReady)
         return 0;
 
@@ -132,6 +139,7 @@ static int WriteRawLineNow(const char *line)
 
     if (!IoAvailable || MassWritePauseDepth != 0u || InWrite)
         return -1;
+    fileXioSetBlockMode(FXIO_WAIT);
     if (EnsurePath() < 0)
         return -2;
 
@@ -200,6 +208,7 @@ static void FlushPending(void)
 
     if (!IoAvailable || MassWritePauseDepth != 0u || InWrite)
         return;
+    fileXioSetBlockMode(FXIO_WAIT);
     if (PendingCount == 0u && DroppedLines == 0u)
         return;
     if (EnsurePath() < 0) {
