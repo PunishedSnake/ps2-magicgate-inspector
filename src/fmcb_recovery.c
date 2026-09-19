@@ -82,6 +82,7 @@ static int CloseCardFile(int fd)
 static int ProbeCardFileForRecovery(int port, const char *path,
                                     int *exists, unsigned int *size)
 {
+    sceMcTblGetDir info __attribute__((aligned(64)));
     int fd;
     int end;
     int close_rc;
@@ -724,7 +725,6 @@ int FmcbRecoveryCaptureTarget(FmcbRecoveryStatus *status,
 {
     RecoveryJournal journal;
     RecoveryEntry *entry;
-    sceMcTblGetDir info __attribute__((aligned(64)));
     char temp_path[FMCB_RECOVERY_PATH_MAX + 32];
     char final_path[FMCB_RECOVERY_PATH_MAX + 32];
     u32 checksum = 2166136261u;
