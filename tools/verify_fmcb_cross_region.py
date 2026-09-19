@@ -15,6 +15,8 @@ tx_h = (ROOT / "src/fmcb_transaction.h").read_text(encoding="utf-8")
 recovery_c = (ROOT / "src/fmcb_recovery.c").read_text(encoding="utf-8")
 recovery_h = (ROOT / "src/fmcb_recovery.h").read_text(encoding="utf-8")
 marker_c = (ROOT / "src/fmcb_recovery_marker.c").read_text(encoding="utf-8")
+magicgate_c = (ROOT / "src/magicgate.c").read_text(encoding="utf-8")
+magicgate_h = (ROOT / "src/magicgate.h").read_text(encoding="utf-8")
 diag_c = (ROOT / "src/diag_wrap.c").read_text(encoding="utf-8")
 diag_log_c = (ROOT / "src/diag_log.c").read_text(encoding="utf-8")
 makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
@@ -83,6 +85,10 @@ assert "FmcbInstallCrossRegionTransactional" in app_c
 assert "FmcbInstallNormalTransactional" not in tx_h
 assert "FmcbInstallNormalTransactional" not in tx_c
 assert "FmcbInstallNormalTransactional" not in app_c
+assert "MagicGateBindPrepared" in app_c
+assert "SecrDownloadFile(target_port" not in app_c
+assert "!FmcbMassStatus.available" in app_c
+assert "MciUsbWaitForStorage(24u, 50000u)" in install_c
 
 revalidate = re.search(
     r"static int RevalidateInstallerPreconditions\(.*?\n\}",
@@ -125,6 +131,17 @@ assert "MciUsbGetVerifiedPackageRoot" in marker_c
 assert "ReconcileResidualRoot" in marker_c
 assert "ResumeMassLogAfterRecovery" in marker_c
 assert "fileXioSync(device, 0)" in marker_c
+assert "fd != -ENODEV" in marker_c
+assert "sceMcResFailDetect" in marker_c
+
+assert "MagicGateBindPrepared" in magicgate_h
+assert "MagicGateBindPrepared" in magicgate_c
+for code in range(4710, 4719):
+    assert f"-{code}" in magicgate_h, f"missing stage-specific KELF bind rc -{code}"
+assert "StoreBoundKeyMaterial" in magicgate_c
+assert "DownloadHeader(target_port" in magicgate_c
+assert "DownloadGetKbit(target_port" in magicgate_c
+assert "DownloadGetKc(target_port" in magicgate_c
 
 assert "__wrap_FmcbInstallCrossRegionTransactional" in diag_c
 assert "__real_FmcbInstallCrossRegionTransactional" in diag_c
