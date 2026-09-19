@@ -495,7 +495,18 @@ int __wrap_FmcbRecoveryProbe(const FmcbMassBackendStatus *backend,
     int residual_rc;
 
     rc = __real_FmcbRecoveryProbe(backend, status);
-    if (status == NULL || status->present)
+    if (status == NULL)
+        return rc;
+
+    if (status->present && status->valid && status->prepared_files == 0) {
+        int discard_rc = TryDiscardUnarmedEmptyJournal(status);
+        if (discard_rc < 0)
+            return discard_rc;
+        if (discard_rc > 0)
+            rc = __real_FmcbRecoveryProbe(backend, status);
+    }
+
+    if (status->present)
         return rc;
 
     /* The real probe intentionally treats COMMITTED as cleanup-only and may
