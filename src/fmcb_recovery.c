@@ -24,7 +24,7 @@
 #include "progress.h"
 
 #define RECOVERY_MAGIC 0x4D434952u /* MCIR */
-#define RECOVERY_VERSION 1u
+#define RECOVERY_VERSION 2u
 #define RECOVERY_CHUNK 4096u
 #define RECOVERY_DIR "MCI-RECOVERY"
 
@@ -50,10 +50,10 @@ typedef struct RecoveryJournal {
     u32 state;
     s32 target_port;
     u32 entry_count;
-    u32 created_system_dir;
+    u32 created_system_dir_mask;
     u32 created_sysconf_dir;
     u32 checksum;
-    char system_dir[48];
+    char system_dirs[FMCB_CROSS_REGION_SYSTEM_DIRS][48];
     RecoveryEntry entries[FMCB_MAX_PACKAGE_ENTRIES];
 } RecoveryJournal;
 
@@ -743,10 +743,36 @@ int FmcbRecoveryCaptureTarget(FmcbRecoveryStatus *status,
     return 0;
 }
 
-int FmcbRecoveryRecordDirectories(FmcbRecoveryStatus *status,
-                                  const char *system_dir,
-                                  int created_system_dir,
-                                  int created_sysconf_dir)
+int FmcbRecoveryRecordSystemDirectory(FmcbRecoveryStatus *status,
+                                       int index,
+                                       const char *system_dir,
+                                       int created)
+{
+    RecoveryJournal journal;
+    int rc;
+
+    if (status == NULL || !status->valid || system_dir == NULL ||
+        index < 0 || index >= FMCB_CROSS_REGION_SYSTEM_DIRS)
+        return -1;
+    rc = LoadLatestJournal(status->recovery_root, &journal, NULL, NULL);
+    if (rc < 0 || journal.state != JOURNAL_STATE_ACTIVE)
+        return rc < 0 ? rc : -5142;
+
+    snprintf(journal.system_dirs[index], sizeof(journal.system_dirs[index]),
+             "%s", system_dir);
+    if (created)
+        journal.created_system_dir_mask |= (1u << index);
+    else
+        journal.created_system_dir_mask &= ~(1u << index);
+
+    rc = SaveJournal(status->recovery_root, status->source_root, &journal);
+    if (rc == 0)
+        status->sequence = journal.sequence;
+    return rc;
+}
+
+int FmcbRecoveryRecordSysconfDirectory(FmcbRecoveryStatus *status,
+                                       int created)
 {
     RecoveryJournal journal;
     int rc;
@@ -756,11 +782,8 @@ int FmcbRecoveryRecordDirectories(FmcbRecoveryStatus *status,
     rc = LoadLatestJournal(status->recovery_root, &journal, NULL, NULL);
     if (rc < 0 || journal.state != JOURNAL_STATE_ACTIVE)
         return rc < 0 ? rc : -5142;
-    journal.created_system_dir = created_system_dir ? 1u : 0u;
-    journal.created_sysconf_dir = created_sysconf_dir ? 1u : 0u;
-    if (system_dir != NULL)
-        snprintf(journal.system_dir, sizeof(journal.system_dir), "%s",
-                 system_dir);
+
+    journal.created_sysconf_dir = created ? 1u : 0u;
     rc = SaveJournal(status->recovery_root, status->source_root, &journal);
     if (rc == 0)
         status->sequence = journal.sequence;
@@ -842,12 +865,18 @@ int FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc)
         if (rc < 0 && rc != sceMcResNoEntry && rc != sceMcResNotEmpty)
             first_error = rc;
     }
-    if (first_error == 0 && journal.created_system_dir &&
-        journal.system_dir[0] != '\0') {
-        mcDelete(status->target_port, 0, journal.system_dir);
-        rc = McResult();
-        if (rc < 0 && rc != sceMcResNoEntry && rc != sceMcResNotEmpty)
-            first_error = rc;
+    if (first_error == 0) {
+        for (i = FMCB_CROSS_REGION_SYSTEM_DIRS - 1; i >= 0; i--) {
+            if ((journal.created_system_dir_mask & (1u << i)) == 0 ||
+                journal.system_dirs[i][0] == '\0')
+                continue;
+            mcDelete(status->target_port, 0, journal.system_dirs[i]);
+            rc = McResult();
+            if (rc < 0 && rc != sceMcResNoEntry && rc != sceMcResNotEmpty) {
+                first_error = rc;
+                break;
+            }
+        }
     }
 
     if (rollback_rc != NULL)
