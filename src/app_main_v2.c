@@ -744,7 +744,7 @@ int main(int argc, char *argv[])
                     } else {
                         char message[512];
                         snprintf(message, sizeof(message),
-                                 "Recover the interrupted FMCB transaction recorded for mc%d?\n\nState: %s\nPrepared destinations: %d\nUSB root: %s\n\nRecovery validates the card transaction marker, restores every captured destination in reverse order, verifies restored files, then removes the journal.",
+                                 "Recover the interrupted FMCB transaction recorded for mc%d?\n\nState: %s\nPrepared destinations: %d\nUSB root: %s\n\nRecovery validates the transaction marker, restores captured destinations in reverse order, and removes the journal. An unarmed zero-destination journal is safely discarded without touching FMCB files.",
                                  RecoveryStatus.target_port,
                                  FmcbRecoveryStateText(RecoveryStatus.state),
                                  RecoveryStatus.prepared_files,
@@ -756,7 +756,7 @@ int main(int argc, char *argv[])
                     }
                 } else if (FmcbReports[selected].status != FMCB_PACKAGE_READY) {
                     MciGuiRenderMessage("Installer locked",
-                                        "Run FMCB Preflight with CROSS first. The normal installer is armed only for a package that resolves every required source and destination.",
+                                        "Run FMCB Preflight with CROSS first. The cross-region installer is armed only after every required I/A/E/C source and destination resolves.",
                                         "CROSS or CIRCLE returns to the dashboard.",
                                         MCI_GUI_TONE_WARNING);
                     install_result_modal = 1;
