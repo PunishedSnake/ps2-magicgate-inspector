@@ -122,6 +122,8 @@ assert "TryDiscardUnarmedEmptyJournal" in marker_c
 assert "status->prepared_files == 0" in marker_c
 assert "MciUsbGetVerifiedPackageRoot" in marker_c
 assert "ReconcileResidualRoot" in marker_c
+assert "ResumeMassLogAfterRecovery" in marker_c
+assert "fileXioSync(device, 0)" in marker_c
 
 assert "__wrap_FmcbInstallCrossRegionTransactional" in diag_c
 assert "__real_FmcbInstallCrossRegionTransactional" in diag_c
@@ -134,6 +136,9 @@ install_wrap = re.search(
 )
 assert install_wrap, "cross-region diagnostic wrapper not found"
 install_wrap_text = install_wrap.group(0)
+assert "fileXioSetBlockMode(FXIO_WAIT)" in install_wrap_text, (
+    "installer must force synchronous fileXio semantics"
+)
 assert install_wrap_text.index("MciDiagLogSetMassWritePaused(1)") < install_wrap_text.index(
     "__real_FmcbInstallCrossRegionTransactional"
 ), "Drebin must pause before installer mass I/O"
@@ -154,11 +159,14 @@ for wrapper_name in (
     )
     assert match, f"{wrapper_name} not found"
     body = match.group(0)
+    assert "fileXioSetBlockMode(FXIO_WAIT)" in body, (
+        f"{wrapper_name} must force synchronous fileXio semantics"
+    )
     assert "MciDiagLogSetMassWritePaused(1)" in body, (
         f"{wrapper_name} must acquire mass-log ownership guard"
     )
-    assert "MciDiagLogSetMassWritePaused(0)" in body, (
-        f"{wrapper_name} must release mass-log ownership guard"
+    assert "ResumeMassLogAfterRecovery(" in body, (
+        f"{wrapper_name} must release ownership through synced recovery resume"
     )
 
 assert "--wrap=FmcbInstallCrossRegionTransactional" in makefile
