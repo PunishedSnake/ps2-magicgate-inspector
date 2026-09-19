@@ -23,6 +23,7 @@ on:
       - feat/0.4.0-dev3-drebin
       - feat/0.4.0-dev4-drebin-browser
       - feat/0.4.0-dev4-save-transfer-picker-impl4
+      - feat/p0-fmcb-cross-region
     paths:
       - 'src/**'
       - 'tools/**'
