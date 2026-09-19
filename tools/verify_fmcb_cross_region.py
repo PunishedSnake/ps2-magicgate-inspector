@@ -14,6 +14,9 @@ tx_c = (ROOT / "src/fmcb_transaction.c").read_text(encoding="utf-8")
 tx_h = (ROOT / "src/fmcb_transaction.h").read_text(encoding="utf-8")
 recovery_c = (ROOT / "src/fmcb_recovery.c").read_text(encoding="utf-8")
 recovery_h = (ROOT / "src/fmcb_recovery.h").read_text(encoding="utf-8")
+marker_c = (ROOT / "src/fmcb_recovery_marker.c").read_text(encoding="utf-8")
+diag_c = (ROOT / "src/diag_wrap.c").read_text(encoding="utf-8")
+makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
 app_c = (ROOT / "src/app_main.c").read_text(encoding="utf-8")
 
 manifest_match = re.search(
@@ -97,6 +100,16 @@ assert "FmcbRecoveryRecordDirectories" not in tx_c
 assert "#define RECOVERY_VERSION 2u" in recovery_c
 assert "created_system_dir_mask" in recovery_c
 assert "system_dirs[FMCB_CROSS_REGION_SYSTEM_DIRS][48]" in recovery_c
+assert "MciUsbGetVerifiedPackageRoot" in recovery_c
+assert "ProbeRecoverySourceRoot" in recovery_c
+assert "FmcbRecoveryDiscardEmptyJournal" in recovery_c
+assert "TryDiscardUnarmedEmptyJournal" in marker_c
+
+assert "__wrap_FmcbInstallCrossRegionTransactional" in diag_c
+assert "__real_FmcbInstallCrossRegionTransactional" in diag_c
+assert "FmcbInstallNormalTransactional" not in diag_c
+assert "--wrap=FmcbInstallCrossRegionTransactional" in makefile
+assert "--wrap=FmcbInstallNormalTransactional" not in makefile
 
 # Recovery path must remain at least as large as the package-root producer.
 assert "FMCB_RECOVERY_PATH_MAX (FMCB_SOURCE_ROOT_MAX + 32)" in recovery_h
