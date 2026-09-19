@@ -28,6 +28,7 @@
 #include <string.h>
 
 #include "fmcb_recovery.h"
+#include "usb_search.h"
 
 #define MARKER_MAGIC 0x4D434954u /* MCIT */
 #define MARKER_FILE "card-token.bin"
@@ -366,51 +367,74 @@ static void DiscardFailedArmArtifacts(const FmcbRecoveryStatus *status)
     (void)fileXioRmdir(status->recovery_root);
 }
 
+static int ReconcileResidualRoot(const char *source_root,
+                                 FmcbRecoveryStatus *status)
+{
+    FmcbRecoveryStatus residual;
+    RecoveryCardMarker usb_marker;
+    RecoveryCardMarker card_marker;
+    int rc;
+
+    if (source_root == NULL || source_root[0] == '\0')
+        return 0;
+
+    memset(&residual, 0, sizeof(residual));
+    residual.target_port = -1;
+    snprintf(residual.source_root, sizeof(residual.source_root), "%s",
+             source_root);
+    snprintf(residual.recovery_root, sizeof(residual.recovery_root),
+             "%s/MCI-RECOVERY", source_root);
+
+    rc = ReadMassMarker(&residual, &usb_marker);
+    if (rc < 0)
+        return 0;
+
+    residual.present = 1;
+    residual.valid = 1;
+    residual.target_port = usb_marker.target_port;
+    residual.marker_token = usb_marker.token;
+    residual.probe_rc = 0;
+
+    rc = ReadCardMarker(residual.target_port, &card_marker);
+    if (rc == 0 &&
+        memcmp(&usb_marker, &card_marker, sizeof(usb_marker)) == 0) {
+        rc = FmcbRecoveryClearCardMarker(&residual,
+                                         residual.target_port);
+        if (rc == 0)
+            return 0;
+    }
+
+    /* A residual token without its matching card is deliberately sticky. The
+     * original card may not be present, so preserve identity evidence instead
+     * of guessing. */
+    residual.valid = 0;
+    residual.state = FMCB_RECOVERY_CORRUPT;
+    residual.probe_rc = rc < 0 ? rc : -5169;
+    *status = residual;
+    return residual.probe_rc;
+}
+
 static int ReconcileResidualMarkers(FmcbRecoveryStatus *status)
 {
+    char verified_root[FMCB_SOURCE_ROOT_MAX];
     unsigned int i;
+    int rc;
+
+    verified_root[0] = '\0';
+    if (MciUsbGetVerifiedPackageRoot(verified_root,
+                                     sizeof(verified_root)) == 0) {
+        rc = ReconcileResidualRoot(verified_root, status);
+        if (rc < 0)
+            return rc;
+    }
 
     for (i = 0; i < sizeof(ResidualRoots) / sizeof(ResidualRoots[0]); i++) {
-        FmcbRecoveryStatus residual;
-        RecoveryCardMarker usb_marker;
-        RecoveryCardMarker card_marker;
-        int rc;
-
-        memset(&residual, 0, sizeof(residual));
-        residual.target_port = -1;
-        snprintf(residual.source_root, sizeof(residual.source_root), "%s",
-                 ResidualRoots[i].source_root);
-        snprintf(residual.recovery_root, sizeof(residual.recovery_root), "%s",
-                 ResidualRoots[i].recovery_root);
-
-        rc = ReadMassMarker(&residual, &usb_marker);
-        if (rc < 0)
+        if (verified_root[0] != '\0' &&
+            strcmp(verified_root, ResidualRoots[i].source_root) == 0)
             continue;
-
-        residual.present = 1;
-        residual.valid = 1;
-        residual.target_port = usb_marker.target_port;
-        residual.marker_token = usb_marker.token;
-        residual.probe_rc = 0;
-
-        rc = ReadCardMarker(residual.target_port, &card_marker);
-        if (rc == 0 &&
-            memcmp(&usb_marker, &card_marker, sizeof(usb_marker)) == 0) {
-            rc = FmcbRecoveryClearCardMarker(&residual,
-                                             residual.target_port);
-            if (rc == 0)
-                continue;
-        }
-
-        /* A residual token without its matching card is deliberately sticky.
-         * This most commonly means COMMITTED cleanup was interrupted and the
-         * original card is not currently present. Block a new install rather
-         * than overwriting the only identity evidence. */
-        residual.valid = 0;
-        residual.state = FMCB_RECOVERY_CORRUPT;
-        residual.probe_rc = rc < 0 ? rc : -5169;
-        *status = residual;
-        return residual.probe_rc;
+        rc = ReconcileResidualRoot(ResidualRoots[i].source_root, status);
+        if (rc < 0)
+            return rc;
     }
     return 0;
 }
