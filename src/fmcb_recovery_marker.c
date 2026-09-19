@@ -24,6 +24,7 @@
 #include <iox_stat.h>
 #include <errno.h>
 #include <timer.h>
+#include <delaythread.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -479,6 +480,24 @@ static int ReconcileResidualMarkers(FmcbRecoveryStatus *status)
     return 0;
 }
 
+static void ResumeMassLogAfterRecovery(const FmcbRecoveryStatus *status)
+{
+    if (status != NULL && status->source_root[0] != '\0') {
+        char device[16];
+        const char *colon = strchr(status->source_root, ':');
+        if (colon != NULL) {
+            unsigned int length = (unsigned int)(colon - status->source_root) + 1u;
+            if (length < sizeof(device)) {
+                memcpy(device, status->source_root, length);
+                device[length] = '\0';
+                (void)fileXioSync(device, 0);
+                DelayThread(10000);
+            }
+        }
+    }
+    MciDiagLogSetMassWritePaused(0);
+}
+
 /* Journal lifecycle wrappers. The core recovery implementation deliberately
  * knows nothing about the card marker; linking these wrappers makes the safety
  * invariant unavoidable for all current installer callers. */
@@ -500,14 +519,14 @@ int __wrap_FmcbRecoveryProbe(const FmcbMassBackendStatus *backend,
 
     rc = __real_FmcbRecoveryProbe(backend, status);
     if (status == NULL) {
-        MciDiagLogSetMassWritePaused(0);
+        ResumeMassLogAfterRecovery(status);
         return rc;
     }
 
     if (status->present && status->valid && status->prepared_files == 0) {
         int discard_rc = TryDiscardUnarmedEmptyJournal(status);
         if (discard_rc < 0) {
-            MciDiagLogSetMassWritePaused(0);
+            ResumeMassLogAfterRecovery(status);
             return discard_rc;
         }
         if (discard_rc > 0)
@@ -515,7 +534,7 @@ int __wrap_FmcbRecoveryProbe(const FmcbMassBackendStatus *backend,
     }
 
     if (status->present) {
-        MciDiagLogSetMassWritePaused(0);
+        ResumeMassLogAfterRecovery(status);
         return rc;
     }
 
@@ -524,7 +543,7 @@ int __wrap_FmcbRecoveryProbe(const FmcbMassBackendStatus *backend,
      * wrapper to remove the card marker only after proving the original card is
      * still present. If not, the residual token becomes a blocking condition. */
     residual_rc = ReconcileResidualMarkers(status);
-    MciDiagLogSetMassWritePaused(0);
+    ResumeMassLogAfterRecovery(status);
     return residual_rc < 0 ? residual_rc : rc;
 }
 
@@ -542,14 +561,14 @@ int __wrap_FmcbRecoveryBegin(const FmcbPackageReport *package,
     if (rc == -5140 && status != NULL && status->present) {
         int discard_rc = TryDiscardUnarmedEmptyJournal(status);
         if (discard_rc < 0) {
-            MciDiagLogSetMassWritePaused(0);
+            ResumeMassLogAfterRecovery(status);
             return discard_rc;
         }
         if (discard_rc > 0)
             rc = __real_FmcbRecoveryBegin(package, status);
     }
     if (rc < 0) {
-        MciDiagLogSetMassWritePaused(0);
+        ResumeMassLogAfterRecovery(status);
         return rc;
     }
 
@@ -562,11 +581,11 @@ int __wrap_FmcbRecoveryBegin(const FmcbPackageReport *package,
         (void)__real_FmcbRecoveryRun(status, &rollback_rc);
         if (rc != -5168)
             DiscardFailedArmArtifacts(&saved);
-        MciDiagLogSetMassWritePaused(0);
+        ResumeMassLogAfterRecovery(status);
         return rc;
     }
 
-    MciDiagLogSetMassWritePaused(0);
+    ResumeMassLogAfterRecovery(status);
     return 0;
 }
 
@@ -584,13 +603,13 @@ int __wrap_FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc)
     {
         int discard_rc = TryDiscardUnarmedEmptyJournal(status);
         if (discard_rc < 0) {
-            MciDiagLogSetMassWritePaused(0);
+            ResumeMassLogAfterRecovery(status);
             return discard_rc;
         }
         if (discard_rc > 0) {
             if (rollback_rc != NULL)
                 *rollback_rc = 0;
-            MciDiagLogSetMassWritePaused(0);
+            ResumeMassLogAfterRecovery(status);
             return 0;
         }
     }
@@ -599,7 +618,7 @@ int __wrap_FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc)
      * agree before any destination from the journal can be restored/deleted. */
     rc = FmcbRecoveryCheckCard(status, status->target_port);
     if (rc < 0) {
-        MciDiagLogSetMassWritePaused(0);
+        ResumeMassLogAfterRecovery(status);
         return rc;
     }
 
@@ -609,12 +628,12 @@ int __wrap_FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc)
         int marker_rc = FmcbRecoveryClearCardMarker(&saved,
                                                     saved.target_port);
         if (marker_rc < 0) {
-            MciDiagLogSetMassWritePaused(0);
+            ResumeMassLogAfterRecovery(status);
             return marker_rc;
         }
     }
 
-    MciDiagLogSetMassWritePaused(0);
+    ResumeMassLogAfterRecovery(status);
     return rc;
 }
 
@@ -634,7 +653,7 @@ int __wrap_FmcbRecoveryFinish(FmcbRecoveryStatus *status)
      * deliberately leaves card-token.bin for the post-commit marker cleanup. */
     rc = FmcbRecoveryCheckCard(status, status->target_port);
     if (rc < 0) {
-        MciDiagLogSetMassWritePaused(0);
+        ResumeMassLogAfterRecovery(status);
         return rc;
     }
 
@@ -644,12 +663,12 @@ int __wrap_FmcbRecoveryFinish(FmcbRecoveryStatus *status)
         int marker_rc = FmcbRecoveryClearCardMarker(&saved,
                                                     saved.target_port);
         if (marker_rc < 0) {
-            MciDiagLogSetMassWritePaused(0);
+            ResumeMassLogAfterRecovery(status);
             return marker_rc;
         }
     }
 
-    MciDiagLogSetMassWritePaused(0);
+    ResumeMassLogAfterRecovery(status);
     return rc;
 }
 
