@@ -404,9 +404,22 @@ int __wrap_FmcbInstallCrossRegionTransactional(int target_port,
                      recovery != NULL ? recovery->present : -1,
                      recovery != NULL ? recovery->valid : -1);
 
+    /* REAL-HARDWARE FINDING:
+     * USBHDFSD/fileXio on the tested stack can misdirect a later DREBIN append
+     * into another mass: file that participated in the same high-level
+     * workflow. We previously reproduced this with card images; FMCB recovery
+     * journal0.bin now reproduced the same signature byte-for-byte: its header
+     * was overwritten by the tail of an FMCB-FILE diagnostic line.
+     *
+     * Treat the whole installer as one exclusive mass-storage ownership scope.
+     * Trace remains in the EE ring while package/recovery descriptors and FAT
+     * metadata are live. Flush only after the transaction returned and all of
+     * its fileXio descriptors are supposed to be closed. */
+    MciDiagLogSetMassWritePaused(1);
     rc = __real_FmcbInstallCrossRegionTransactional(target_port, package, options,
                                                 bind_kelf, bind_userdata,
                                                 recovery, report);
+    MciDiagLogSetMassWritePaused(0);
 
     if (report == NULL) {
         MciDiagLogPrintf("FMCB", "transaction end rc=%d report=NULL", rc);
