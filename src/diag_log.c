@@ -335,7 +335,7 @@ void MciDiagLogSetMassWritePaused(int paused)
             /* This marker is durable because the outermost caller enters the
              * guard before opening the long-lived image descriptor. */
             MciDiagLogPrintf("LOGGER",
-                             "card-image mass I/O critical section begins; durable trace paused");
+                             "mass-storage critical section begins; durable trace paused");
         }
         MassWritePauseDepth++;
         return;
@@ -349,7 +349,7 @@ void MciDiagLogSetMassWritePaused(int paused)
 
     FlushPending();
     MciDiagLogPrintf("LOGGER",
-                     "card-image mass I/O critical section ended; durable trace resumed");
+                     "mass-storage critical section ended; durable trace resumed");
 }
 
 void MciDiagLogPrintf(const char *component, const char *format, ...)
