@@ -3,7 +3,9 @@
 
 #include "fmcb_install.h"
 
-#define FMCB_RECOVERY_PATH_MAX 128
+/* source_root can use the full 192-byte package path. Recovery appends
+ * /MCI-RECOVERY, so the recovery path must not be smaller than its producer. */
+#define FMCB_RECOVERY_PATH_MAX (FMCB_SOURCE_ROOT_MAX + 32)
 #define FMCB_RECOVERY_CARD_MARKER "/__MCI04.TXN"
 
 typedef enum FmcbRecoveryState {
