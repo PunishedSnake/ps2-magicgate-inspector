@@ -404,6 +404,11 @@ int __wrap_FmcbInstallCrossRegionTransactional(int target_port,
                      recovery != NULL ? recovery->present : -1,
                      recovery != NULL ? recovery->valid : -1);
 
+    /* fileXio block mode is global to the EE client. Installer and recovery
+     * are correctness-first transactions and must never inherit NOWAIT from a
+     * prior P0 image experiment. */
+    fileXioSetBlockMode(FXIO_WAIT);
+
     /* REAL-HARDWARE FINDING:
      * USBHDFSD/fileXio on the tested stack can misdirect a later DREBIN append
      * into another mass: file that participated in the same high-level
