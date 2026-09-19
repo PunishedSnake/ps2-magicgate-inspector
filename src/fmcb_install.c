@@ -20,6 +20,7 @@
 #include <io_common.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
 
 #include "fmcb_install.h"
 #include "progress.h"
@@ -265,10 +266,18 @@ out:
     if (status->filexio_init_rc < 0)
         return status->filexio_init_rc;
 
-    DelayThread(250000);
+    MciProgressUpdate(MCI_PROGRESS_ENVIRONMENT, 90,
+                      "Waiting for the USB filesystem",
+                      "USBHDFSD is resident; waiting until at least one mass: root can actually be opened.");
+    rc = MciUsbWaitForStorage(24u, 50000u);
+    if (rc < 0) {
+        status->available = 0;
+        return -ENODEV;
+    }
+
     status->available = 1;
     MciProgressUpdate(MCI_PROGRESS_ENVIRONMENT, 100, "USB package backend ready",
-                      "mass: access is available for FMCB package discovery, installation sources and recovery state.");
+                      "A mass: root was opened successfully; package and recovery I/O can now resume.");
     return 0;
 }
 
