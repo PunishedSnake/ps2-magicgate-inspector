@@ -675,7 +675,7 @@ static void RunCardImageExportAction(int port, MciCardImageFormat format)
     ShowCardImageResult("Card image export", &report, rc, 0);
 }
 
-static void RunCardImageVerifyLatest(int port, MciCardImageFormat format)
+static void __attribute__((unused)) RunCardImageVerifyLatest(int port, MciCardImageFormat format)
 {
     MciCardImageReport report;
     char path[MCI_CARD_IMAGE_PATH_MAX];
@@ -1198,7 +1198,7 @@ int main(int argc, char *argv[])
                                             MCI_GUI_TONE_DANGER);
                         install_result_modal = 1;
                     } else {
-                        char message[360];
+                        char message[512];
                         snprintf(message, sizeof(message),
                                  "Recover the interrupted FMCB transaction recorded for mc%d?\n\nState: %s\nPrepared destinations: %d\nUSB root: %s\n\nRecovery validates the card transaction marker, restores every captured destination in reverse order, verifies restored files, then removes the journal.",
                                  RecoveryStatus.target_port,
