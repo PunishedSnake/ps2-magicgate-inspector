@@ -18,6 +18,7 @@ on:
     branches:
       - main
       - feat/0.4.0
+      - feat/fmcb-cross-region-binding
     paths:
       - 'src/**'
       - 'tools/**'
@@ -88,7 +89,7 @@ jobs:
             echo "PS2 Memory Card Inspector 0.4.0 development"
             echo "Project revision: $GITHUB_SHA"
             echo "Frontend: configurable Native / 480p / 576p / 720p / 1080i GS dashboard"
-            echo "Installer: configurable read-back policy, persistent USB recovery journal and card identity marker"
+            echo "Installer: verified FMCB cross-region I/A/E/C transaction using the hardware-validated PS2SDK 2.0 SECRMAN 1.4 binding path"
             echo "USB discovery: bounded recursive FMCB.XLF search for MagicGate and package preflight"
             echo "Region policy: ROMVER + read-only MechaCon/MechaPwn profiling; unsafe Deckard CEX one-region installs are blocked"
             echo "PS2SDK security source: https://github.com/ps2dev/ps2sdk/commit/$PS2SDK_SECURITY_COMMIT"

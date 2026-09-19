@@ -460,7 +460,7 @@ static int RunVerifiedInstaller(int target_port)
     int rc;
 
     MciGuiRenderMessage("Revalidating before installation",
-                        "The selected card, MagicGate capability, active ROMVER/MechaCon policy and USB package are re-tested immediately before the first destination write.",
+                        "The selected card, hardware-validated MagicGate capability, active ROMVER/MechaCon policy and complete cross-region USB package are re-tested immediately before the first destination write.",
                         NULL, MCI_GUI_TONE_WARNING);
     rc = RevalidateInstallerPreconditions(target_port, reason, sizeof(reason));
     if (rc < 0) {
@@ -474,7 +474,7 @@ static int RunVerifiedInstaller(int target_port)
 
     options.preserve_existing_cnfs = Settings.preserve_existing_cnfs;
     options.verify_mode = Settings.install_verify_mode;
-    rc = FmcbInstallNormalTransactional(target_port,
+    rc = FmcbInstallCrossRegionTransactional(target_port,
                                         &FmcbReports[target_port],
                                         &options,
                                         BindKelfForInstaller, NULL,
@@ -493,21 +493,37 @@ static int RunVerifiedInstaller(int target_port)
             tone = MCI_GUI_TONE_WARNING;
         }
         snprintf(result, sizeof(result),
-                 "Normal FMCB installation completed on mc%d. %d/%d selected entries committed or intentionally preserved. %s Space check: free=%d, payload=%u, reclaimable=%u, reserve=%u clusters. Persistent recovery state was committed and removed.",
+                 "Cross-region FMCB installation completed on mc%d. %d/%d selected entries committed or intentionally preserved across BI/BE/BA/BC. %s Space check: free=%d, payload=%u, reclaimable=%u, reserve=%u clusters. Persistent recovery state was committed and removed.",
                  target_port, report->files_committed, report->files_total,
                  verify_summary, report->free_clusters, report->payload_clusters,
                  report->reclaimable_clusters, report->reserve_clusters);
         MciGuiRenderMessage(FmcbInstallResultText(report->result), result,
                             "CROSS or CIRCLE returns to the dashboard.", tone);
     } else {
-        char result[420];
-        snprintf(result, sizeof(result),
-                 "Install failed at %s: %s. Files committed before failure: %d/%d. space rc=%d, recovery rc=%d, rollback rc=%d. If recovery remains present, do not start another install; restore the recorded transaction first.",
-                 FmcbInstallStageText(report->stage),
-                 FmcbInstallResultText(report->result),
-                 report->files_committed, report->files_total,
-                 report->space_rc, report->recovery_rc,
-                 report->rollback_rc);
+        char result[640];
+        if (report->current_file >= 0 &&
+            report->current_file < FMCB_TX_MAX_FILES) {
+            const FmcbInstallFileReport *failed =
+                &report->files[report->current_file];
+            snprintf(result, sizeof(result),
+                     "Install failed at %s: %s. Entry %d: %s -> mc%d:%s. rc: backup=%d bind=%d write=%d verify=%d; committed=%d/%d; space=%d recovery=%d rollback=%d. If recovery remains present, restore it before another install.",
+                     FmcbInstallStageText(report->stage),
+                     FmcbInstallResultText(report->result),
+                     report->current_file, failed->source, target_port,
+                     failed->destination, failed->backup_rc, failed->bind_rc,
+                     failed->write_rc, failed->verify_rc,
+                     report->files_committed, report->files_total,
+                     report->space_rc, report->recovery_rc,
+                     report->rollback_rc);
+        } else {
+            snprintf(result, sizeof(result),
+                     "Install failed at %s: %s. committed=%d/%d; space=%d recovery=%d rollback=%d. If recovery remains present, restore it before another install.",
+                     FmcbInstallStageText(report->stage),
+                     FmcbInstallResultText(report->result),
+                     report->files_committed, report->files_total,
+                     report->space_rc, report->recovery_rc,
+                     report->rollback_rc);
+        }
         (void)RefreshRecoveryStatus();
         MciGuiRenderMessage("FMCB install failed", result,
                             "CROSS or CIRCLE returns to the dashboard.",
@@ -803,7 +819,7 @@ int main(int argc, char *argv[])
                     }
                 } else if (FmcbReports[selected].status != FMCB_PACKAGE_READY) {
                     MciGuiRenderMessage("Installer locked",
-                                        "Run FMCB Preflight with CROSS first. The normal installer is armed only for a package that resolves every required source and destination.",
+                                        "Run FMCB Preflight with CROSS first. The cross-region installer is armed only after every I/A/E/C destination and required source has been resolved.",
                                         "CROSS or CIRCLE returns to the dashboard.",
                                         MCI_GUI_TONE_WARNING);
                     install_result_modal = 1;

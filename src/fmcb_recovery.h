@@ -54,10 +54,12 @@ int FmcbRecoveryCaptureTarget(FmcbRecoveryStatus *status,
 
 /* Record card directories created by this transaction so recovery can remove
  * them if they are still empty after all original files have been restored. */
-int FmcbRecoveryRecordDirectories(FmcbRecoveryStatus *status,
-                                  const char *system_dir,
-                                  int created_system_dir,
-                                  int created_sysconf_dir);
+int FmcbRecoveryRecordSystemDirectory(FmcbRecoveryStatus *status,
+                                       int index,
+                                       const char *system_dir,
+                                       int created);
+int FmcbRecoveryRecordSysconfDirectory(FmcbRecoveryStatus *status,
+                                       int created);
 
 /* Restore every prepared destination in reverse order from persistent USB
  * backups. The linked public entry point validates the USB/card identity token
