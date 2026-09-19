@@ -58,6 +58,26 @@ typedef struct RecoveryJournal {
     RecoveryEntry entries[FMCB_MAX_PACKAGE_ENTRIES];
 } RecoveryJournal;
 
+#define LEGACY_RECOVERY_VERSION 1u
+#define LEGACY_RECOVERY_MAX_ENTRIES 16u
+
+/* 0.4.0 pre-cross-region journal. Keep the exact field order/array length so
+ * already-written recovery metadata remains recoverable after the v2 upgrade. */
+typedef struct LegacyRecoveryJournalV1 {
+    u32 magic;
+    u32 version;
+    u32 struct_size;
+    u32 sequence;
+    u32 state;
+    s32 target_port;
+    u32 entry_count;
+    u32 created_system_dir;
+    u32 created_sysconf_dir;
+    u32 checksum;
+    char system_dir[48];
+    RecoveryEntry entries[LEGACY_RECOVERY_MAX_ENTRIES];
+} LegacyRecoveryJournalV1;
+
 static const char *KnownRoots[] = {
     "mass:/FMCB",
     "mass0:/FMCB",
@@ -141,6 +161,58 @@ static u32 JournalChecksum(const RecoveryJournal *journal)
     copy.checksum = 0;
     return FnvUpdate(2166136261u, (const unsigned char *)&copy,
                      sizeof(copy));
+}
+
+static u32 LegacyJournalChecksumV1(const LegacyRecoveryJournalV1 *journal)
+{
+    LegacyRecoveryJournalV1 copy;
+
+    copy = *journal;
+    copy.checksum = 0;
+    return FnvUpdate(2166136261u, (const unsigned char *)&copy,
+                     sizeof(copy));
+}
+
+static int LegacyJournalValidV1(const LegacyRecoveryJournalV1 *journal)
+{
+    if (journal->magic != RECOVERY_MAGIC ||
+        journal->version != LEGACY_RECOVERY_VERSION ||
+        journal->struct_size != (u32)sizeof(*journal) ||
+        journal->entry_count > LEGACY_RECOVERY_MAX_ENTRIES ||
+        journal->target_port < 0 || journal->target_port > 1 ||
+        (journal->state != JOURNAL_STATE_ACTIVE &&
+         journal->state != JOURNAL_STATE_ROLLING_BACK &&
+         journal->state != JOURNAL_STATE_COMMITTED))
+        return 0;
+    return journal->checksum == LegacyJournalChecksumV1(journal);
+}
+
+static void ConvertLegacyJournalV1(const LegacyRecoveryJournalV1 *legacy,
+                                   RecoveryJournal *journal)
+{
+    unsigned int i;
+
+    memset(journal, 0, sizeof(*journal));
+    journal->magic = RECOVERY_MAGIC;
+    journal->version = RECOVERY_VERSION;
+    journal->struct_size = sizeof(*journal);
+    journal->sequence = legacy->sequence;
+    journal->state = legacy->state;
+    journal->target_port = legacy->target_port;
+    journal->entry_count = legacy->entry_count;
+    journal->created_sysconf_dir = legacy->created_sysconf_dir;
+
+    if (legacy->created_system_dir && legacy->system_dir[0] != '\0') {
+        journal->created_system_dir_mask = 1u;
+        snprintf(journal->system_dirs[0], sizeof(journal->system_dirs[0]),
+                 "%s", legacy->system_dir);
+    }
+
+    for (i = 0; i < legacy->entry_count &&
+                i < LEGACY_RECOVERY_MAX_ENTRIES; i++)
+        journal->entries[i] = legacy->entries[i];
+
+    journal->checksum = JournalChecksum(journal);
 }
 
 static void BuildPath(char *out, unsigned int size,
@@ -246,13 +318,29 @@ static int ReadJournalSlot(const char *root, int slot,
     rc = fileXioGetStat(path, &stat);
     if (rc < 0)
         return rc;
-    if (stat.size != sizeof(*journal))
-        return -5110;
-    memset(journal, 0, sizeof(*journal));
-    rc = ReadExactFile(path, journal, sizeof(*journal));
-    if (rc < 0)
-        return rc;
-    return JournalValid(journal) ? 0 : -5111;
+
+    if (stat.size == sizeof(*journal)) {
+        memset(journal, 0, sizeof(*journal));
+        rc = ReadExactFile(path, journal, sizeof(*journal));
+        if (rc < 0)
+            return rc;
+        return JournalValid(journal) ? 0 : -5111;
+    }
+
+    if (stat.size == sizeof(LegacyRecoveryJournalV1)) {
+        LegacyRecoveryJournalV1 legacy;
+
+        memset(&legacy, 0, sizeof(legacy));
+        rc = ReadExactFile(path, &legacy, sizeof(legacy));
+        if (rc < 0)
+            return rc;
+        if (!LegacyJournalValidV1(&legacy))
+            return -5111;
+        ConvertLegacyJournalV1(&legacy, journal);
+        return 0;
+    }
+
+    return -5110;
 }
 
 static int LoadLatestJournal(const char *root, RecoveryJournal *journal,
