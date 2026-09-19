@@ -419,11 +419,25 @@ static void RunSelectedFullScan(int target_port)
 static int RevalidateInstallerPreconditions(int target_port, char *reason,
                                             unsigned int reason_size)
 {
+    /* Package discovery must run before recovery discovery. Recovery journals
+     * live beside the recursively discovered package, so probing recovery first
+     * only knows the historical mass?:/FMCB fallback roots and can miss the
+     * exact journal that FmcbRecoveryBegin() will see moments later. */
+    if (FmcbProbeMassPackage(target_port, &FmcbMassStatus,
+                             &FmcbReports[target_port]) < 0 ||
+        FmcbReports[target_port].status != FMCB_PACKAGE_READY) {
+        snprintf(reason, reason_size, "FMCB package preflight is not READY (%s).",
+                 FmcbPackageStatusText(FmcbReports[target_port].status));
+        return -3;
+    }
+
     (void)RefreshRecoveryStatus();
     if (RecoveryStatus.present) {
         snprintf(reason, reason_size,
-                 "Persistent FMCB recovery state exists (%s). Recover that transaction before starting another install.",
-                 FmcbRecoveryStateText(RecoveryStatus.state));
+                 "Persistent FMCB recovery state exists (%s, prepared=%d, root=%s). Recover or discard the safe pre-install journal before starting another install.",
+                 FmcbRecoveryStateText(RecoveryStatus.state),
+                 RecoveryStatus.prepared_files,
+                 RecoveryStatus.source_root[0] ? RecoveryStatus.source_root : "n/a");
         return -4;
     }
 
@@ -439,13 +453,7 @@ static int RevalidateInstallerPreconditions(int target_port, char *reason,
                  MagicGateResultText(MgReports[target_port].result));
         return -2;
     }
-    if (FmcbProbeMassPackage(target_port, &FmcbMassStatus,
-                             &FmcbReports[target_port]) < 0 ||
-        FmcbReports[target_port].status != FMCB_PACKAGE_READY) {
-        snprintf(reason, reason_size, "FMCB package preflight is not READY (%s).",
-                 FmcbPackageStatusText(FmcbReports[target_port].status));
-        return -3;
-    }
+
     return 0;
 }
 
