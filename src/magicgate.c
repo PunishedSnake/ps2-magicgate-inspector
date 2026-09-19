@@ -779,7 +779,6 @@ static int StoreBoundKeyMaterial(unsigned char *data, int size,
 int MagicGateBindPrepared(int target_port, unsigned char *data, int size,
                           MagicGateReport *report)
 {
-    MagicGateKelfBuffer buffer;
     const SecrKELFHeader_t *header;
     unsigned char kbit[16];
     unsigned char kc[16];
@@ -824,13 +823,6 @@ int MagicGateBindPrepared(int target_port, unsigned char *data, int size,
 
     header = (const SecrKELFHeader_t *)data;
     report->icvps2_required = (header->flags >> 1) & 1;
-
-    memset(&buffer, 0, sizeof(buffer));
-    buffer.data = data;
-    buffer.size = size;
-    buffer.source_port = MG_RAW_SOURCE_PORT;
-    snprintf(buffer.source_path, sizeof(buffer.source_path),
-             "%s", "installer RAM buffer");
 
     if (!SecrIopAvailable) {
         report->stage = MG_STAGE_SESSION_SETUP;
