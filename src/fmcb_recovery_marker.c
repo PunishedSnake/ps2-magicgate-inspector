@@ -118,14 +118,25 @@ static int ReadMassMarker(const FmcbRecoveryStatus *status,
                           RecoveryCardMarker *marker)
 {
     char path[FMCB_RECOVERY_PATH_MAX + 32];
-    int fd;
+    int attempt;
+    int fd = -ENODEV;
     int rc;
 
     TokenPath(status, path, sizeof(path));
     memset(marker, 0, sizeof(*marker));
-    fd = fileXioOpen(path, FIO_O_RDONLY);
+
+    /* Immediately after the security IOP is replaced by the normal USB stack,
+     * USBHDFSD can be resident before the mass device is fully reopenable.
+     * Retry only ENODEV. Missing/corrupt marker evidence remains fail-closed. */
+    for (attempt = 0; attempt < 10; attempt++) {
+        fd = fileXioOpen(path, FIO_O_RDONLY);
+        if (fd >= 0 || fd != -ENODEV)
+            break;
+        DelayThread(20000);
+    }
     if (fd < 0)
         return fd;
+
     rc = fileXioRead(fd, marker, sizeof(*marker));
     fileXioClose(fd);
     if (rc != (int)sizeof(*marker))
@@ -281,14 +292,29 @@ static int WriteCardMarker(int target_port,
 
 static int ReadCardMarker(int target_port, RecoveryCardMarker *marker)
 {
-    int fd;
+    int attempt;
+    int fd = -ENODEV;
     int rc;
 
     memset(marker, 0, sizeof(*marker));
-    mcOpen(target_port, 0, FMCB_RECOVERY_CARD_MARKER, FIO_O_RDONLY);
-    fd = McResult();
+
+    /* XMCMAN is primed after every normal-stack rebuild, but keep the recovery
+     * identity check tolerant of the short changed-card/detect window. Never
+     * retry NoEntry: a missing marker is durable evidence, not readiness. */
+    for (attempt = 0; attempt < 6; attempt++) {
+        mcOpen(target_port, 0, FMCB_RECOVERY_CARD_MARKER, FIO_O_RDONLY);
+        fd = McResult();
+        if (fd >= 0 ||
+            (fd != -ENODEV &&
+             fd != sceMcResChangedCard &&
+             fd != sceMcResFailDetect &&
+             fd != sceMcResFailDetect2))
+            break;
+        DelayThread(20000);
+    }
     if (fd < 0)
         return fd;
+
     mcRead(fd, marker, sizeof(*marker));
     rc = McResult();
     mcClose(fd);
@@ -345,11 +371,19 @@ int FmcbRecoveryCheckCard(FmcbRecoveryStatus *status, int target_port)
         target_port != status->target_port)
         return -1;
     rc = ReadMassMarker(status, &usb_marker);
-    if (rc < 0)
+    if (rc < 0) {
+        MciDiagLogPrintf("FMCB-RECOVERY",
+                         "identity check failed reading USB marker rc=%d root=%s",
+                         rc, status->recovery_root);
         return rc;
+    }
     rc = ReadCardMarker(target_port, &card_marker);
-    if (rc < 0)
+    if (rc < 0) {
+        MciDiagLogPrintf("FMCB-RECOVERY",
+                         "identity check failed reading card marker rc=%d target=mc%d",
+                         rc, target_port);
         return rc;
+    }
     if (memcmp(&usb_marker, &card_marker, sizeof(usb_marker)) != 0)
         return -5169;
     status->marker_token = usb_marker.token;
@@ -371,11 +405,19 @@ int FmcbRecoveryClearCardMarker(const FmcbRecoveryStatus *status,
      * identical. A wrong/missing card must never consume the USB token that is
      * needed to identify the original transaction target later. */
     rc = ReadMassMarker(status, &usb_marker);
-    if (rc < 0)
+    if (rc < 0) {
+        MciDiagLogPrintf("FMCB-RECOVERY",
+                         "identity check failed reading USB marker rc=%d root=%s",
+                         rc, status->recovery_root);
         return rc;
+    }
     rc = ReadCardMarker(target_port, &card_marker);
-    if (rc < 0)
+    if (rc < 0) {
+        MciDiagLogPrintf("FMCB-RECOVERY",
+                         "identity check failed reading card marker rc=%d target=mc%d",
+                         rc, target_port);
         return rc;
+    }
     if (memcmp(&usb_marker, &card_marker, sizeof(usb_marker)) != 0)
         return -5169;
 
