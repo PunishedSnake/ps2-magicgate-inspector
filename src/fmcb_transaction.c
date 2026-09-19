@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * Verified FreeMcBoot normal-install transaction.
+ * Verified FreeMcBoot cross-region transaction.
  *
  * 0.4 deliberately does not implement multi-install/cross-model page linking.
  * The selected normal manifest is resolved by fmcb_install.c. Before the first
@@ -345,42 +345,42 @@ static int PrepareInventory(int target_port,
 static int CheckSpace(int target_port, const FmcbPackageReport *package,
                       FmcbInstallReport *report)
 {
-    char system_dir[48];
     int type = 0;
     int free_clusters = 0;
     int formatted = 0;
     int info_rc;
-    int system_exists = 0;
     int sysconf_exists = 0;
     int available;
     int minimum;
     int i;
     int rc;
 
-    (void)package;
     mcGetInfo(target_port, 0, &type, &free_clusters, &formatted);
     info_rc = McResult();
     if (type != MC_TYPE_PS2 || !formatted || free_clusters < 0)
         return info_rc < 0 ? info_rc : -4610;
 
-    snprintf(system_dir, sizeof(system_dir), "/%s",
-             package->plan.destination_system);
-    rc = DirectoryExists(target_port, system_dir, &system_exists);
-    if (rc < 0)
-        return rc;
+    report->reserve_clusters = FMCB_TX_SAFETY_RESERVE_CLUSTERS;
+    for (i = 0; i < package->plan.system_dir_count &&
+                i < FMCB_CROSS_REGION_SYSTEM_DIRS; i++) {
+        char system_dir[48];
+        int exists = 0;
+
+        snprintf(system_dir, sizeof(system_dir), "/%s",
+                 package->plan.system_dirs[i]);
+        rc = DirectoryExists(target_port, system_dir, &exists);
+        if (rc < 0)
+            return rc;
+        if (!exists)
+            report->reserve_clusters += 2u;
+    }
+
     rc = DirectoryExists(target_port, "/SYS-CONF", &sysconf_exists);
     if (rc < 0)
         return rc;
-
-    /* Two clusters per potentially new directory plus a fixed 16-cluster
-     * guard band. The exact directory/FAT bookkeeping is driver-owned, so the
-     * safety reserve intentionally errs on the side of refusing a nearly-full
-     * card rather than discovering ENOSPC after the first replacement. */
-    report->reserve_clusters = FMCB_TX_SAFETY_RESERVE_CLUSTERS;
-    if (!system_exists)
-        report->reserve_clusters += 2u;
     if (!sysconf_exists)
         report->reserve_clusters += 2u;
+
     report->free_clusters = free_clusters;
     report->payload_clusters = 0u;
     report->reclaimable_clusters = 0u;
@@ -398,8 +398,7 @@ static int CheckSpace(int target_port, const FmcbPackageReport *package,
         report->reclaimable_clusters += file->reclaimable_clusters;
 
         /* Model the real replacement order: only the current file's old
-         * clusters become reusable before its new payload must fit. Later
-         * targets are not counted early. */
+         * clusters become reusable before its new payload must fit. */
         available += (int)file->reclaimable_clusters;
         if (available < (int)file->required_clusters)
             return -4612 - i;
@@ -425,7 +424,7 @@ static int RollbackPersistent(FmcbRecoveryStatus *recovery,
     return rc;
 }
 
-int FmcbInstallNormalTransactional(int target_port,
+int FmcbInstallCrossRegionTransactional(int target_port,
                                    const FmcbPackageReport *package,
                                    const FmcbInstallOptions *options,
                                    FmcbBindKelfCallback bind_kelf,
@@ -433,7 +432,6 @@ int FmcbInstallNormalTransactional(int target_port,
                                    FmcbRecoveryStatus *recovery,
                                    FmcbInstallReport *report)
 {
-    char system_dir[48];
     char source_path[FMCB_PATH_MAX + FMCB_SOURCE_ROOT_MAX + 4];
     char detail[256];
     FmcbInstallResult failure_result = FMCB_INSTALL_RESULT_NOT_RUN;
@@ -490,31 +488,37 @@ int FmcbInstallNormalTransactional(int target_port,
     recovery_started = 1;
 
     report->stage = FMCB_INSTALL_CREATE_DIRS;
-    snprintf(system_dir, sizeof(system_dir), "/%s",
-             package->plan.destination_system);
-    TxProgress(4, "Creating/verifying FMCB directories",
-               "Ensuring the active region system directory and SYS-CONF exist; newly created directories are recorded in the recovery journal.");
-    rc = EnsureDirectory(target_port, system_dir, 1,
-                         &report->created_system_dir);
-    if (rc < 0) {
-        failure_result = FMCB_INSTALL_RESULT_TARGET_IO;
-        goto failure;
+    TxProgress(4, "Creating/verifying cross-region FMCB directories",
+               "Ensuring BI/BE/BA/BC EXEC-SYSTEM plus SYS-CONF exist; every directory created by this transaction is journaled for rollback.");
+
+    for (i = 0; i < package->plan.system_dir_count &&
+                i < FMCB_CROSS_REGION_SYSTEM_DIRS; i++) {
+        char system_dir[48];
+
+        snprintf(system_dir, sizeof(system_dir), "/%s",
+                 package->plan.system_dirs[i]);
+        rc = EnsureDirectory(target_port, system_dir, 1,
+                             &report->created_system_dirs[i]);
+        if (rc < 0) {
+            failure_result = FMCB_INSTALL_RESULT_TARGET_IO;
+            goto failure;
+        }
+        rc = FmcbRecoveryRecordSystemDirectory(
+                 recovery, i, system_dir, report->created_system_dirs[i]);
+        if (rc < 0) {
+            failure_result = FMCB_INSTALL_RESULT_RECOVERY_IO;
+            goto failure;
+        }
     }
-    rc = FmcbRecoveryRecordDirectories(recovery, system_dir,
-                                       report->created_system_dir, 0);
-    if (rc < 0) {
-        failure_result = FMCB_INSTALL_RESULT_RECOVERY_IO;
-        goto failure;
-    }
+
     rc = EnsureDirectory(target_port, "/SYS-CONF", 0,
                          &report->created_sysconf_dir);
     if (rc < 0) {
         failure_result = FMCB_INSTALL_RESULT_TARGET_IO;
         goto failure;
     }
-    rc = FmcbRecoveryRecordDirectories(recovery, system_dir,
-                                       report->created_system_dir,
-                                       report->created_sysconf_dir);
+    rc = FmcbRecoveryRecordSysconfDirectory(
+             recovery, report->created_sysconf_dir);
     if (rc < 0) {
         failure_result = FMCB_INSTALL_RESULT_RECOVERY_IO;
         goto failure;
@@ -662,7 +666,7 @@ int FmcbInstallNormalTransactional(int target_port,
         report->result = FMCB_INSTALL_RESULT_PASS_UNVERIFIED;
     report->current_file = -1;
     if (options->verify_mode == MCI_INSTALL_VERIFY_ENFORCED)
-        TxProgress(100, "Verified FMCB normal install complete",
+        TxProgress(100, "Verified FMCB cross-region install complete",
                    "Every selected target was written, reopened and compared successfully; the persistent recovery journal is clean.");
     else if (options->verify_mode == MCI_INSTALL_VERIFY_REQUIRED)
         TxProgress(100, "FMCB install complete / required files verified",
