@@ -107,4 +107,4 @@ jobs:
           name: PS2-Memory-Card-Inspector-0.2.0-Briscoe-${{ github.sha }}
           path: artifacts/
           if-no-files-found: error
-          retention-days: 90
+          retention-days: 3
