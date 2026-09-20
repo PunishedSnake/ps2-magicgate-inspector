@@ -624,7 +624,7 @@ static int RevalidateInstallerPreconditions(int target_port, char *reason,
     (void)RefreshRecoveryStatus();
     if (RecoveryStatus.present) {
         snprintf(reason, reason_size,
-                 "Persistent FMCB recovery state exists (%s, prepared=%d, root=%s). Recover or discard the safe pre-install journal before starting another install.",
+                 "Persistent FMCB recovery state exists (%s, prepared=%d, root=%.96s). Recover or discard the safe pre-install journal before starting another install.",
                  FmcbRecoveryStateText(RecoveryStatus.state),
                  RecoveryStatus.prepared_files,
                  RecoveryStatus.source_root[0] ? RecoveryStatus.source_root : "n/a");
