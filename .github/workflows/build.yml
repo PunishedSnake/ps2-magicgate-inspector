@@ -278,4 +278,4 @@ jobs:
           name: PS2-Memory-Card-Inspector-0.4.0-dev4-Drebin-${{ github.sha }}
           path: artifacts/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
