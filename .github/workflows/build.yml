@@ -1,36 +1,16 @@
-name: Build PS2 Memory Card Inspector
+name: Build PS2 Memory Card Inspector 0.4.0
 
 on:
   workflow_dispatch:
   pull_request:
-    branches: [ main ]
-    paths:
-      - 'src/**'
-      - 'tools/**'
-      - 'Makefile'
-      - '.github/workflows/build.yml'
-      - 'LICENSE'
-      - 'CREDITS.md'
-      - 'THIRD_PARTY_NOTICES.md'
-      - 'RELEASE_NOTES.md'
-      - 'licenses/**'
+    branches: [main]
   push:
     branches:
       - main
-      - feat/0.2.0-briscoe
-    paths:
-      - 'src/**'
-      - 'tools/**'
-      - 'Makefile'
-      - '.github/workflows/build.yml'
-      - 'LICENSE'
-      - 'CREDITS.md'
-      - 'THIRD_PARTY_NOTICES.md'
-      - 'RELEASE_NOTES.md'
-      - 'licenses/**'
+      - release/0.4.0-drebin
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   PS2SDK_SECURITY_COMMIT: a13b5971ec0e39c7ba8b8559b80a4e81c8425352
@@ -38,73 +18,152 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Verify host Docker
-        shell: bash
         run: docker --version
 
-      - name: Stage PS2SDK 2.0 MagicGate stack
+      - name: Verify source invariants
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p .build/ps2sdk2-mg .build/ps2sdk2-secr14
+          python3 tools/verify_card_math.py
+          python3 tools/verify_fmcb_cross_region.py
+          python3 tools/verify_settings_config.py
+
+      - name: Stage PS2SDK 2.0 security and card personalities
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
           docker pull ps2dev/ps2dev:v2.0.0
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/work" \
             -w /work \
             -e PS2SDK_SECURITY_COMMIT="$PS2SDK_SECURITY_COMMIT" \
             ps2dev/ps2dev:v2.0.0 \
-            sh -c 'set -eu; apk add --no-cache git python3 build-base >/dev/null; for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/ps2sdk2-mg/$f"; done; git init -q /tmp/ps2sdk-src; git -C /tmp/ps2sdk-src remote add origin https://github.com/ps2dev/ps2sdk.git; git -C /tmp/ps2sdk-src fetch -q --depth 1 origin "$PS2SDK_SECURITY_COMMIT"; git -C /tmp/ps2sdk-src checkout -q FETCH_HEAD; python3 /work/tools/patch_secrman14_diag.py /tmp/ps2sdk-src/iop/security/secrman; PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrman clean all; PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrsif clean all; cp /tmp/ps2sdk-src/iop/security/secrman/irx/secrman.irx /work/.build/ps2sdk2-secr14/secrman.irx; cp /tmp/ps2sdk-src/iop/security/secrsif/irx/secrsif.irx /work/.build/ps2sdk2-secr14/secrsif.irx'
-          ls -lh .build/ps2sdk2-mg .build/ps2sdk2-secr14
-          sha256sum .build/ps2sdk2-mg/*.irx .build/ps2sdk2-secr14/*.irx
+            sh -c 'set -eu; \
+              apk add --no-cache git python3 build-base >/dev/null; \
+              for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/ps2sdk2-mg/$f"; done; \
+              git init -q /tmp/ps2sdk-src; \
+              git -C /tmp/ps2sdk-src remote add origin https://github.com/ps2dev/ps2sdk.git; \
+              git -C /tmp/ps2sdk-src fetch -q --depth 1 origin "$PS2SDK_SECURITY_COMMIT"; \
+              git -C /tmp/ps2sdk-src checkout -q FETCH_HEAD; \
+              python3 /work/tools/patch_secrman14_diag.py /tmp/ps2sdk-src/iop/security/secrman; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrman clean all; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrsif clean all; \
+              cp /tmp/ps2sdk-src/iop/security/secrman/irx/secrman.irx /work/.build/ps2sdk2-secr14/secrman.irx; \
+              cp /tmp/ps2sdk-src/iop/security/secrsif/irx/secrsif.irx /work/.build/ps2sdk2-secr14/secrsif.irx; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman all MCMAN_BUILDING_XMCMAN=0 MCMAN_BUILDING_XMCMAN_V2=0; \
+              python3 /work/tools/patch_raw_mcserv_ports.py /tmp/ps2sdk-src/iop/memorycard/mcserv/src/mcserv.c; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv all MCMAN_BUILDING_XMCSERV=0; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcman/irx/mcman.irx /work/.build/ps2sdk2-raw/mcman.irx; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcserv/irx/mcserv.irx /work/.build/ps2sdk2-raw/mcserv.irx'
 
-      - name: Build standalone ELF in PS2DEV v2.0.0
+      - name: Build production ELF
         shell: bash
         run: |
           set -euo pipefail
-          docker pull ps2dev/ps2dev:v2.0.0
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/work" \
             -w /work \
             ps2dev/ps2dev:v2.0.0 \
-            sh -c 'set -eu; apk add --no-cache build-base >/dev/null; mips64r5900el-ps2-elf-gcc --version; make'
+            sh -c 'set -eu; apk add --no-cache build-base >/dev/null; make MC_INSPECTOR.ELF'
 
-      - name: Assemble release package
+      - name: Verify production profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q -- '-mtune=r5900' Makefile
+          grep -q 'DMCI_RAW_BULK_ASYNC=0' Makefile
+          grep -q 'DMCI_IMAGE_READ_AHEAD_ASYNC=0' Makefile
+          grep -q 'DMCI_IMAGE_WRITE_ASYNC=0' Makefile
+          ! grep -q 'src/r5900_bench.o' Makefile
+          ! grep -q 'src/r5900_perf.o' Makefile
+
+      - name: Assemble release artifact
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p artifacts/licenses
-          cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR.ELF
+          cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-0.4.0-Drebin.ELF
+          cp README.md artifacts/README.md
+          cp RELEASE_NOTES.md artifacts/RELEASE_NOTES.md
           cp LICENSE artifacts/LICENSE
           cp CREDITS.md artifacts/CREDITS.md
           cp THIRD_PARTY_NOTICES.md artifacts/THIRD_PARTY_NOTICES.md
-          cp README.md artifacts/README.md
-          cp RELEASE_NOTES.md artifacts/RELEASE_NOTES.md
           cp licenses/PS2SDK-AFL-2.0.txt artifacts/licenses/PS2SDK-AFL-2.0.txt
           {
-            echo "PS2 Memory Card Inspector 0.2.0 - Briscoe"
+            echo "PS2 Memory Card Inspector 0.4.0 - Drebin"
             echo "Project revision: $GITHUB_SHA"
+            echo "Build profile: P0 production"
+            echo "Optimization baseline: -O2 -G0"
+            echo "R5900 tuning: -mtune=r5900 on measured hot objects"
+            echo "USB/image transport: synchronous production batching"
+            echo "USB speed-test variants: not built"
+            echo "Performance Lab: not built"
+            echo "Compiler: PS2DEV / PS2SDK 2.0.0 container"
             echo "PS2SDK security source: https://github.com/ps2dev/ps2sdk/commit/$PS2SDK_SECURITY_COMMIT"
-            echo "SECRMAN: PS2SDK 2.0 module version 1.4, instrumented by tools/patch_secrman14_diag.py"
           } > artifacts/SOURCE_PROVENANCE.txt
+          sha256sum artifacts/MC_INSPECTOR-0.4.0-Drebin.ELF > artifacts/SHA256SUMS.txt
 
-      - name: Verify release output
+      - name: Verify artifact
         shell: bash
         run: |
           set -euo pipefail
-          file artifacts/MC_INSPECTOR.ELF
-          ls -lh artifacts/MC_INSPECTOR.ELF
-          sha256sum artifacts/MC_INSPECTOR.ELF | tee artifacts/SHA256SUMS.txt
+          file artifacts/MC_INSPECTOR-0.4.0-Drebin.ELF
+          test ! -e artifacts/MC_INSPECTOR-perflab-O2.ELF
+          test ! -e artifacts/MC_INSPECTOR-p0-raw-sync4.ELF
+          grep -q 'Build profile: P0 production' artifacts/SOURCE_PROVENANCE.txt
+          cat artifacts/SHA256SUMS.txt
 
       - name: Upload release candidate
         uses: actions/upload-artifact@v4
         with:
-          name: PS2-Memory-Card-Inspector-0.2.0-Briscoe-${{ github.sha }}
+          name: PS2-Memory-Card-Inspector-0.4.0-Drebin-${{ github.sha }}
           path: artifacts/
           if-no-files-found: error
           retention-days: 3
+
+      - name: Package GitHub release ZIP
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m zipfile -c \
+            PS2-Memory-Card-Inspector-0.4.0-Drebin.zip \
+            artifacts/MC_INSPECTOR-0.4.0-Drebin.ELF \
+            artifacts/SHA256SUMS.txt \
+            artifacts/SOURCE_PROVENANCE.txt \
+            artifacts/README.md \
+            artifacts/RELEASE_NOTES.md \
+            artifacts/LICENSE \
+            artifacts/CREDITS.md \
+            artifacts/THIRD_PARTY_NOTICES.md \
+            artifacts/licenses/PS2SDK-AFL-2.0.txt
+          sha256sum PS2-Memory-Card-Inspector-0.4.0-Drebin.zip
+
+      - name: Publish 0.4.0 Drebin
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="0.4.0-Drebin"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; leaving it untouched."
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "0.4.0 - Drebin" \
+            --notes-file RELEASE_NOTES.md \
+            artifacts/MC_INSPECTOR-0.4.0-Drebin.ELF \
+            PS2-Memory-Card-Inspector-0.4.0-Drebin.zip

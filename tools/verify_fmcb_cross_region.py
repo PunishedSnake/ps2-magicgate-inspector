@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""Fail-closed source invariant checks for the integrated FMCB cross-region path."""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+install_c = (ROOT / "src/fmcb_install.c").read_text(encoding="utf-8")
+install_h = (ROOT / "src/fmcb_install.h").read_text(encoding="utf-8")
+tx_c = (ROOT / "src/fmcb_transaction.c").read_text(encoding="utf-8")
+tx_h = (ROOT / "src/fmcb_transaction.h").read_text(encoding="utf-8")
+recovery_c = (ROOT / "src/fmcb_recovery.c").read_text(encoding="utf-8")
+recovery_h = (ROOT / "src/fmcb_recovery.h").read_text(encoding="utf-8")
+marker_c = (ROOT / "src/fmcb_recovery_marker.c").read_text(encoding="utf-8")
+magicgate_c = (ROOT / "src/magicgate.c").read_text(encoding="utf-8")
+magicgate_h = (ROOT / "src/magicgate.h").read_text(encoding="utf-8")
+diag_c = (ROOT / "src/diag_wrap.c").read_text(encoding="utf-8")
+diag_log_c = (ROOT / "src/diag_log.c").read_text(encoding="utf-8")
+makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+app_c = (ROOT / "src/app_main.c").read_text(encoding="utf-8")
+compat_c = (ROOT / "src/fmcb_compat.c").read_text(encoding="utf-8")
+compat_h = (ROOT / "src/fmcb_compat.h").read_text(encoding="utf-8")
+
+manifest_match = re.search(
+    r"static const FmcbPackageEntry CrossRegionInstallManifest\[\] = \{(.*?)\n\};",
+    install_c,
+    re.S,
+)
+assert manifest_match, "CrossRegionInstallManifest not found"
+
+entries = re.findall(
+    r'\{"([^"]+)",\s*"([^"]+)",\s*([^}]+)\}',
+    manifest_match.group(1),
+)
+assert len(entries) == 28, f"expected 28 cross-region manifest entries, got {len(entries)}"
+
+destinations = [dest for _, dest, _ in entries]
+assert len(destinations) == len(set(destinations)), "duplicate destination in manifest"
+
+expected_boot = {
+    "BIEXEC-SYSTEM/osd130.elf",
+    "BIEXEC-SYSTEM/osdmain.elf",
+    "BEEXEC-SYSTEM/osd130.elf",
+    "BEEXEC-SYSTEM/osdmain.elf",
+    "BAEXEC-SYSTEM/osd120.elf",
+    "BAEXEC-SYSTEM/osd130.elf",
+    "BAEXEC-SYSTEM/osdmain.elf",
+    "BCEXEC-SYSTEM/osdmain.elf",
+    "BIEXEC-SYSTEM/osdsys.elf",
+    "BIEXEC-SYSTEM/osd110.elf",
+}
+missing = expected_boot.difference(destinations)
+assert not missing, f"missing cross-region boot aliases: {sorted(missing)}"
+
+for region in ("BI", "BE", "BA", "BC"):
+    assert f"{region}EXEC-SYSTEM/FMCB.icn" in destinations
+    assert f"{region}EXEC-SYSTEM/icon.sys" in destinations
+
+for path in (
+    "BIEXEC-SYSTEM/dev9.irx",
+    "BIEXEC-SYSTEM/atad.irx",
+    "BIEXEC-SYSTEM/hddload.irx",
+    "SYS-CONF/endvdpl.irx",
+    "SYS-CONF/FMCB_CFG.ELF",
+    "SYS-CONF/FREEMCB.CNF",
+    "SYS-CONF/icon.sys",
+    "SYS-CONF/sysconf.icn",
+    "SYS-CONF/USBD.IRX",
+    "SYS-CONF/USBHDFSD.IRX",
+):
+    assert path in destinations, f"missing destination {path}"
+
+max_entries = re.search(r"#define\s+FMCB_MAX_PACKAGE_ENTRIES\s+(\d+)", install_h)
+assert max_entries and int(max_entries.group(1)) >= len(entries)
+assert "#define FMCB_CROSS_REGION_SYSTEM_DIRS 4" in install_h
+assert 'snprintf(plan->system_dirs[0]' in install_c and '"BIEXEC-SYSTEM"' in install_c
+assert 'snprintf(plan->system_dirs[1]' in install_c and '"BEEXEC-SYSTEM"' in install_c
+assert 'snprintf(plan->system_dirs[2]' in install_c and '"BAEXEC-SYSTEM"' in install_c
+assert 'snprintf(plan->system_dirs[3]' in install_c and '"BCEXEC-SYSTEM"' in install_c
+assert "FmcbCompatibilityEvaluate(&plan->console, &plan->compatibility)" in install_c
+assert "!plan->compatibility.include_cex_only_payloads" in install_c
+assert "omitted by compatibility policy" in install_c
+assert "FMCB_COMPAT_PROFILE_MECHAPWN_DEX" in compat_c
+assert "console->rom_is_dex" in compat_c
+assert "console->mechapwn_signature" in compat_c
+assert "console->mechapwn_dex_mode" in compat_c
+assert "console->rom_version >= 0x0230u" in compat_c
+assert "console->rom_version == 0x0180u || console->rom_version == 0x0210u" in compat_c
+assert "console->mg_folder_region == 'I' && console->rom_version <= 0x0120u" in compat_c
+assert "FMCB_COMPAT_PROFILE_PSX_DESR" in compat_h
+
+assert "FmcbInstallCrossRegionTransactional" in tx_h
+assert "FmcbInstallCrossRegionTransactional" in tx_c
+assert "FmcbInstallCrossRegionTransactional" in app_c
+assert "FmcbInstallNormalTransactional" not in tx_h
+assert "FmcbInstallNormalTransactional" not in tx_c
+assert "FmcbInstallNormalTransactional" not in app_c
+assert "MagicGateBindPrepared" in app_c
+assert "SecrDownloadFile(target_port" not in app_c
+assert "PreflightSelectedKelfSources" in app_c
+assert "KELF compatibility preflight failed for %s" in app_c
+assert "No memory-card destination was modified." in app_c
+assert "MciKelfCacheClone(path, file->size" in app_c
+assert "strcmp(prior->relative_path, file->relative_path) == 0" in app_c
+assert "Automatic rollback completed and the card was restored" in app_c
+assert "Recovery state is still present; do not start another install" in app_c
+assert "!FmcbMassStatus.available" in app_c
+assert "MciUsbWaitForStorage(24u, 50000u)" in install_c
+
+revalidate = re.search(
+    r"static int RevalidateInstallerPreconditions\(.*?\n\}",
+    app_c,
+    re.S,
+)
+assert revalidate, "RevalidateInstallerPreconditions not found"
+revalidate_text = revalidate.group(0)
+assert "PreflightSelectedKelfSources" in revalidate_text, (
+    "installer revalidation must bind-probe every distinct selected KELF before transaction start"
+)
+assert "RunMagicGateSession" not in revalidate_text, (
+    "single FMCB.XLF probe must not stand in for full selected-KELF qualification"
+)
+assert revalidate_text.index("FmcbProbeMassPackage") < revalidate_text.index("RefreshRecoveryStatus"), (
+    "package root must be resolved before recovery revalidation"
+)
+
+# Preserve the stronger P0 inventory path while extending directory ownership.
+for token in (
+    "inventory_exact_rc",
+    "inventory_parent_rc",
+    "inventory_open_rc",
+    "InventoryTargetFromParent",
+    "InventoryTargetFromOpen",
+):
+    assert token in tx_c or token in tx_h, f"P0 inventory invariant missing: {token}"
+
+assert "created_system_dirs[FMCB_CROSS_REGION_SYSTEM_DIRS]" in tx_h
+assert "report->rollback_rc = -999" in tx_c
+assert "FmcbRecoveryRecordSystemDirectory" in tx_c
+assert "FmcbRecoveryRecordSysconfDirectory" in tx_c
+assert "FmcbRecoveryRecordDirectories" not in tx_c
+assert "#define RECOVERY_VERSION 2u" in recovery_c
+assert "created_system_dir_mask" in recovery_c
+assert "system_dirs[FMCB_CROSS_REGION_SYSTEM_DIRS][48]" in recovery_c
+assert "MciUsbGetVerifiedPackageRoot" in recovery_c
+assert "ProbeRecoverySourceRoot" in recovery_c
+assert "FmcbRecoveryDiscardEmptyJournal" in recovery_c
+assert "LEGACY_RECOVERY_VERSION 1u" in recovery_c
+assert "LegacyRecoveryJournalV1" in recovery_c
+assert "LegacyJournalValidV1" in recovery_c
+assert "ConvertLegacyJournalV1" in recovery_c
+assert "TryDiscardUnarmedEmptyJournal" in marker_c
+assert "status->prepared_files == 0" in marker_c
+assert "MciUsbGetVerifiedPackageRoot" in marker_c
+assert "ReconcileResidualRoot" in marker_c
+assert "ResumeMassLogAfterRecovery" in marker_c
+assert "fileXioSync(device, 0)" in marker_c
+assert "fd != -ENODEV" in marker_c
+assert "sceMcResFailDetect" in marker_c
+
+assert "MagicGateBindPrepared" in magicgate_h
+assert "MagicGateBindPrepared" in magicgate_c
+for code in range(4710, 4719):
+    assert f"-{code}" in magicgate_h, f"missing stage-specific KELF bind rc -{code}"
+assert "StoreBoundKeyMaterial" in magicgate_c
+assert "DownloadHeader(target_port" in magicgate_c
+assert "DownloadGetKbit(target_port" in magicgate_c
+assert "DownloadGetKc(target_port" in magicgate_c
+
+assert "__wrap_FmcbInstallCrossRegionTransactional" in diag_c
+assert "__real_FmcbInstallCrossRegionTransactional" in diag_c
+assert "FmcbInstallNormalTransactional" not in diag_c
+
+install_wrap = re.search(
+    r"int __wrap_FmcbInstallCrossRegionTransactional\(.*?\n\}",
+    diag_c,
+    re.S,
+)
+assert install_wrap, "cross-region diagnostic wrapper not found"
+install_wrap_text = install_wrap.group(0)
+assert "fileXioSetBlockMode(FXIO_WAIT)" in install_wrap_text, (
+    "installer must force synchronous fileXio semantics"
+)
+assert install_wrap_text.index("MciDiagLogSetMassWritePaused(1)") < install_wrap_text.index(
+    "__real_FmcbInstallCrossRegionTransactional"
+), "Drebin must pause before installer mass I/O"
+assert install_wrap_text.index("__real_FmcbInstallCrossRegionTransactional") < install_wrap_text.index(
+    "MciDiagLogSetMassWritePaused(0)"
+), "Drebin must resume only after installer mass I/O returns"
+
+for wrapper_name in (
+    "__wrap_FmcbRecoveryProbe",
+    "__wrap_FmcbRecoveryBegin",
+    "__wrap_FmcbRecoveryRun",
+    "__wrap_FmcbRecoveryFinish",
+):
+    match = re.search(
+        rf"int {wrapper_name}\(.*?\n\}}",
+        marker_c,
+        re.S,
+    )
+    assert match, f"{wrapper_name} not found"
+    body = match.group(0)
+    assert "fileXioSetBlockMode(FXIO_WAIT)" in body, (
+        f"{wrapper_name} must force synchronous fileXio semantics"
+    )
+    assert "MciDiagLogSetMassWritePaused(1)" in body, (
+        f"{wrapper_name} must acquire mass-log ownership guard"
+    )
+    assert "ResumeMassLogAfterRecovery(" in body, (
+        f"{wrapper_name} must release ownership through synced recovery resume"
+    )
+
+assert "--wrap=FmcbInstallCrossRegionTransactional" in makefile
+assert "--wrap=FmcbInstallNormalTransactional" not in makefile
+assert "src/fmcb_compat.o" in makefile
+
+ensure_path = re.search(
+    r"static int EnsurePath\(void\).*?\n\}",
+    diag_log_c,
+    re.S,
+)
+assert ensure_path and "fileXioSetBlockMode(FXIO_WAIT)" in ensure_path.group(0), (
+    "Drebin path discovery must force synchronous fileXio"
+)
+assert diag_log_c.count("fileXioSetBlockMode(FXIO_WAIT)") >= 3, (
+    "Drebin durable open/write paths must not inherit global NOWAIT"
+)
+set_io = re.search(
+    r"void MciDiagLogSetIoAvailable\(int available\).*?\n\}",
+    diag_log_c,
+    re.S,
+)
+assert set_io, "MciDiagLogSetIoAvailable not found"
+set_io_text = set_io.group(0)
+assert "MassWritePauseDepth != 0u" in set_io_text, (
+    "logger attach must be deferred while another subsystem owns mass:"
+)
+assert "#define DIAG_PENDING_LINES 512u" in diag_log_c
+assert "PendingHash[DIAG_PENDING_LINES]" in diag_log_c
+assert "RAM ring corruption at slot=" in diag_log_c
+assert "__attribute__((aligned(64)))" in diag_log_c
+assert set_io_text.index("MassWritePauseDepth != 0u") < set_io_text.index("for (attempt = 0u"), (
+    "ownership check must happen before EnsurePath retry loop"
+)
+
+# Recovery path must remain at least as large as the package-root producer.
+assert "FMCB_RECOVERY_PATH_MAX (FMCB_SOURCE_ROOT_MAX + 32)" in recovery_h
+
+print(
+    "FMCB cross-region invariants: PASS "
+    f"({len(entries)} manifest entries, 10 boot aliases, P0 inventory preserved)"
+)

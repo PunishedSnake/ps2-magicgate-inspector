@@ -1,0 +1,231 @@
+name: P0 Hardware Campaign Pack v3
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [perf/p0-hardware-campaign]
+    paths:
+      - '.github/workflows/p0-hardware-campaign-v3-pack.yml'
+      - 'docs/P0_HARDWARE_CAMPAIGN_V3.md'
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  ORIGINAL_RUN_ID: '32707959479'
+  ORIGINAL_SOURCE_SHA: a81ca03dce237fbbb48c52ce39adc3319cc0fea1
+  ORIGINAL_ARTIFACT_ID: '9512980209'
+  ORIGINAL_ARTIFACT_DIGEST: sha256:c3e05adc3c24861eb3144265e40999c3297822cc3924eff0ec1eb306121da250
+
+  SAFE_V2_RUN_ID: '33914313656'
+  SAFE_V2_SOURCE_SHA: 445ddd31efc6f9c88f2652dcfafee6ca8ff32808
+  SAFE_V2_ARTIFACT_ID: '9952574690'
+  SAFE_V2_ARTIFACT_DIGEST: sha256:2edfd7e36cd2d056b64af286c0de58042a790d2897ed8f1db41f3c0fcddd6a09
+
+  SAFE_V3_RUN_ID: '33917893563'
+  SAFE_V3_SOURCE_SHA: 94e6efb9ae132486167a5122edbff62a3ca6c490
+  SAFE_V3_ARTIFACT_ID: '9953876173'
+  SAFE_V3_ARTIFACT_DIGEST: sha256:f40f3c662761188a2b99011a5b792d3450140a5ad872140b73b29144c57a2345
+
+  ASYNC_V3_RUN_ID: '33917936986'
+  ASYNC_V3_SOURCE_SHA: 2c97480e1a42fe46470a8669631e4ebe4813ce05
+  ASYNC_V3_ARTIFACT_ID: '9953916431'
+  ASYNC_V3_ARTIFACT_DIGEST: sha256:d4fbc394b00d80e2ce8a64c4936b8767d7c6431f0068db578bbc8594b32ac8da
+
+  RAW_V3_RUN_ID: '33917988910'
+  RAW_V3_SOURCE_SHA: e46f24dd643c525b0923aa8648dfb6c6b00d0740
+  RAW_V3_ARTIFACT_ID: '9953935212'
+  RAW_V3_ARTIFACT_DIGEST: sha256:d3ed6ee879ea8c1b796203ad32a5d540f1e8bb2ab1c5052aca4471a31e25166d
+
+  CLEANUP_RUN_ID: '33918304643'
+  CLEANUP_SOURCE_SHA: f4a4e2ba37843aa7452500d22ef024d0904fd64c
+  CLEANUP_ARTIFACT_ID: '9954015076'
+  CLEANUP_ARTIFACT_DIGEST: sha256:61014fdf8b481340a5786174ca5bc18403a128752dff488f674d171dbb546cdd
+
+  FUSION_RUN_ID: '33915645229'
+  FUSION_SOURCE_SHA: 1cda25502170c875697f9f54f588045c3f0a54e9
+  FUSION_ARTIFACT_ID: '9953060485'
+  FUSION_ARTIFACT_DIGEST: sha256:d9407fc077e84a76f86413c2e2fd451f70b14b54365ed024aa933bb8850c284c
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify exact upstream artifacts
+        env: {GH_TOKEN: '${{ github.token }}'}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .build/campaign-v3-meta
+          verify() {
+            label="$1"; id="$2"; digest="$3"; run_id="$4"; sha="$5"; out=".build/campaign-v3-meta/$label.json"
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id" > "$out"
+            python3 - "$out" "$id" "$digest" "$run_id" "$sha" <<'PY'
+          import json, sys
+          path, artifact_id, digest, run_id, sha = sys.argv[1:]
+          d = json.load(open(path, encoding='utf-8'))
+          assert d['id'] == int(artifact_id)
+          assert d.get('expired') is False
+          assert d.get('digest') == digest
+          r = d.get('workflow_run') or {}
+          assert r.get('id') == int(run_id)
+          assert r.get('head_sha') == sha
+          PY
+          }
+          verify original "$ORIGINAL_ARTIFACT_ID" "$ORIGINAL_ARTIFACT_DIGEST" "$ORIGINAL_RUN_ID" "$ORIGINAL_SOURCE_SHA"
+          verify safe-v2 "$SAFE_V2_ARTIFACT_ID" "$SAFE_V2_ARTIFACT_DIGEST" "$SAFE_V2_RUN_ID" "$SAFE_V2_SOURCE_SHA"
+          verify safe-v3 "$SAFE_V3_ARTIFACT_ID" "$SAFE_V3_ARTIFACT_DIGEST" "$SAFE_V3_RUN_ID" "$SAFE_V3_SOURCE_SHA"
+          verify async-v3 "$ASYNC_V3_ARTIFACT_ID" "$ASYNC_V3_ARTIFACT_DIGEST" "$ASYNC_V3_RUN_ID" "$ASYNC_V3_SOURCE_SHA"
+          verify raw-v3 "$RAW_V3_ARTIFACT_ID" "$RAW_V3_ARTIFACT_DIGEST" "$RAW_V3_RUN_ID" "$RAW_V3_SOURCE_SHA"
+          verify cleanup "$CLEANUP_ARTIFACT_ID" "$CLEANUP_ARTIFACT_DIGEST" "$CLEANUP_RUN_ID" "$CLEANUP_SOURCE_SHA"
+          verify fusion "$FUSION_ARTIFACT_ID" "$FUSION_ARTIFACT_DIGEST" "$FUSION_RUN_ID" "$FUSION_SOURCE_SHA"
+
+      - name: Download immutable source packs
+        env: {GH_TOKEN: '${{ github.token }}'}
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=.build/campaign-v3; rm -rf "$root"; mkdir -p "$root/zips"
+          download() {
+            id="$1"; label="$2"; mkdir -p "$root/$label"
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > "$root/zips/$label.zip"
+            unzip -tq "$root/zips/$label.zip"
+            unzip -q "$root/zips/$label.zip" -d "$root/$label"
+          }
+          download "$ORIGINAL_ARTIFACT_ID" original
+          download "$SAFE_V2_ARTIFACT_ID" safe-v2
+          download "$SAFE_V3_ARTIFACT_ID" safe-v3
+          download "$ASYNC_V3_ARTIFACT_ID" async-v3
+          download "$RAW_V3_ARTIFACT_ID" raw-v3
+          download "$CLEANUP_ARTIFACT_ID" cleanup
+          download "$FUSION_ARTIFACT_ID" fusion
+          sha256sum "$root/zips"/*.zip > "$root/zips/DOWNLOADED_ZIP_SHA256.txt"
+
+      - name: Validate expected payload families
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=.build/campaign-v3
+          one() { scope="$1"; pattern="$2"; n=$(find "$root/$scope" -type f -name "$pattern" | wc -l); test "$n" -eq 1 || { echo "$scope/$pattern count=$n" >&2; exit 1; }; }
+          for b in 16 32 64; do
+            one safe-v2 "FINAL-SAFE-V2-conflict${b}.ELF"
+            one safe-v3 "FINAL-SAFE-V3-conflict${b}.ELF"
+            one async-v3 "FINAL-ASYNC-V3-SOURCE-SYNC-conflict${b}.ELF"
+            one async-v3 "FINAL-ASYNC-V3-READ-conflict${b}.ELF"
+            one async-v3 "FINAL-ASYNC-V3-WRITE-conflict${b}.ELF"
+            one raw-v3 "FINAL-SAFE-V3-conflict${b}-raw16-async0.ELF"
+            one raw-v3 "FINAL-SAFE-V3-conflict${b}-raw8-async0.ELF"
+            one raw-v3 "FINAL-SAFE-V3-conflict${b}-raw16-async1.ELF"
+            one raw-v3 "FINAL-SAFE-V3-conflict${b}-raw8-async1.ELF"
+          done
+          one fusion 'FINAL-SAFE-V2-conflict32.ELF'
+          one fusion 'P0-TRUSTED-QUICK-OPEN-FUSED-conflict32.ELF'
+          one cleanup 'FINAL-SAFE-V3-CLEAN.ELF'
+          find "$root/original" -type f -print | sort > "$root/ORIGINAL-541-CONTENTS.txt"
+
+      - name: Flatten hardware payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=.build/campaign-v3; out="$root/HARDWARE_ELFS"; mkdir -p "$out" "$root/NOT_FOR_TIMING"
+          copy_one() { scope="$1"; pattern="$2"; name="$3"; src=$(find "$root/$scope" -type f -name "$pattern" -print -quit); test -n "$src"; cp "$src" "$out/$name"; }
+          for b in 16 32 64; do
+            copy_one safe-v2 "FINAL-SAFE-V2-conflict${b}.ELF" "10_SAFE-V2-conflict${b}.ELF"
+            copy_one safe-v3 "FINAL-SAFE-V3-conflict${b}.ELF" "20_SAFE-V3-conflict${b}.ELF"
+            copy_one async-v3 "FINAL-ASYNC-V3-SOURCE-SYNC-conflict${b}.ELF" "30_V3-SOURCE-SYNC-conflict${b}.ELF"
+            copy_one async-v3 "FINAL-ASYNC-V3-READ-conflict${b}.ELF" "40_V3-ASYNC-READ-conflict${b}.ELF"
+            copy_one async-v3 "FINAL-ASYNC-V3-WRITE-conflict${b}.ELF" "50_V3-ASYNC-WRITE-conflict${b}.ELF"
+            copy_one raw-v3 "FINAL-SAFE-V3-conflict${b}-raw16-async0.ELF" "60_RAW-conflict${b}-p16-sync.ELF"
+            copy_one raw-v3 "FINAL-SAFE-V3-conflict${b}-raw8-async0.ELF" "61_RAW-conflict${b}-p8-sync.ELF"
+            copy_one raw-v3 "FINAL-SAFE-V3-conflict${b}-raw16-async1.ELF" "62_RAW-conflict${b}-p16-async.ELF"
+            copy_one raw-v3 "FINAL-SAFE-V3-conflict${b}-raw8-async1.ELF" "63_RAW-conflict${b}-p8-async.ELF"
+          done
+          copy_one fusion 'P0-TRUSTED-QUICK-OPEN-FUSED-conflict32.ELF' '15_FUSION-ISOLATED-conflict32.ELF'
+          clean=$(find "$root/cleanup" -type f -name 'FINAL-SAFE-V3-CLEAN.ELF' -print -quit); cp "$clean" "$root/NOT_FOR_TIMING/FINAL-SAFE-V3-CLEAN.ELF"
+          cp "$root/zips/original.zip" "$out/00_ORIGINAL-541-exact-artifact.zip"
+          cp "$root/ORIGINAL-541-CONTENTS.txt" "$out/00_ORIGINAL-541-CONTENTS.txt"
+          sha256sum "$out"/*.ELF "$out"/*.zip > "$out/HARDWARE_PAYLOAD_SHA256.txt"
+          sha256sum "$root/NOT_FOR_TIMING"/*.ELF > "$root/NOT_FOR_TIMING/SHA256.txt"
+
+      - name: Generate staged run sheets
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=.build/campaign-v3
+          cp docs/P0_HARDWARE_CAMPAIGN_V3.md "$root/START_HERE.md"
+          cat > "$root/STAGE1_FUSION.csv" <<'EOF'
+          sequence,variant,run_index,operation_ticks,p50_ticks,p95_ticks,p99_ticks,max_ticks,correctness_hash,verify_result,filexio_errors,notes
+          1,SAFE-V2-conflict32,,,,,,,,,,
+          2,SAFE-V3-conflict32,,,,,,,,,,
+          EOF
+          cat > "$root/STAGE2_CONFLICT.csv" <<'EOF'
+          sequence,variant,run_index,operation_ticks,p50_ticks,p95_ticks,p99_ticks,max_ticks,correctness_hash,verify_result,notes
+          1,SAFE-V3-conflict16,,,,,,,,,
+          2,SAFE-V3-conflict32,,,,,,,,,
+          3,SAFE-V3-conflict64,,,,,,,,,
+          EOF
+          cat > "$root/STAGE3_ASYNC.csv" <<'EOF'
+          sequence,variant,conflict_batch,run_index,operation_ticks,async_submits,async_ready,async_waits,async_wait_ticks,p50_ticks,p95_ticks,p99_ticks,max_ticks,correctness_hash,verify_result,notes
+          1,SOURCE-SYNC,,,,,,,,,,,,,,
+          2,ASYNC-READ,,,,,,,,,,,,,,
+          3,ASYNC-WRITE,,,,,,,,,,,,,,
+          EOF
+          cat > "$root/STAGE4_RAW.csv" <<'EOF'
+          sequence,conflict_batch,raw_pages,raw_async,run_index,operation_ticks,rpc_calls,rpc_ticks,async_submits,async_ready,async_waits,async_wait_ticks,p50_ticks,p95_ticks,p99_ticks,max_ticks,correctness_hash,verify_result,notes
+          1,,16,0,,,,,,,,,,,,,,,
+          2,,8,0,,,,,,,,,,,,,,,
+          3,,16,1,,,,,,,,,,,,,,,
+          4,,8,1,,,,,,,,,,,,,,,
+          EOF
+          cat > "$root/STAGE5_HISTORICAL.csv" <<'EOF'
+          variant,run_index,operation_ticks,p50_ticks,p95_ticks,p99_ticks,max_ticks,correctness_hash,verify_result,notes
+          ORIGINAL-541,,,,,,,,,
+          BASE-c88f507,,,,,,,,,
+          FINAL-SAFE-V3-WINNER,,,,,,,,,
+          FINAL-WINNER,,,,,,,,,
+          EOF
+
+      - name: Bundle provenance and re-profile checklist
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=.build/campaign-v3; mkdir -p "$root/PROVENANCE"
+          cp .build/campaign-v3-meta/*.json "$root/PROVENANCE/"
+          cp "$root/zips/DOWNLOADED_ZIP_SHA256.txt" "$root/PROVENANCE/"
+          cat > "$root/POST_HARDWARE_REPROFILE.md" <<'EOF'
+          # Post-selection whole-system re-profile
+
+          Do this only after a real-PS2 winner is selected.
+
+          Record the winning end-to-end p50/p95/p99/max and correctness hash, then inspect:
+          - RAW-BULK RPC calls/ticks, cache hits, fallback, async ready/wait ticks;
+          - IMAGE-IO read/write calls, bytes, service ticks and async ready/wait data;
+          - fileXio/mc/SIF errors and blocking points;
+          - card-service time versus USB/SIF service time;
+          - FAT/cluster cache hit/miss telemetry for image-browser/selective-restore workloads;
+          - EE compute only if transport/service time no longer dominates.
+
+          Route P1 from measured dominant non-hidden time. Do not automatically add
+          MMI, scratchpad, DMA specialization, larger buffers or more async ownership.
+          EOF
+          cat > "$root/PROVENANCE/CAMPAIGN_V3.txt" <<EOF
+          campaign_sha=$GITHUB_SHA
+          original=$ORIGINAL_ARTIFACT_ID
+          safe_v2=$SAFE_V2_ARTIFACT_ID
+          safe_v3=$SAFE_V3_ARTIFACT_ID
+          async_v3=$ASYNC_V3_ARTIFACT_ID
+          raw_v3=$RAW_V3_ARTIFACT_ID
+          cleanup=$CLEANUP_ARTIFACT_ID
+          fusion=$FUSION_ARTIFACT_ID
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PS2-MCI-P0-hardware-campaign-v3-${{ github.sha }}
+          path: .build/campaign-v3/
+          if-no-files-found: error
+          retention-days: 30

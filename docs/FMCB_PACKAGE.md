@@ -1,104 +1,144 @@
 # User-supplied FreeMcBoot package
 
-Briscoe does **not** ship FreeMcBoot payloads. The Inspector understands a baseline package layout supplied by the user and performs a strictly **read-only preflight** in v0.2.0.
+PS2 Memory Card Inspector does **not** redistribute FreeMcBoot payloads. The
+cross-region installer consumes a complete user-supplied FMCB package and keeps
+all card writes behind filesystem, MagicGate and recovery preconditions.
+
+## Why this installer exists
+
+The reference FMCB installer can report `Failed to bind MagicGate` on hardware
+where the Inspector's isolated PS2SDK 2.0 SECRMAN 1.4 personality has already
+completed CardAuth and KELF binding successfully. The Inspector therefore does
+not import the reference installer's security-session lifecycle. It reuses the
+hardware-validated path:
+
+```text
+logical mc0/mc1
+  -> isolated PS2SDK 2.0 SECRMAN 1.4 + matching SIO2/MCMAN
+  -> translate 0/1 to physical SIO2 2/3 only at the SECRMAN/CardAuth boundary
+  -> instrumented SECRSIF header/block/Kbit/Kc/ICVPS2 bind in EE RAM
+  -> restore Sony ROM X card stack
+  -> write, close, reopen and verify through ordinary libmc
+```
+
+Raw libmc/MCSERV/MCMAN calls continue to use logical ports 0/1. The +2 mapping
+is deliberately confined to the SECR boundary. See `MAGICGATE.md` and
+`MEMORY_CARD_PORT_DOMAINS.md`.
 
 ## USB layout
 
-Place the package under one of these roots:
+The package can be below `mass:/FMCB`, `mass0:/FMCB`, `mass1:/FMCB`, or a
+recursively discovered directory containing `SYSTEM/FMCB.XLF`.
 
-```text
-mass:/FMCB/
-mass0:/FMCB/
-mass1:/FMCB/
-```
-
-The first existing root is selected.
-
-Baseline normal-install layout:
+A cross-region package must contain at least:
 
 ```text
 FMCB/
 ├── SYSTEM/
 │   ├── FMCB.XLF
 │   ├── ENDVDPL.XRX
+│   ├── OSDSYS.XLF
+│   ├── OSD110.XLF
+│   ├── DEV9.IRX
+│   ├── ATAD.IRX
+│   ├── HDDLOAD.IRX
 │   ├── FMCB.ICN
-│   └── ICON.SYS
+│   ├── BIICON.SYS
+│   ├── BEICON.SYS
+│   ├── BAICON.SYS
+│   └── BCICON.SYS
 └── SYS-CONF/
     ├── FMCB_CFG.ELF
     ├── FREEMCB.CNF
     ├── ICON.SYS
     ├── SYSCONF.ICN
-    ├── USBD.IRX          (optional)
-    └── USBHDFSD.IRX      (optional)
+    ├── USBD.IRX
+    └── USBHDFSD.IRX
 ```
 
-The Inspector does not require a specific archive name. Required files must exist and be non-empty. The package itself is not copied into this repository or bundled with project release artifacts.
+`ENDVDPL.XRX` follows the reference installer and remains required in the
+source package so one package can serve CEX and DEX-like targets. It is selected
+for normal retail/CEX profiles, but omitted for a real DEX ROM and for a
+positively fingerprinted MechaPwn DEX-mode profile. Real-hardware qualification
+on SCPH-50000 showed the 128-byte ENDVDPL KELF being rejected at SECR download
+header while FMCB.XLF/OSDSYS.XLF/OSD110.XLF bound normally. A merely DEX-like
+MechaCon without the MechaPwn fingerprint does not trigger this omission.
 
-## Raw KELF used by the MagicGate probe
+## Cross-region destination set
 
-`SYSTEM/FMCB.XLF` is also the raw, unbound KELF used by the RAM-only MagicGate capability test.
-
-An already installed memory-card file such as:
+The transaction follows the reference FMCB cross-region alias set without
+legacy multi-install filesystem crosslinks:
 
 ```text
-mc?:/B?EXEC-SYSTEM/osdmain.elf
+BIEXEC-SYSTEM/osd130.elf
+BIEXEC-SYSTEM/osdmain.elf
+BEEXEC-SYSTEM/osd130.elf
+BEEXEC-SYSTEM/osdmain.elf
+BAEXEC-SYSTEM/osd120.elf
+BAEXEC-SYSTEM/osd130.elf
+BAEXEC-SYSTEM/osdmain.elf
+BCEXEC-SYSTEM/osdmain.elf
+
+BIEXEC-SYSTEM/osdsys.elf
+BIEXEC-SYSTEM/osd110.elf
 ```
 
-must **not** be substituted for it. An installed `osdmain.elf` has already been card-bound, while the capability probe needs raw bind input.
+The final two paths are the early Japanese ROM update payloads. The installer
+also installs the reference DEV9/ATAD/HDDLOAD files in `BIEXEC-SYSTEM`, the
+region-specific icon resources in all four system folders, and the common
+`SYS-CONF` payload.
 
-## Preflight result
+This is a **real-copy cross-region install**. It intentionally does not use the
+old Multi Install crosslink trick.
 
-Press **Circle** to scan the package. The Inspector reports:
+## Transaction and recovery model
 
-- selected source root;
-- console region from `rom0:ROMVER`;
-- normal FMCB target system folder (`BIEXEC-SYSTEM`, `BAEXEC-SYSTEM`, `BEEXEC-SYSTEM` or `BCEXEC-SYSTEM`);
-- number of required files found and missing;
-- optional files found;
-- total payload bytes visible to the source backend;
-- number of KELFs that will eventually require binding.
+Before the first destination is changed, the installer:
 
-`READY (READ-ONLY PREFLIGHT)` means only that the current package contract is satisfied. It does **not** mean the card has been modified or that installation is enabled.
+1. re-runs card filesystem verification;
+2. re-probes the complete USB package and active ROMVER/MechaCon compatibility policy;
+3. bind-probes every distinct selected KELF source on the actual target card;
+4. verifies that the normal card/USB personality returns after each security-session probe;
+5. simulates free-space use including all four regional directories;
+6. creates a dual-slot checksummed recovery journal on USB;
+7. arms the target card with the transaction identity marker.
 
-## Current safety boundary
+This means a KELF-class incompatibility such as the qualified MechaPwn DEX
+ENDVDPL case is rejected before the first memory-card destination is mutated.
 
-There is no enabled FMCB installation transaction in 0.2.0. The package scanner performs source-side discovery/stat operations and never creates FMCB directories or writes package payloads to a memory card.
+For each destination it then:
 
-Before a write path is allowed, these areas must be independently validated:
+1. persists the old destination, or its absence, into the USB recovery journal;
+2. reads the raw source into EE RAM;
+3. binds KELFs through the isolated, hardware-validated SECRMAN personality;
+4. restores the normal Sony ROM X filesystem stack;
+5. writes and flushes the destination;
+6. closes and reopens it;
+7. performs the configured read-back verification.
 
-1. target card filesystem health;
-2. functional MagicGate/KELF capability;
-3. package completeness;
-4. console-region mapping;
-5. required free-space calculation;
-6. backup and rollback state;
-7. KELF bind output;
-8. target write;
-9. close/reopen and full read-back verification.
+Recovery version 2 records all four `BI/BE/BA/BCEXEC-SYSTEM` directories plus
+`SYS-CONF`, so an interrupted cross-region transaction can restore replaced
+files and remove only directories created by that transaction.
 
-The RAM-only MagicGate bind primitive is hardware-validated with the production PS2SDK 2.0 SECRMAN 1.4 backend, including both positive and negative card controls. That does **not** remove the need to validate the on-card write transaction separately.
+## MechaPwn policy
 
-## Planned first write-capable milestone
+The MechaPwn project requires a cross-region FMCB setup when region changes can
+move the OSDSYS update lookup, most notably on Deckard units. This installer
+therefore always prepares the complete I/A/E/C destination set. It does not
+downgrade to a one-region install merely because the console currently reports
+one stable region.
 
-The project should not jump directly to a general installer. The first write test should be deliberately narrow:
+A ROMVER/MechaCon transition that is internally inconsistent is still rejected.
+The user should reboot into a settled state before installation.
 
-```text
-preflight
-  -> backup/rollback preparation
-  -> bind one raw KELF in RAM
-  -> write one controlled target
-  -> close/reopen
-  -> read back the entire file
-  -> verify
-  -> rollback on failure
-```
+## Raw KELF rule
 
-Only after this behaves safely on backed-up hardware should the wider FMCB file set be enabled.
-
-## Early Japanese models
-
-Early Japanese boot-ROM update cases require explicit model/ROM handling and are intentionally outside the first normal-install transaction. They must not be inferred solely from generic region-folder mapping.
+`SYSTEM/FMCB.XLF` must be the raw, unbound installer source. An already
+installed `mc?:/B?EXEC-SYSTEM/osdmain.elf` is card-bound and is not a valid
+replacement source.
 
 ## Redistribution
 
-FreeMcBoot files are user-supplied and retain the terms of their upstream project. PS2 Memory Card Inspector does not relicense those payloads. See `THIRD_PARTY_NOTICES.md` for project build dependencies and provenance.
+FreeMcBoot files are user-supplied and retain the terms of their upstream
+project. PS2 Memory Card Inspector does not relicense or bundle those payloads.
+See `THIRD_PARTY_NOTICES.md` for build dependencies and provenance.

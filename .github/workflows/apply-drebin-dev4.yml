@@ -1,0 +1,47 @@
+name: Apply Drebin dev4 image browser integration
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/0.4.0-dev4-drebin-browser
+    paths:
+      - 'tools/apply_drebin_dev4.py'
+      - '.github/workflows/apply-drebin-dev4.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Drebin dev4 branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/0.4.0-dev4-drebin-browser
+          fetch-depth: 0
+
+      - name: Apply image browser integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/apply_drebin_dev4.py
+          git diff --check
+
+      - name: Commit integrated sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'Drebin dev4 patch is already applied.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src Makefile .github/workflows/build.yml
+          git commit -m 'feat(drebin): integrate selective image restore browser'
+          git push origin HEAD:feat/0.4.0-dev4-drebin-browser
+
+# Kept on-branch intentionally: changing this file retriggers the integration
+# after the workflow itself exists in the branch history.

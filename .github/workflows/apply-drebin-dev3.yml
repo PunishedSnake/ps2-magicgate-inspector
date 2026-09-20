@@ -1,0 +1,46 @@
+name: Apply Drebin dev3 integration
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/0.4.0-dev3-drebin
+    paths:
+      - 'tools/apply_drebin_dev3.py'
+      - '.github/workflows/apply-drebin-dev3.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Drebin branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/0.4.0-dev3-drebin
+          fetch-depth: 0
+
+      # This workflow exists only to apply the large, assertion-checked source
+      # integration cleanly on the development branch.
+      - name: Apply source integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/apply_drebin_dev3.py
+          git diff --check
+
+      - name: Commit integrated sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'Drebin dev3 patch is already applied.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src
+          git commit -m 'feat(drebin): integrate Card Tools and installer fixes'
+          git push origin HEAD:feat/0.4.0-dev3-drebin

@@ -1,0 +1,419 @@
+name: P0 Final Safe Hardware A-B
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - perf/p0-final-safe
+    paths:
+      - '.github/workflows/p0-final-safe-ab.yml'
+      - 'docs/P0_FINAL_SAFE_MANIFEST.md'
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  BASE_SHA: c88f50787b15bf253e11e5bc75017ac1ed4cdd79
+  PS2SDK_SECURITY_COMMIT: a13b5971ec0e39c7ba8b8559b80a4e81c8425352
+
+  DISCOVERY_BRANCH: perf/p0-image-discovery-batch
+  DISCOVERY_SHA: f82c536de1c872214699856df43652d509807295
+  CLUSTER_BRANCH: perf/p0-image-fs-cluster-batch
+  CLUSTER_SHA: ec5416b29ff18f578a87c4a2ae123292635f8942
+  FAT_BRANCH: perf/p0-image-fs-fat-cache
+  FAT_SHA: 613e73e411bba75e6670556b3114c4c48c0e4174
+  CONFLICT_BRANCH: perf/p0-image-fs-conflict-batch
+  CONFLICT_SHA: 595594ed966981af5f43603ae8036269cf1e6e45
+
+  ASYNC_READ_SHA: eca8ec24543d65f349b74b44544f3fa3cc159331
+
+  ORIGINAL_RUN_NUMBER: '541'
+  ORIGINAL_RUN_ID: '32707959479'
+  ORIGINAL_SOURCE_SHA: a81ca03dce237fbbb48c52ce39adc3319cc0fea1
+  ORIGINAL_ARTIFACT_ID: '9512980209'
+  ORIGINAL_ARTIFACT_DIGEST: sha256:c3e05adc3c24861eb3144265e40999c3297822cc3924eff0ec1eb306121da250
+
+jobs:
+  compose-build:
+    name: Compose synchronous P0 candidates
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout integration branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify pinned experiment heads
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          verify_branch() {
+            branch="$1"
+            expected="$2"
+            remote_ref="refs/remotes/origin/$branch"
+            git fetch --no-tags origin "refs/heads/$branch:$remote_ref"
+            actual="$(git rev-parse "$remote_ref")"
+            printf '%-42s expected=%s actual=%s\n' "$branch" "$expected" "$actual"
+            test "$actual" = "$expected"
+            git cat-file -e "$expected^{commit}"
+          }
+
+          verify_branch "$DISCOVERY_BRANCH" "$DISCOVERY_SHA"
+          verify_branch "$CLUSTER_BRANCH" "$CLUSTER_SHA"
+          verify_branch "$FAT_BRANCH" "$FAT_SHA"
+          verify_branch "$CONFLICT_BRANCH" "$CONFLICT_SHA"
+
+          git cat-file -e "$BASE_SHA^{commit}"
+
+      - name: Extract exact fail-closed transformers
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=.build/p0-final-transformers
+          rm -rf "$out"
+          mkdir -p "$out"
+
+          git show "$DISCOVERY_SHA:tools/patch_card_image_discovery_batch.py" > "$out/discovery.py"
+          git show "$CLUSTER_SHA:tools/patch_card_image_fs_cluster_batch.py" > "$out/cluster.py"
+          git show "$FAT_SHA:tools/patch_card_image_fs_meta_cache.py" > "$out/fat_cache.py"
+          git show "$CONFLICT_SHA:tools/patch_card_image_fs_conflict_batch.py" > "$out/conflict.py"
+
+          chmod +x "$out"/*.py
+          sha256sum "$out"/*.py | tee "$out/SHA256SUMS"
+
+      - name: Verify shared card-math correctness harness
+        shell: bash
+        run: python3 tools/verify_card_math.py
+
+      - name: Stage pinned PS2SDK personalities
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+          mkdir -p .build/ps2sdk2-mg .build/ps2sdk2-secr14 .build/ps2sdk2-raw
+
+          docker pull ps2dev/ps2dev:v2.0.0
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            -e PS2SDK_SECURITY_COMMIT="$PS2SDK_SECURITY_COMMIT" \
+            ps2dev/ps2dev:v2.0.0 \
+            sh -c 'set -eu; \
+              apk add --no-cache git python3 build-base >/dev/null; \
+              for f in freesio2.irx freepad.irx mcman.irx mcserv.irx; do \
+                cp "/usr/local/ps2dev/ps2sdk/iop/irx/$f" "/work/.build/ps2sdk2-mg/$f"; \
+              done; \
+              git init -q /tmp/ps2sdk-src; \
+              git -C /tmp/ps2sdk-src remote add origin https://github.com/ps2dev/ps2sdk.git; \
+              git -C /tmp/ps2sdk-src fetch -q --depth 1 origin "$PS2SDK_SECURITY_COMMIT"; \
+              git -C /tmp/ps2sdk-src checkout -q FETCH_HEAD; \
+              python3 /work/tools/patch_secrman14_diag.py /tmp/ps2sdk-src/iop/security/secrman; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrman clean all; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/security/secrsif clean all; \
+              cp /tmp/ps2sdk-src/iop/security/secrman/irx/secrman.irx /work/.build/ps2sdk2-secr14/secrman.irx; \
+              cp /tmp/ps2sdk-src/iop/security/secrsif/irx/secrsif.irx /work/.build/ps2sdk2-secr14/secrsif.irx; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcman all MCMAN_BUILDING_XMCMAN=0 MCMAN_BUILDING_XMCMAN_V2=0; \
+              python3 /work/tools/patch_raw_mcserv_ports.py /tmp/ps2sdk-src/iop/memorycard/mcserv/src/mcserv.c; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv clean; \
+              PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv all MCMAN_BUILDING_XMCSERV=0; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcman/irx/mcman.irx /work/.build/ps2sdk2-raw/mcman.irx; \
+              cp /tmp/ps2sdk-src/iop/memorycard/mcserv/irx/mcserv.irx /work/.build/ps2sdk2-raw/mcserv.irx'
+
+          {
+            echo 'Normal MagicGate/X-style modules:'
+            sha256sum .build/ps2sdk2-mg/*.irx
+            echo 'Security modules:'
+            sha256sum .build/ps2sdk2-secr14/*.irx
+            echo 'Legacy raw-page modules:'
+            sha256sum .build/ps2sdk2-raw/*.irx
+          } | tee .build/P0_FINAL_SAFE_IRX_SHA256.txt
+
+      - name: Materialize clean base trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          trees=.build/p0-final-trees
+          rm -rf "$trees"
+          mkdir -p "$trees"
+
+          for variant in base final16 final32 final64; do
+            mkdir -p "$trees/$variant"
+            git archive "$BASE_SHA" | tar -x -C "$trees/$variant"
+            mkdir -p "$trees/$variant/.build"
+            cp -a .build/ps2sdk2-mg "$trees/$variant/.build/"
+            cp -a .build/ps2sdk2-secr14 "$trees/$variant/.build/"
+            cp -a .build/ps2sdk2-raw "$trees/$variant/.build/"
+          done
+
+          printf '%s\n' "$BASE_SHA" > "$trees/BASE_SHA.txt"
+
+      - name: Compose FINAL-SAFE source variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          t=.build/p0-final-transformers
+          trees=.build/p0-final-trees
+
+          compose() {
+            batch="$1"
+            dir="$trees/final$batch"
+            python3 "$t/discovery.py" "$dir/src/card_image.c"
+            python3 "$t/cluster.py" "$dir/src/card_image_fs.c"
+            python3 "$t/fat_cache.py" "$dir/src/card_image_fs.c"
+            python3 "$t/conflict.py" --batch-size "$batch" "$dir/src/card_image_fs.c"
+          }
+
+          compose 16
+          compose 32
+          compose 64
+
+          for batch in 16 32 64; do
+            dir="$trees/final$batch"
+            grep -q '#define IMAGE_DISCOVERY_BATCH_ENTRIES 128u' "$dir/src/card_image.c"
+            grep -q 'static unsigned char ClusterBatchRaw' "$dir/src/card_image_fs.c"
+            grep -q 'static const MciFsImage \*MetaCacheOwner' "$dir/src/card_image_fs.c"
+            grep -q "#define FS_TARGET_CONFLICT_BATCH $batch" "$dir/src/card_image_fs.c"
+
+            # Primary timing sources must not contain the experiment-only trace tags.
+            ! grep -q 'IMAGE-DISCOVERY' "$dir/src/card_image.c"
+            ! grep -q 'IMAGE-FS-CLUSTER' "$dir/src/card_image_fs.c"
+            ! grep -q 'IMAGE-FS-CACHE' "$dir/src/card_image_fs.c"
+            ! grep -q 'IMAGE-FS-CONFLICT' "$dir/src/card_image_fs.c"
+          done
+
+      - name: Archive exact composed source diffs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/final-safe/source-diffs artifacts/final-safe/provenance
+          cp .build/p0-final-transformers/*.py artifacts/final-safe/provenance/
+          cp .build/p0-final-transformers/SHA256SUMS artifacts/final-safe/provenance/TRANSFORMER_SHA256SUMS.txt
+          cp .build/P0_FINAL_SAFE_IRX_SHA256.txt artifacts/final-safe/provenance/
+          cp docs/P0_FINAL_SAFE_MANIFEST.md artifacts/final-safe/provenance/
+
+          for batch in 16 32 64; do
+            diff -u \
+              .build/p0-final-trees/base/src/card_image.c \
+              ".build/p0-final-trees/final$batch/src/card_image.c" \
+              > "artifacts/final-safe/source-diffs/card_image-final$batch.diff" || test $? -eq 1
+            diff -u \
+              .build/p0-final-trees/base/src/card_image_fs.c \
+              ".build/p0-final-trees/final$batch/src/card_image_fs.c" \
+              > "artifacts/final-safe/source-diffs/card_image_fs-final$batch.diff" || test $? -eq 1
+          done
+
+          sha256sum \
+            .build/p0-final-trees/base/src/card_image.c \
+            .build/p0-final-trees/base/src/card_image_fs.c \
+            .build/p0-final-trees/final*/src/card_image.c \
+            .build/p0-final-trees/final*/src/card_image_fs.c \
+            > artifacts/final-safe/provenance/COMPOSED_SOURCE_SHA256.txt
+
+      - name: Build BASE and FINAL-SAFE timing ELFs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/final-safe/elf
+
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            ps2dev/ps2dev:v2.0.0 \
+            sh -c 'set -eu; \
+              apk add --no-cache build-base >/dev/null; \
+              build_one() { \
+                variant="$1"; output="$2"; \
+                cd "/work/.build/p0-final-trees/$variant"; \
+                make R5900_BENCH=0 \
+                     RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 \
+                     IMAGE_READ_PAGES=32 \
+                     IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0 \
+                     IMAGE_WRITE_PROBE=0 \
+                     MC_INSPECTOR.ELF; \
+                cp MC_INSPECTOR.ELF "/work/artifacts/final-safe/elf/$output"; \
+                mips64r5900el-ps2-elf-size MC_INSPECTOR.ELF \
+                  > "/work/artifacts/final-safe/elf/$output.size.txt"; \
+                cd /work; \
+              }; \
+              build_one base BASE-c88f507.ELF; \
+              build_one final16 FINAL-SAFE-conflict16.ELF; \
+              build_one final32 FINAL-SAFE-conflict32.ELF; \
+              build_one final64 FINAL-SAFE-conflict64.ELF'
+
+          sha256sum artifacts/final-safe/elf/*.ELF \
+            > artifacts/final-safe/elf/ELF_SHA256SUMS.txt
+
+          # Composition is expected to change the binary; fail if a transform was optimized away wholesale.
+          for f in artifacts/final-safe/elf/FINAL-SAFE-conflict*.ELF; do
+            if cmp -s artifacts/final-safe/elf/BASE-c88f507.ELF "$f"; then
+              echo "Unexpected byte-identical FINAL-SAFE ELF: $f" >&2
+              exit 1
+            fi
+          done
+
+      - name: Retrieve retained ORIGINAL-541 artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=artifacts/final-safe/original-541
+          mkdir -p "$out/extracted"
+
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ORIGINAL_ARTIFACT_ID" \
+            > "$out/artifact-metadata.json"
+
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path('artifacts/final-safe/original-541/artifact-metadata.json')
+          data = json.loads(path.read_text())
+          expected_id = int(os.environ['ORIGINAL_ARTIFACT_ID'])
+          expected_digest = os.environ['ORIGINAL_ARTIFACT_DIGEST']
+          expected_run = int(os.environ['ORIGINAL_RUN_ID'])
+          expected_sha = os.environ['ORIGINAL_SOURCE_SHA']
+
+          assert data['id'] == expected_id, (data['id'], expected_id)
+          assert data.get('expired') is False, 'ORIGINAL-541 artifact is expired'
+          assert data.get('digest') == expected_digest, (data.get('digest'), expected_digest)
+          run = data.get('workflow_run') or {}
+          assert run.get('id') == expected_run, (run.get('id'), expected_run)
+          assert run.get('head_sha') == expected_sha, (run.get('head_sha'), expected_sha)
+          PY
+
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ORIGINAL_ARTIFACT_ID/zip" \
+            > "$out/ORIGINAL-541.zip"
+          unzip -tq "$out/ORIGINAL-541.zip"
+          unzip -q "$out/ORIGINAL-541.zip" -d "$out/extracted"
+          sha256sum "$out/ORIGINAL-541.zip" > "$out/ORIGINAL-541.zip.sha256"
+          find "$out/extracted" -maxdepth 3 -type f -print | sort > "$out/CONTENTS.txt"
+
+      - name: Write real-hardware A-B protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > artifacts/final-safe/P0_FINAL_SAFE_AB_README.txt <<'EOF'
+          P0 FINAL-SAFE real-hardware A/B pack
+          ====================================
+
+          Reference levels
+          ----------------
+          ORIGINAL-541:
+            exact retained project artifact from workflow #541
+            source SHA a81ca03dce237fbbb48c52ce39adc3319cc0fea1
+
+          BASE-c88f507.ELF:
+            exact composition base c88f50787b15bf253e11e5bc75017ac1ed4cdd79
+            includes earlier copy-elision and direct producer -> write-slot P0 work
+
+          FINAL-SAFE-conflict16.ELF
+          FINAL-SAFE-conflict32.ELF
+          FINAL-SAFE-conflict64.ELF
+            BASE plus the same four synchronous transformations:
+              1. batched image-name discovery
+              2. two-page image-FS cluster batching
+              3. immutable FAT metadata cache
+              4. target conflict-directory batching
+            Only conflict-directory batch size differs: 16 / 32 / 64 entries.
+
+          Fixed transport controls
+          ------------------------
+          R5900_BENCH=0
+          RAW_BULK_PAGES=16
+          RAW_BULK_ASYNC=0
+          IMAGE_READ_PAGES=32
+          IMAGE_WRITE_PAGES=32
+          IMAGE_WRITE_ASYNC=0
+          IMAGE_WRITE_PROBE=0
+
+          Correctness gate
+          ----------------
+          Do not rank timings from a run that fails correctness.
+          Require, as applicable:
+            - identical logical image CRC / correctness hash
+            - expected output file size
+            - successful full image verification
+            - successful selective restore and post-write verification
+            - no new I/O, mc, SIF or filesystem errors
+
+          Hardware / software metadata to record
+          --------------------------------------
+          - SCPH model and hardware revision
+          - PS2SDK/toolchain revision (this pack pins PS2SDK security source separately)
+          - active IRX set
+          - physical memory card and slot
+          - USB device model/controller if known and filesystem
+          - image format (.vmc or .ps2), size and workload
+          - source / target direction
+          - cold/warm policy and restart/reboot policy
+          - sample count
+
+          Sampling
+          --------
+          Target at least 20 valid runs per candidate for each representative workload.
+          Alternate or randomize candidate order so warm caches, USB state and card state
+          do not consistently favor one ELF.
+
+          Report p50, p95, p99 and max. Do not use only an arithmetic mean.
+
+          Metrics
+          -------
+          Record the whole user-visible operation time plus the available project telemetry:
+            - RAW-PERF setup / active / total
+            - RAW-BULK-PERF calls, bytes, p50/p95/p99/max and wait fields
+            - IMAGE-IO underlying calls, bytes, service ticks and p50/p95/p99/max
+            - any operation-level filesystem/selective-restore timing already logged
+
+          Interpretation
+          --------------
+          ORIGINAL-541 -> FINAL-SAFE measures the practical project improvement against the
+          exact historical reference build.
+
+          BASE-c88f507 -> FINAL-SAFE isolates the four newly composed synchronous changes.
+
+          FINAL-SAFE 16 vs 32 vs 64 selects the conflict-directory batch on the real R5900.
+          The largest batch is not assumed to win: sceMcTblGetDir table size competes with an
+          8 KiB D-cache and the IOP/RPC cost is only one part of the critical path.
+
+          Promotion rule
+          --------------
+          No candidate becomes the normal production path from CI or PCSX2 timing alone.
+          Promote only a correctness-clean real-PS2 winner, then profile the whole system again
+          because removing one bottleneck can move the critical path elsewhere.
+          EOF
+
+          cat > artifacts/final-safe/P0_FINAL_SAFE_RESULTS_TEMPLATE.csv <<'EOF'
+          variant,workload,run_index,scp_model,hardware_revision,card,usb_device,filesystem,image_format,image_bytes,cold_warm,operation_ticks,raw_setup_ticks,raw_active_ticks,raw_total_ticks,image_io_read_ticks,image_io_write_ticks,p50_ticks,p95_ticks,p99_ticks,max_ticks,correctness_hash,verify_result,notes
+          EOF
+
+          cat > artifacts/final-safe/COMPOSITION.txt <<EOF
+          integration_sha=$GITHUB_SHA
+          base_sha=$BASE_SHA
+          discovery_sha=$DISCOVERY_SHA
+          cluster_sha=$CLUSTER_SHA
+          fat_sha=$FAT_SHA
+          conflict_sha=$CONFLICT_SHA
+          async_read_sha_not_composed=$ASYNC_READ_SHA
+          original_run_number=$ORIGINAL_RUN_NUMBER
+          original_run_id=$ORIGINAL_RUN_ID
+          original_source_sha=$ORIGINAL_SOURCE_SHA
+          original_artifact_id=$ORIGINAL_ARTIFACT_ID
+          original_artifact_digest=$ORIGINAL_ARTIFACT_DIGEST
+          ps2sdk_security_commit=$PS2SDK_SECURITY_COMMIT
+          toolchain_container=ps2dev/ps2dev:v2.0.0
+          EOF
+
+      - name: Upload complete P0 hardware pack
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS2-MCI-P0-final-safe-${{ github.sha }}
+          path: artifacts/final-safe/
+          if-no-files-found: error
+          retention-days: 30

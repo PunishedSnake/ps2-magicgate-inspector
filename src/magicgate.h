@@ -51,6 +51,19 @@ typedef enum MagicGateResult {
     MG_RESULT_TARGET_NOT_PS2
 } MagicGateResult;
 
+typedef enum MagicGateBindRc {
+    MG_BIND_OK = 0,
+    MG_BIND_ERR_INVALID = -4710,
+    MG_BIND_ERR_CARD = -4711,
+    MG_BIND_ERR_RPC = -4712,
+    MG_BIND_ERR_HEADER = -4713,
+    MG_BIND_ERR_BLOCK = -4714,
+    MG_BIND_ERR_KBIT = -4715,
+    MG_BIND_ERR_KC = -4716,
+    MG_BIND_ERR_ICVPS2 = -4717,
+    MG_BIND_ERR_KEY_LAYOUT = -4718
+} MagicGateBindRc;
+
 typedef struct MagicGateIopStatus {
     int secrman_load_rc;
     int secrman_start_rc;
@@ -63,13 +76,13 @@ typedef struct MagicGateKelfBuffer {
     unsigned char *data;
     int size;
     int source_port;
-    char source_path[64];
+    char source_path[224];
 } MagicGateKelfBuffer;
 
 typedef struct MagicGateReport {
     int target_port;
     int source_port;
-    char source_path[64];
+    char source_path[224];
     int source_size;
     int source_io_rc;
 
@@ -111,6 +124,13 @@ void MagicGateReleaseKelf(MagicGateKelfBuffer *buffer);
 /* Run only after the selected SECR/card profile has entered the isolated IOP. */
 int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
                            MagicGateReport *report);
+
+/* Bind an arbitrary validated KELF already resident in EE RAM. This uses the
+ * same instrumented SECRSIF path as the capability probe, but commits returned
+ * Kbit/Kc/ICVPS2 values back into the caller's buffer. No card filesystem write
+ * occurs here; the caller still owns destination commit/verification. */
+int MagicGateBindPrepared(int target_port, unsigned char *data, int size,
+                          MagicGateReport *report);
 
 const char *MagicGateStageText(MagicGateStage stage);
 const char *MagicGateResultText(MagicGateResult result);

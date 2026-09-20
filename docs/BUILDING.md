@@ -1,14 +1,38 @@
 # Building and reproducibility
 
-PS2 Memory Card Inspector 0.2.0 targets PS2DEV / PS2SDK 2.0 for both the EE application and the isolated MagicGate security stack.
+PS2 Memory Card Inspector 0.4.0 "Drebin" targets PS2DEV / PS2SDK 2.0.
 
-## Canonical build
+The public release is one production profile. P0 optimizations used by the normal
+runtime remain enabled, while USB speed-test variants, async/NOWAIT candidates
+and Performance Lab binaries are not built or published.
 
-GitHub Actions is the canonical release build path. It pins the security source, stages matching IOP modules, applies the deterministic failed-GET_KBIT instrumentation, builds SECRMAN/SECRSIF from source, links the standalone ELF, computes SHA-256 and packages the required license/provenance files.
+## Canonical release profile
 
-The release has one security backend: **PS2SDK 2.0 SECRMAN 1.4**.
+```text
+-O2 -G0
+-mtune=r5900 on measured hot objects
+RAW_BULK_PAGES=16
+IMAGE_READ_PAGES=32
+IMAGE_WRITE_PAGES=32
+RAW_BULK_ASYNC=0
+IMAGE_READ_AHEAD_ASYNC=0
+IMAGE_WRITE_ASYNC=0
+```
 
-## Toolchain
+The global baseline stays at `-O2`. Drebin does not promote broad `-O3`,
+`-ffast-math`, LTO or unrolling into release policy.
+
+## Canonical CI build
+
+GitHub Actions is the canonical release build path. It:
+
+1. runs source invariants for card math, FMCB cross-region policy and Settings;
+2. stages the matching PS2SDK 2.0 card/security personalities;
+3. source-builds the pinned SECRMAN 1.4 + SECRSIF pair;
+4. builds the legacy non-X raw MCMAN/MCSERV pair used by Card Tools;
+5. builds one production `MC_INSPECTOR.ELF`;
+6. verifies that benchmark/Performance Lab objects are absent;
+7. packages SHA-256, provenance, licenses and release documentation.
 
 CI uses:
 
@@ -16,66 +40,52 @@ CI uses:
 ps2dev/ps2dev:v2.0.0
 ```
 
-The validated Briscoe development builds used GCC 15.2.0 from that image.
+## Pinned security source
 
-## Pinned PS2SDK source
-
-The security source revision is:
+The qualified security source revision remains:
 
 ```text
 a13b5971ec0e39c7ba8b8559b80a4e81c8425352
 ```
 
-CI copies the matching PS2SDK 2.0 card modules into:
-
-```text
-.build/ps2sdk2-mg/freesio2.irx
-.build/ps2sdk2-mg/freepad.irx
-.build/ps2sdk2-mg/mcman.irx
-.build/ps2sdk2-mg/mcserv.irx
-```
-
-It checks out the pinned PS2SDK source, applies:
+CI applies:
 
 ```text
 tools/patch_secrman14_diag.py
 ```
 
-and builds:
+to a temporary checkout and builds:
 
 ```text
 iop/security/secrman -> .build/ps2sdk2-secr14/secrman.irx
 iop/security/secrsif -> .build/ps2sdk2-secr14/secrsif.irx
 ```
 
-The application then builds with a plain:
+Matching PS2SDK 2.0 card modules are staged under:
 
-```sh
-make
+```text
+.build/ps2sdk2-mg/
 ```
 
-## Why SECRMAN is patched at build time
+Card Tools also require a raw-page legacy MCMAN/MCSERV personality built with
+XMC compatibility disabled:
 
-Inspector does not vendor a permanent fork of PS2SDK SECRMAN. CI:
-
-1. checks out an exact upstream revision;
-2. patches only the temporary source tree;
-3. records CardAuth/Mechacon state along the real failed GET_KBIT path;
-4. removes the now-unused private helper so PS2SDK's `-Werror` build remains clean;
-5. builds the IRX and embeds it into the standalone ELF.
-
-The patch does not provide software MagicGate keys or replace the successful authentication path. Actual security operations still use the console Mechacon and the card's CardAuth protocol.
-
-The patch source is part of this repository so the modification is reproducible and auditable.
+```text
+.build/ps2sdk2-raw/mcman.irx
+.build/ps2sdk2-raw/mcserv.irx
+```
 
 ## Local build
 
-A local `make` requires the same staged files under `.build/`. The Makefile intentionally fails when they are missing instead of silently using arbitrary installed IRX versions.
+A plain local `make` expects the same staged IRX files as CI. The Makefile
+fails if they are absent rather than silently selecting arbitrary installed
+modules.
 
-The safest local process is to reproduce the staging commands from `.github/workflows/build.yml` inside `ps2dev/ps2dev:v2.0.0`, then run:
+After staging:
 
 ```sh
-make
+make clean
+make MC_INSPECTOR.ELF
 ```
 
 Output:
@@ -84,14 +94,15 @@ Output:
 MC_INSPECTOR.ELF
 ```
 
-For public binaries, prefer CI so the exact source revision and build environment are recorded automatically.
+For public binaries, prefer CI because it records the exact project revision,
+PS2SDK security revision and release profile.
 
-## Release artifact contents
+## Release artifact
 
-The workflow packages:
+The stable workflow packages:
 
 ```text
-MC_INSPECTOR.ELF
+MC_INSPECTOR-0.4.0-Drebin.ELF
 SHA256SUMS.txt
 SOURCE_PROVENANCE.txt
 README.md
@@ -102,21 +113,34 @@ THIRD_PARTY_NOTICES.md
 licenses/PS2SDK-AFL-2.0.txt
 ```
 
-`SOURCE_PROVENANCE.txt` records both the Inspector revision and the pinned PS2SDK security-source revision.
+`SOURCE_PROVENANCE.txt` records that the artifact is the P0 production profile
+with synchronous transport and no speed-test variants.
 
-## Historical development baseline
+## Why the release keeps P0 but not the lab
 
-Briscoe development used a pinned FreeMcBoot-compatible SECRMAN 1.3 stack to isolate the original CardAuth failure and discover the logical-port/physical-SIO2 mapping bug. That path was valuable as a regression baseline but is no longer part of the 0.2.0 production build.
+P0 changes that are part of the normal architecture remain in 0.4.0. Examples
+include production batching, fast-copy support and R5900 tuning on hot objects.
 
-The historical results remain in `CHANGELOG.md`, `docs/MAGICGATE.md` and repository history. Removing the 1.3 build path avoids shipping an unnecessary second backend and gives the release a single, clearly licensed PS2SDK 2.0 provenance chain.
+The following remain development-only:
+
+- USB throughput A/B matrices;
+- alternate raw/image batch sizes;
+- async fileXio candidates;
+- synthetic R5900 counter builds;
+- Performance Lab executables.
+
+This keeps the public artifact reproducible and understandable without throwing
+away improvements already integrated into the production path.
 
 ## Release policy
 
 A stable build must:
 
 - build from the pinned PS2SDK source revision;
-- keep the exact build-time diagnostic patch in source control;
-- include project and PS2SDK license/attribution notices;
-- publish a SHA-256 for the ELF;
-- preserve the normal ROM X filesystem stack and isolated security-session boundary;
-- keep FMCB installation writes disabled until bind/write/read-back/rollback behavior is independently hardware-validated.
+- keep the exact build-time SECR diagnostic patch in source control;
+- keep ordinary card I/O and isolated security personalities separate;
+- retain all-KELF compatibility preflight before FMCB writes;
+- retain durable recovery and full read-back verification;
+- retain synchronous ownership for correctness-critical mass I/O;
+- publish one production ELF with SHA-256 and provenance;
+- include project and PS2SDK license/attribution notices.

@@ -30,6 +30,9 @@
 #include <string.h>
 
 #include "magicgate.h"
+#include "kelf_cache.h"
+#include "progress.h"
+#include "usb_search.h"
 
 #define MG_RPC_RETRIES 300
 #define MG_RPC_RETRY_USEC 1000
@@ -55,11 +58,35 @@ static SifRpcClientData_t RpcGetKc;
 static SifRpcClientData_t RpcGetIcvps2;
 static unsigned char RpcBuffer[0x1000] __attribute__((aligned(64)));
 
-static const char *RawKelfCandidates[] = {
-    "mass:/FMCB/SYSTEM/FMCB.XLF",
-    "mass0:/FMCB/SYSTEM/FMCB.XLF",
-    "mass1:/FMCB/SYSTEM/FMCB.XLF"
-};
+static void MgProgress(const MagicGateReport *report, int percent,
+                       const char *action, const char *detail)
+{
+    char line[256];
+
+    if (report != NULL) {
+        snprintf(line, sizeof(line), "mc%d: %s", report->target_port,
+                 detail != NULL ? detail : "");
+        MciProgressUpdate(MCI_PROGRESS_MAGICGATE, percent, action, line);
+    } else {
+        MciProgressUpdate(MCI_PROGRESS_MAGICGATE, percent, action, detail);
+    }
+}
+
+static void RawKelfSearchProgress(const char *path,
+                                  unsigned int directories_scanned,
+                                  void *userdata)
+{
+    MagicGateReport *report = (MagicGateReport *)userdata;
+    char detail[224];
+    int percent = 2 + (int)(directories_scanned / 8u);
+
+    if (percent > 7)
+        percent = 7;
+    snprintf(detail, sizeof(detail),
+             "Searched %u folders; checking %.150s",
+             directories_scanned, path != NULL ? path : "USB storage");
+    MgProgress(report, percent, "Searching USB storage for FMCB.XLF", detail);
+}
 
 static int McSyncResult(void)
 {
@@ -122,6 +149,9 @@ int MagicGateLoadIopModules(MagicGateIopStatus *status)
     memset(&RpcGetKc, 0, sizeof(RpcGetKc));
     memset(&RpcGetIcvps2, 0, sizeof(RpcGetIcvps2));
 
+    MciProgressUpdate(MCI_PROGRESS_MAGICGATE, 43,
+                      "Starting the SECRSIF bridge",
+                      "SECRMAN 1.4 is resident; starting the matching EE/IOP RPC bridge for KELF download calls.");
     rc = SifExecModuleBuffer(secrsif_irx, size_secrsif_irx, 0, NULL, &start_rc);
     status->secrsif_load_rc = rc;
     status->secrsif_start_rc = start_rc;
@@ -275,27 +305,87 @@ static int DownloadGetIcvps2(unsigned char icvps2[8])
     return param->result;
 }
 
-static int FindRawKelfSource(MagicGateReport *report)
+static int UseRawKelfPath(MagicGateReport *report, const char *path,
+                          const char *source_kind)
 {
     iox_stat_t stat;
-    unsigned int i;
-    int rc = -1;
+    char detail[224];
+    int rc;
 
-    for (i = 0; i < sizeof(RawKelfCandidates) / sizeof(RawKelfCandidates[0]); i++) {
-        memset(&stat, 0, sizeof(stat));
-        rc = fileXioGetStat(RawKelfCandidates[i], &stat);
-        report->source_io_rc = rc;
-        if (rc >= 0 && stat.size >= sizeof(SecrKELFHeader_t) &&
-            stat.size <= MG_MAX_KELF_SIZE) {
-            report->source_port = MG_RAW_SOURCE_PORT;
-            report->source_size = (int)stat.size;
-            snprintf(report->source_path, sizeof(report->source_path),
-                     "RAW %s", RawKelfCandidates[i]);
-            return 0;
-        }
+    memset(&stat, 0, sizeof(stat));
+    rc = fileXioGetStat(path, &stat);
+    report->source_io_rc = rc;
+    if (rc < 0)
+        return rc;
+    if (!FIO_S_ISREG(stat.mode) || stat.size < sizeof(SecrKELFHeader_t) ||
+        stat.size > MG_MAX_KELF_SIZE)
+        return MG_INVALID_LAYOUT;
+
+    report->source_port = MG_RAW_SOURCE_PORT;
+    report->source_size = (int)stat.size;
+    snprintf(report->source_path, sizeof(report->source_path), "%s", path);
+    snprintf(detail, sizeof(detail), "%s: %.150s (%d KiB).",
+             source_kind, path, (report->source_size + 1023) / 1024);
+    MgProgress(report, 8, "FMCB.XLF ready", detail);
+    return 0;
+}
+
+static int UseCachedRawKelf(MagicGateReport *report)
+{
+    char path[MCI_USB_SEARCH_PATH_MAX];
+    unsigned int size = 0u;
+    char detail[224];
+
+    if (MciKelfCacheGetSource(path, sizeof(path), &size) < 0)
+        return -1;
+    if (size < sizeof(SecrKELFHeader_t) || size > MG_MAX_KELF_SIZE) {
+        MciKelfCacheInvalidate();
+        return -1;
     }
 
-    return rc < 0 ? rc : sceMcResNoEntry;
+    report->source_port = MG_RAW_SOURCE_PORT;
+    report->source_size = (int)size;
+    report->source_io_rc = 0;
+    snprintf(report->source_path, sizeof(report->source_path), "%s", path);
+    snprintf(detail, sizeof(detail),
+             "EE RAM cache: %.150s (%u KiB). USB search/read skipped.",
+             path, (size + 1023u) / 1024u);
+    MgProgress(report, 8, "FMCB.XLF ready from cache", detail);
+    return 0;
+}
+
+static int FindRawKelfSource(MagicGateReport *report)
+{
+    char package_root[MCI_USB_SEARCH_PATH_MAX];
+    char path[MCI_USB_SEARCH_PATH_MAX];
+    int rc;
+
+    if (UseCachedRawKelf(report) == 0)
+        return 0;
+
+    /* A complete FMCB package that already passed preflight is the preferred
+     * source. This avoids recursively walking the USB tree on every scan. */
+    if (MciUsbGetVerifiedPackageRoot(package_root, sizeof(package_root)) == 0) {
+        int written = snprintf(path, sizeof(path), "%s/SYSTEM/FMCB.XLF",
+                               package_root);
+        if (written > 0 && (unsigned int)written < sizeof(path)) {
+            rc = UseRawKelfPath(report, path, "Using verified installer package");
+            if (rc == 0)
+                return 0;
+        }
+        MciUsbClearVerifiedPackageRoot();
+    }
+
+    MgProgress(report, 2, "Looking for FMCB.XLF",
+               "No verified package path is cached, so visible USB folders are being searched once.");
+    if (MciUsbWaitForStorage(20u, 100000u) < 0)
+        return sceMcResNoEntry;
+    rc = MciUsbFindFmcbXlf(path, sizeof(path), 0,
+                           RawKelfSearchProgress, report);
+    report->source_io_rc = rc;
+    if (rc < 0)
+        return sceMcResNoEntry;
+    return UseRawKelfPath(report, path, "Found on USB storage");
 }
 
 static const char *RawPathFromReport(const MagicGateReport *report)
@@ -309,55 +399,33 @@ static int ReadRawKelfSource(const MagicGateReport *report,
                              unsigned char **out_buffer)
 {
     const char *path = RawPathFromReport(report);
-    unsigned char *buffer;
-    int alloc_size;
-    int total;
-    int chunk;
-    int fd;
+    unsigned int clone_size = 0u;
+    int cache_hit = 0;
+    char detail[224];
     int rc;
 
     if (report->source_size <= 0 || report->source_size > MG_MAX_KELF_SIZE)
         return MG_INVALID_LAYOUT;
 
-    alloc_size = report->source_size + 0x400;
-    buffer = memalign(64, alloc_size);
-    if (buffer == NULL)
-        return -ENOMEM;
-    memset(buffer, 0, alloc_size);
-
-    fd = fileXioOpen(path, FIO_O_RDONLY);
-    if (fd < 0) {
-        free(buffer);
-        return fd;
-    }
-
-    total = 0;
-    while (total < report->source_size) {
-        chunk = report->source_size - total;
-        if (chunk > MG_READ_CHUNK)
-            chunk = MG_READ_CHUNK;
-
-        rc = fileXioRead(fd, buffer + total, chunk);
-        if (rc < 0) {
-            fileXioClose(fd);
-            free(buffer);
-            return rc;
-        }
-        if (rc == 0 || rc > chunk) {
-            fileXioClose(fd);
-            free(buffer);
-            return MG_SHORT_READ;
-        }
-        total += rc;
-    }
-
-    rc = fileXioClose(fd);
-    if (rc < 0) {
-        free(buffer);
+    MgProgress(report, 10, "Preparing raw FMCB.XLF",
+               "Using an immutable EE cache and a disposable aligned clone for the mutating security transaction.");
+    rc = MciKelfCacheClone(path, (unsigned int)report->source_size,
+                           out_buffer, &clone_size, &cache_hit);
+    if (rc < 0)
         return rc;
+    if (clone_size != (unsigned int)report->source_size) {
+        free(*out_buffer);
+        *out_buffer = NULL;
+        return MG_SHORT_READ;
     }
 
-    *out_buffer = buffer;
+    snprintf(detail, sizeof(detail),
+             cache_hit
+                 ? "Cloned %u KiB from the persistent EE RAM cache; no USB read was required."
+                 : "Read and cached %u KiB from USB, then cloned an untouched working copy.",
+             (clone_size + 1023u) / 1024u);
+    MgProgress(report, 20, cache_hit ? "Using cached FMCB.XLF"
+                                     : "FMCB.XLF cached in EE RAM", detail);
     return 0;
 }
 
@@ -383,6 +451,7 @@ int MagicGatePrepareKelf(int target_port, MagicGateKelfBuffer *buffer,
 {
     const SecrKELFHeader_t *header;
     unsigned char *data = NULL;
+    char detail[192];
     int rc;
 
     MagicGateResetReport(report, target_port);
@@ -393,6 +462,8 @@ int MagicGatePrepareKelf(int target_port, MagicGateKelfBuffer *buffer,
     if (rc < 0) {
         report->source_io_rc = rc;
         report->result = MG_RESULT_NO_TEST_KELF;
+        MgProgress(report, 100, "MagicGate probe cannot start",
+                   "No valid raw FMCB.XLF source was found on the USB package.");
         return -1;
     }
 
@@ -401,15 +472,21 @@ int MagicGatePrepareKelf(int target_port, MagicGateKelfBuffer *buffer,
     if (rc < 0) {
         report->source_io_rc = rc;
         report->result = MG_RESULT_IO_ERROR;
+        MgProgress(report, 100, "Raw KELF read failed",
+                   "The source could not be read completely into EE RAM.");
         return -1;
     }
 
     report->stage = MG_STAGE_VALIDATE_KELF;
+    MgProgress(report, 22, "Validating the KELF structure",
+               "Checking the KELF header size, BIT count and basic bounds before entering the security session.");
     rc = ValidateKelf(data, report->source_size);
     if (rc < 0) {
         report->source_io_rc = rc;
         report->result = MG_RESULT_INVALID_KELF;
         free(data);
+        MgProgress(report, 100, "Raw KELF validation failed",
+                   "The file does not have a layout that can be safely passed to the SECR download pipeline.");
         return -1;
     }
 
@@ -424,6 +501,12 @@ int MagicGatePrepareKelf(int target_port, MagicGateKelfBuffer *buffer,
     report->source_io_rc = 0;
     report->stage = MG_STAGE_SESSION_SETUP;
     report->result = MG_RESULT_NOT_RUN;
+
+    snprintf(detail, sizeof(detail),
+             "Validated %d-byte KELF; BIT entries=%u; ICVPS2 %s.",
+             report->source_size, (unsigned int)header->BIT_count,
+             report->icvps2_required ? "required" : "not required");
+    MgProgress(report, 25, "Raw KELF prepared in EE RAM", detail);
     return 0;
 }
 
@@ -434,6 +517,7 @@ int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
     unsigned char kc[16];
     unsigned char icvps2[8];
     SecrBitTable_t bit_table;
+    char detail[224];
     unsigned int offset;
     unsigned int block_size;
     int type = 0;
@@ -453,6 +537,8 @@ int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
     }
 
     report->stage = MG_STAGE_SESSION_CARD_CHECK;
+    MgProgress(report, 47, "Checking the target card inside the security session",
+               "Confirming that the selected slot is still a PS2 memory card after the IOP personality switch.");
     for (i = 0; i < MG_CARD_RETRIES; i++) {
         type = 0;
         free_clusters = 0;
@@ -483,6 +569,8 @@ int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
     }
 
     report->stage = MG_STAGE_BIND_RPC;
+    MgProgress(report, 51, "Binding SECRSIF RPC endpoints",
+               "Connecting to header, block, Kbit, Kc and ICVPS2 download services exposed by SECRSIF.");
     rc = BindDownloadRpc();
     report->rpc_rc = rc;
     if (rc < 0) {
@@ -492,6 +580,8 @@ int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
 
     memset(&bit_table, 0, sizeof(bit_table));
     report->stage = MG_STAGE_DOWNLOAD_HEADER;
+    MgProgress(report, 56, "Submitting the KELF header",
+               "SECRMAN is parsing the encrypted header and returning the BIT block table for this KELF.");
     rc = DownloadHeader(target_port, 0, buffer->data, &bit_table,
                         &report->header_reply_size);
     if (rc < 0) {
@@ -515,7 +605,17 @@ int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
     report->stage = MG_STAGE_DOWNLOAD_BLOCKS;
     offset = bit_table.header.headersize;
     for (i = 0; i < report->block_count; i++) {
+        int percent = 60;
         block_size = bit_table.blocks[i].size;
+
+        if (report->block_count > 0)
+            percent += (i * 12) / report->block_count;
+        snprintf(detail, sizeof(detail),
+                 "BIT block %d/%d: %u bytes, %s. Current KELF offset 0x%X.",
+                 i + 1, report->block_count, block_size,
+                 (bit_table.blocks[i].flags & 2) ? "SECR download required" : "plaintext / skip RPC",
+                 offset);
+        MgProgress(report, percent, "Processing the KELF BIT table", detail);
 
         /* Every BIT entry must fit within the raw KELF, but only entries marked
          * for security download are constrained by SECRSIF's 0x400-byte block
@@ -555,6 +655,8 @@ int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
     }
 
     report->stage = MG_STAGE_GET_KBIT;
+    MgProgress(report, 77, "Requesting Kbit from the target card",
+               "Running the real Mechacon preparation and card-side F2/50-53 CardAuth transform for Kbit.");
     rc = DownloadGetKbit(target_port, 0, kbit);
     if (rc < 0) {
         report->rpc_rc = rc;
@@ -564,10 +666,14 @@ int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
     report->kbit_rc = rc;
     if (rc == 0) {
         report->result = MG_RESULT_KBIT_FAILED;
+        MgProgress(report, 82, "Kbit exchange did not complete",
+                   "The diagnostic record will classify CardAuth support after the normal ROM X environment is restored.");
         return -1;
     }
 
     report->stage = MG_STAGE_GET_KC;
+    MgProgress(report, 84, "Requesting Kc from the target card",
+               "Kbit completed. Performing the second card-bound key exchange required by the KELF download path.");
     rc = DownloadGetKc(target_port, 0, kc);
     if (rc < 0) {
         report->rpc_rc = rc;
@@ -582,6 +688,8 @@ int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
 
     if (report->icvps2_required) {
         report->stage = MG_STAGE_GET_ICVPS2;
+        MgProgress(report, 89, "Requesting ICVPS2",
+                   "This KELF requires the additional ICVPS2 value, so the final SECR download query is being executed.");
         rc = DownloadGetIcvps2(icvps2);
         if (rc < 0) {
             report->rpc_rc = rc;
@@ -593,11 +701,286 @@ int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
             report->result = MG_RESULT_ICVPS2_FAILED;
             return -1;
         }
+    } else {
+        MgProgress(report, 89, "ICVPS2 not required",
+                   "The KELF header does not request ICVPS2; the capability probe can proceed directly to cleanup.");
     }
 
     report->stage = MG_STAGE_DONE;
     report->result = MG_RESULT_PASS;
+    MgProgress(report, 92, "MagicGate / KELF capability probe completed",
+               "Header, encrypted BIT data, Kbit and Kc completed. Restoring the normal Sony ROM X card environment next.");
     return 0;
+}
+
+static int StoreBoundKeyMaterial(unsigned char *data, int size,
+                                 const unsigned char kbit[16],
+                                 const unsigned char kc[16],
+                                 const unsigned char *icvps2,
+                                 int icvps2_required)
+{
+    const SecrKELFHeader_t *header;
+    unsigned int offset;
+    unsigned int skip;
+
+    if (data == NULL || size < (int)sizeof(SecrKELFHeader_t))
+        return MG_BIND_ERR_KEY_LAYOUT;
+
+    header = (const SecrKELFHeader_t *)data;
+    if (header->KELF_header_size < sizeof(SecrKELFHeader_t) ||
+        header->KELF_header_size > (unsigned int)size ||
+        header->BIT_count > 63)
+        return MG_BIND_ERR_KEY_LAYOUT;
+
+    offset = sizeof(SecrKELFHeader_t);
+    if ((unsigned int)header->BIT_count >
+        ((unsigned int)size - offset) / sizeof(SecrBitBlockData_t))
+        return MG_BIND_ERR_KEY_LAYOUT;
+    offset += (unsigned int)header->BIT_count * sizeof(SecrBitBlockData_t);
+
+    if (header->flags & 1) {
+        if (offset >= (unsigned int)size)
+            return MG_BIND_ERR_KEY_LAYOUT;
+        skip = (unsigned int)data[offset] + 1u;
+        if (skip > (unsigned int)size - offset)
+            return MG_BIND_ERR_KEY_LAYOUT;
+        offset += skip;
+    }
+
+    if ((header->flags & 0xF000) == 0) {
+        if (8u > (unsigned int)size - offset)
+            return MG_BIND_ERR_KEY_LAYOUT;
+        offset += 8u;
+    }
+
+    if (offset > header->KELF_header_size ||
+        32u > header->KELF_header_size - offset ||
+        offset > (unsigned int)size ||
+        32u > (unsigned int)size - offset)
+        return MG_BIND_ERR_KEY_LAYOUT;
+
+    memcpy(data + offset, kbit, 16);
+    memcpy(data + offset + 16u, kc, 16);
+
+    if (icvps2_required) {
+        unsigned int icv_offset;
+        if (icvps2 == NULL || header->KELF_header_size < 8u)
+            return MG_BIND_ERR_KEY_LAYOUT;
+        icv_offset = header->KELF_header_size - 8u;
+        if (icv_offset > (unsigned int)size ||
+            8u > (unsigned int)size - icv_offset)
+            return MG_BIND_ERR_KEY_LAYOUT;
+        memcpy(data + icv_offset, icvps2, 8);
+    }
+
+    return 0;
+}
+
+int MagicGateBindPrepared(int target_port, unsigned char *data, int size,
+                          MagicGateReport *report)
+{
+    const SecrKELFHeader_t *header;
+    unsigned char kbit[16];
+    unsigned char kc[16];
+    unsigned char icvps2[8];
+    SecrBitTable_t bit_table;
+    unsigned int offset;
+    unsigned int block_size;
+    int type = 0;
+    int free_clusters = 0;
+    int formatted = 0;
+    int rc;
+    int i;
+
+    if (report == NULL)
+        return MG_BIND_ERR_INVALID;
+
+    /* The caller has already created the isolated security session and
+     * populated session_setup_rc/session_mcinit_rc. Reset only bind-stage
+     * telemetry so those setup facts survive into the forensic record. */
+    report->target_port = target_port;
+    report->source_size = size;
+    report->source_io_rc = 0;
+    report->rpc_rc = -999;
+    report->header_rc = -999;
+    report->header_reply_size = -1;
+    report->block_count = 0;
+    report->encrypted_blocks = 0;
+    report->blocks_completed = 0;
+    report->failed_block = -1;
+    report->kbit_rc = -999;
+    report->kc_rc = -999;
+    report->icvps2_rc = -999;
+    report->result = MG_RESULT_NOT_RUN;
+
+    rc = ValidateKelf(data, size);
+    if (rc < 0) {
+        report->stage = MG_STAGE_VALIDATE_KELF;
+        report->result = MG_RESULT_INVALID_KELF;
+        report->source_io_rc = rc;
+        return MG_BIND_ERR_INVALID;
+    }
+
+    header = (const SecrKELFHeader_t *)data;
+    report->icvps2_required = (header->flags >> 1) & 1;
+
+    if (!SecrIopAvailable) {
+        report->stage = MG_STAGE_SESSION_SETUP;
+        report->result = MG_RESULT_SECR_UNAVAILABLE;
+        return MG_BIND_ERR_RPC;
+    }
+
+    report->stage = MG_STAGE_SESSION_CARD_CHECK;
+    for (i = 0; i < MG_CARD_RETRIES; i++) {
+        type = 0;
+        free_clusters = 0;
+        formatted = 0;
+        mcGetInfo(target_port, 0, &type, &free_clusters, &formatted);
+        rc = McSyncResult();
+
+        report->session_mcinfo_rc = rc;
+        report->session_type = type;
+        report->session_free_clusters = free_clusters;
+        report->session_formatted = formatted;
+
+        if (rc != sceMcResChangedCard)
+            break;
+        if (type == MC_TYPE_PS2 && i == MG_CARD_RETRIES - 1)
+            break;
+        DelayThread(MG_CARD_RETRY_USEC);
+    }
+    if (rc < 0 && rc != sceMcResNoFormat &&
+        !(rc == sceMcResChangedCard && type == MC_TYPE_PS2)) {
+        report->result = MG_RESULT_SESSION_CARD_ERROR;
+        return MG_BIND_ERR_CARD;
+    }
+    if (type != MC_TYPE_PS2) {
+        report->result = MG_RESULT_TARGET_NOT_PS2;
+        return MG_BIND_ERR_CARD;
+    }
+
+    report->stage = MG_STAGE_BIND_RPC;
+    rc = BindDownloadRpc();
+    report->rpc_rc = rc;
+    if (rc < 0) {
+        report->result = MG_RESULT_RPC_UNAVAILABLE;
+        return MG_BIND_ERR_RPC;
+    }
+
+    memset(&bit_table, 0, sizeof(bit_table));
+    report->stage = MG_STAGE_DOWNLOAD_HEADER;
+    rc = DownloadHeader(target_port, 0, data, &bit_table,
+                        &report->header_reply_size);
+    if (rc < 0) {
+        report->rpc_rc = rc;
+        report->result = MG_RESULT_RPC_UNAVAILABLE;
+        return MG_BIND_ERR_HEADER;
+    }
+    report->header_rc = rc;
+    if (rc == 0) {
+        report->result = MG_RESULT_HEADER_FAILED;
+        return MG_BIND_ERR_HEADER;
+    }
+
+    report->block_count = bit_table.header.block_count;
+    if (report->block_count < 0 || report->block_count > 63 ||
+        bit_table.header.headersize > (unsigned int)size) {
+        report->result = MG_RESULT_INVALID_KELF;
+        return MG_BIND_ERR_INVALID;
+    }
+
+    report->stage = MG_STAGE_DOWNLOAD_BLOCKS;
+    offset = bit_table.header.headersize;
+    for (i = 0; i < report->block_count; i++) {
+        block_size = bit_table.blocks[i].size;
+        if (offset > (unsigned int)size ||
+            block_size > (unsigned int)size - offset) {
+            report->failed_block = i;
+            report->result = MG_RESULT_INVALID_KELF;
+            return MG_BIND_ERR_INVALID;
+        }
+
+        if (bit_table.blocks[i].flags & 2) {
+            report->encrypted_blocks++;
+            if (block_size > 0x400u) {
+                report->failed_block = i;
+                report->result = MG_RESULT_INVALID_KELF;
+                return MG_BIND_ERR_INVALID;
+            }
+
+            rc = DownloadBlock(data + offset, (int)block_size);
+            if (rc < 0) {
+                report->rpc_rc = rc;
+                report->failed_block = i;
+                report->result = MG_RESULT_RPC_UNAVAILABLE;
+                return MG_BIND_ERR_BLOCK;
+            }
+            if (rc == 0) {
+                report->failed_block = i;
+                report->result = MG_RESULT_BLOCK_FAILED;
+                return MG_BIND_ERR_BLOCK;
+            }
+            report->blocks_completed++;
+        }
+        offset += block_size;
+    }
+
+    report->stage = MG_STAGE_GET_KBIT;
+    rc = DownloadGetKbit(target_port, 0, kbit);
+    if (rc < 0) {
+        report->rpc_rc = rc;
+        report->result = MG_RESULT_RPC_UNAVAILABLE;
+        return MG_BIND_ERR_KBIT;
+    }
+    report->kbit_rc = rc;
+    if (rc == 0) {
+        report->result = MG_RESULT_KBIT_FAILED;
+        return MG_BIND_ERR_KBIT;
+    }
+
+    report->stage = MG_STAGE_GET_KC;
+    rc = DownloadGetKc(target_port, 0, kc);
+    if (rc < 0) {
+        report->rpc_rc = rc;
+        report->result = MG_RESULT_RPC_UNAVAILABLE;
+        return MG_BIND_ERR_KC;
+    }
+    report->kc_rc = rc;
+    if (rc == 0) {
+        report->result = MG_RESULT_KC_FAILED;
+        return MG_BIND_ERR_KC;
+    }
+
+    memset(icvps2, 0, sizeof(icvps2));
+    if (report->icvps2_required) {
+        report->stage = MG_STAGE_GET_ICVPS2;
+        rc = DownloadGetIcvps2(icvps2);
+        if (rc < 0) {
+            report->rpc_rc = rc;
+            report->result = MG_RESULT_RPC_UNAVAILABLE;
+            return MG_BIND_ERR_ICVPS2;
+        }
+        report->icvps2_rc = rc;
+        if (rc == 0) {
+            report->result = MG_RESULT_ICVPS2_FAILED;
+            return MG_BIND_ERR_ICVPS2;
+        }
+    } else {
+        report->icvps2_rc = 0;
+    }
+
+    rc = StoreBoundKeyMaterial(data, size, kbit, kc,
+                               report->icvps2_required ? icvps2 : NULL,
+                               report->icvps2_required);
+    if (rc < 0) {
+        report->stage = MG_STAGE_VALIDATE_KELF;
+        report->result = MG_RESULT_INVALID_KELF;
+        return rc;
+    }
+
+    report->stage = MG_STAGE_DONE;
+    report->result = MG_RESULT_PASS;
+    return MG_BIND_OK;
 }
 
 const char *MagicGateStageText(MagicGateStage stage)

@@ -5,6 +5,11 @@
  * Inspector. MagicGate is intentionally separate: a card may be a perfectly
  * healthy PS2 memory card while still lacking the CardAuth behavior required
  * for SECR/KELF binding.
+ *
+ * 0.4 extends the disposable integrity test without reserving hundreds of KiB
+ * of EE RAM. Test files are produced and verified in deterministic 4 KiB
+ * chunks, so Quick/Extended/Thorough profiles exercise 4/64/256 KiB while
+ * using the same small aligned buffers and cleanup guarantees.
  */
 
 #define NEWLIB_PORT_AWARE
@@ -16,12 +21,25 @@
 #include <string.h>
 
 #include "card.h"
+#include "progress.h"
 
-#define TEST_SIZE 4096
+#define TEST_CHUNK 4096u
+#define TEST_DEFAULT TEST_CHUNK
+#define TEST_MAX (1024u * 1024u)
 
-static unsigned char WriteBuffer[TEST_SIZE] __attribute__((aligned(64)));
-static unsigned char ReadBuffer[TEST_SIZE] __attribute__((aligned(64)));
+static unsigned char WriteBuffer[TEST_CHUNK] __attribute__((aligned(64)));
+static unsigned char ReadBuffer[TEST_CHUNK] __attribute__((aligned(64)));
 static sceMcTblGetDir DirEntry __attribute__((aligned(64)));
+
+static void CardProgress(int port, int percent,
+                         const char *action, const char *detail)
+{
+    char line[256];
+
+    snprintf(line, sizeof(line), "mc%d: %.240s", port,
+             detail != NULL ? detail : "");
+    MciProgressUpdate(MCI_PROGRESS_FILESYSTEM, percent, action, line);
+}
 
 static int McSyncResult(void)
 {
@@ -30,14 +48,50 @@ static int McSyncResult(void)
     return result;
 }
 
-static void FillPattern(void)
+/*
+ * XMCMAN uses sceMcResChangedCard as a generation-change notification. The
+ * first mcGetInfo after initialization or a newly observed card can therefore
+ * return -1 while still filling type/free/format metadata correctly. For the
+ * opening snapshot of an explicit scan this is informational, so consume that
+ * one-shot edge and report the stable query instead.
+ *
+ * Do not use this helper in VerifySameCard(): a ChangedCard result there means
+ * the card really changed during the test and must remain a hard safety stop.
+ */
+static int GetInitialInfoStable(int port, int *type,
+                                int *free_clusters, int *formatted)
+{
+    int rc;
+    int attempts = 0;
+
+    do {
+        mcGetInfo(port, 0, type, free_clusters, formatted);
+        rc = McSyncResult();
+        attempts++;
+    } while (rc == sceMcResChangedCard && attempts < 3);
+
+    return rc;
+}
+
+static unsigned int NormalizeTestBytes(unsigned int bytes)
+{
+    if (bytes < TEST_CHUNK)
+        bytes = TEST_CHUNK;
+    if (bytes > TEST_MAX)
+        bytes = TEST_MAX;
+    bytes = (bytes + TEST_CHUNK - 1u) & ~(TEST_CHUNK - 1u);
+    return bytes;
+}
+
+static void FillPattern(unsigned int absolute_offset, unsigned int size)
 {
     unsigned int i;
-    unsigned int state = 0x4D43494Eu; /* "MCIN" */
+    unsigned int state = 0x4D43494Eu ^ absolute_offset; /* "MCIN" */
 
-    for (i = 0; i < sizeof(WriteBuffer); i++) {
-        state = state * 1664525u + 1013904223u;
-        WriteBuffer[i] = (unsigned char)((state >> 24) ^ i ^ (i >> 4));
+    for (i = 0; i < size; i++) {
+        unsigned int pos = absolute_offset + i;
+        state = state * 1664525u + 1013904223u + pos;
+        WriteBuffer[i] = (unsigned char)((state >> 24) ^ pos ^ (pos >> 4));
     }
 }
 
@@ -63,13 +117,11 @@ static int FindUnusedTempName(int port, char *name)
         memset(&DirEntry, 0, sizeof(DirEntry));
         mcGetDir(port, 0, name, 0, 1, &DirEntry);
         rc = McSyncResult();
-
         if (rc == 0 || rc == sceMcResNoEntry)
             return 0;
         if (rc < 0)
             return rc;
     }
-
     return -1000;
 }
 
@@ -83,43 +135,72 @@ static int VerifySameCard(int port)
     return McSyncResult();
 }
 
-static int RunReadWriteTest(int port, int *cleanup_rc, RwStage *stage)
+static int RunReadWriteTest(int port, unsigned int test_bytes,
+                            int *cleanup_rc, RwStage *stage)
 {
     char path[24];
+    char detail[192];
+    unsigned int offset;
+    unsigned int chunk;
     int fd;
     int rc;
 
+    test_bytes = NormalizeTestBytes(test_bytes);
     *cleanup_rc = 0;
     *stage = RW_FIND_NAME;
-    FillPattern();
     memset(ReadBuffer, 0, sizeof(ReadBuffer));
 
+    CardProgress(port, 24, "Choosing a temporary test file",
+                 "Searching for an unused /__MCIxx.TMP name; existing files are never overwritten.");
     rc = FindUnusedTempName(port, path);
     if (rc < 0)
         return rc;
 
     *stage = RW_VERIFY_CARD;
+    snprintf(detail, sizeof(detail),
+             "Temporary path %s selected. Re-checking the slot before creating a %u KiB test file.",
+             path, test_bytes / 1024u);
+    CardProgress(port, 31, "Confirming the same card is still inserted", detail);
     rc = VerifySameCard(port);
     if (rc != sceMcResSucceed)
         return rc;
 
-    /* libmc passes IOP open flags directly to XMCMAN: always use FIO_O_*. */
     *stage = RW_OPEN_WRITE;
+    snprintf(detail, sizeof(detail),
+             "Creating %s for a disposable %u KiB streamed integrity test.",
+             path, test_bytes / 1024u);
+    CardProgress(port, 36, "Opening the temporary file for writing", detail);
     mcOpen(port, 0, path, FIO_O_WRONLY | FIO_O_CREAT);
     fd = McSyncResult();
     if (fd < 0)
         return fd;
 
     *stage = RW_WRITE;
-    mcWrite(fd, WriteBuffer, sizeof(WriteBuffer));
-    rc = McSyncResult();
-    if (rc != (int)sizeof(WriteBuffer)) {
-        CloseFile(fd);
-        *cleanup_rc = DeleteFile(port, path);
-        return (rc < 0) ? rc : -1001;
+    offset = 0;
+    while (offset < test_bytes) {
+        int percent;
+        chunk = test_bytes - offset;
+        if (chunk > TEST_CHUNK)
+            chunk = TEST_CHUNK;
+        FillPattern(offset, chunk);
+        mcWrite(fd, WriteBuffer, chunk);
+        rc = McSyncResult();
+        if (rc != (int)chunk) {
+            CloseFile(fd);
+            *cleanup_rc = DeleteFile(port, path);
+            return (rc < 0) ? rc : -1001;
+        }
+        offset += chunk;
+        percent = 38 + (int)((offset * 17u) / test_bytes);
+        snprintf(detail, sizeof(detail),
+                 "Written %u / %u KiB in deterministic 4 KiB chunks.",
+                 offset / 1024u, test_bytes / 1024u);
+        CardProgress(port, percent, "Writing the integrity pattern", detail);
     }
 
     *stage = RW_FLUSH;
+    CardProgress(port, 57, "Flushing the write",
+                 "Forcing the memory-card driver to commit the complete temporary file before verification.");
     mcFlush(fd);
     rc = McSyncResult();
     if (rc < 0) {
@@ -129,6 +210,8 @@ static int RunReadWriteTest(int port, int *cleanup_rc, RwStage *stage)
     }
 
     *stage = RW_CLOSE_WRITE;
+    CardProgress(port, 61, "Closing the write handle",
+                 "Finishing the write phase cleanly before reopening the file read-only.");
     rc = CloseFile(fd);
     if (rc < 0) {
         *cleanup_rc = DeleteFile(port, path);
@@ -136,6 +219,8 @@ static int RunReadWriteTest(int port, int *cleanup_rc, RwStage *stage)
     }
 
     *stage = RW_OPEN_READ;
+    CardProgress(port, 65, "Reopening the temporary file",
+                 "Opening the committed file read-only for an independent streamed read-back.");
     mcOpen(port, 0, path, FIO_O_RDONLY);
     fd = McSyncResult();
     if (fd < 0) {
@@ -144,33 +229,55 @@ static int RunReadWriteTest(int port, int *cleanup_rc, RwStage *stage)
     }
 
     *stage = RW_READ;
-    mcRead(fd, ReadBuffer, sizeof(ReadBuffer));
-    rc = McSyncResult();
-    if (rc != (int)sizeof(ReadBuffer)) {
-        CloseFile(fd);
-        *cleanup_rc = DeleteFile(port, path);
-        return (rc < 0) ? rc : -1002;
+    offset = 0;
+    while (offset < test_bytes) {
+        int percent;
+        chunk = test_bytes - offset;
+        if (chunk > TEST_CHUNK)
+            chunk = TEST_CHUNK;
+        memset(ReadBuffer, 0, chunk);
+        mcRead(fd, ReadBuffer, chunk);
+        rc = McSyncResult();
+        if (rc != (int)chunk) {
+            CloseFile(fd);
+            *cleanup_rc = DeleteFile(port, path);
+            return (rc < 0) ? rc : -1002;
+        }
+        *stage = RW_COMPARE;
+        FillPattern(offset, chunk);
+        if (memcmp(WriteBuffer, ReadBuffer, chunk) != 0) {
+            CloseFile(fd);
+            *cleanup_rc = DeleteFile(port, path);
+            return -1003;
+        }
+        *stage = RW_READ;
+        offset += chunk;
+        percent = 67 + (int)((offset * 17u) / test_bytes);
+        snprintf(detail, sizeof(detail),
+                 "Verified %u / %u KiB byte-for-byte after reopen.",
+                 offset / 1024u, test_bytes / 1024u);
+        CardProgress(port, percent, "Reading and comparing the integrity pattern", detail);
     }
 
     *stage = RW_CLOSE_READ;
+    CardProgress(port, 86, "Closing the read handle",
+                 "All streamed chunks matched their deterministic expected data.");
     rc = CloseFile(fd);
     if (rc < 0) {
         *cleanup_rc = DeleteFile(port, path);
         return rc;
     }
 
-    *stage = RW_COMPARE;
-    if (memcmp(WriteBuffer, ReadBuffer, sizeof(WriteBuffer)) != 0) {
-        *cleanup_rc = DeleteFile(port, path);
-        return -1003;
-    }
-
     *stage = RW_DELETE;
+    CardProgress(port, 91, "Deleting the temporary test file",
+                 "The integrity check passed; removing the disposable file from the card.");
     *cleanup_rc = DeleteFile(port, path);
     if (*cleanup_rc < 0)
         return -1004;
 
     *stage = RW_VERIFY_DELETE;
+    CardProgress(port, 96, "Verifying cleanup",
+                 "Confirming that the temporary file is gone and the card is left in its original state.");
     memset(&DirEntry, 0, sizeof(DirEntry));
     mcGetDir(port, 0, path, 0, 1, &DirEntry);
     rc = McSyncResult();
@@ -178,11 +285,18 @@ static int RunReadWriteTest(int port, int *cleanup_rc, RwStage *stage)
         return -1005;
 
     *stage = RW_DONE;
+    snprintf(detail, sizeof(detail),
+             "%u KiB write, flush, reopen, streamed read-back, compare and cleanup all completed.",
+             test_bytes / 1024u);
+    CardProgress(port, 100, "Filesystem integrity test complete", detail);
     return 0;
 }
 
-void CardInspect(int port, CardReport *r)
+void CardInspectSized(int port, CardReport *r, unsigned int test_bytes)
 {
+    char detail[192];
+
+    test_bytes = NormalizeTestBytes(test_bytes);
     memset(r, 0, sizeof(*r));
     r->port = port;
     r->root_rc = -999;
@@ -190,28 +304,43 @@ void CardInspect(int port, CardReport *r)
     r->cleanup_rc = 0;
     r->rw_stage = RW_NOT_RUN;
     r->health = CARD_UNKNOWN;
+    r->test_bytes = test_bytes;
 
-    mcGetInfo(port, 0, &r->type, &r->free_clusters, &r->formatted);
-    r->info_rc = McSyncResult();
+    CardProgress(port, 4, "Checking the memory card",
+                 "Reading the card type, formatting state and available space.");
+    r->info_rc = GetInitialInfoStable(port, &r->type,
+                                      &r->free_clusters, &r->formatted);
 
     if (r->info_rc == sceMcResFailAuth) {
         r->health = CARD_AUTH_FAILURE;
+        CardProgress(port, 100, "Filesystem inspection stopped",
+                     "The card information check reported an authentication failure.");
         return;
     }
     if (r->info_rc <= sceMcResFailDetect) {
         r->health = CARD_DETECT_FAILURE;
+        CardProgress(port, 100, "Filesystem inspection stopped",
+                     "The slot did not complete normal memory-card detection.");
         return;
     }
     if (r->type == MC_TYPE_NONE) {
         r->health = CARD_NO_CARD;
+        CardProgress(port, 100, "No memory card detected",
+                     "The selected slot is empty; no filesystem operations were attempted.");
         return;
     }
     if (r->info_rc == sceMcResNoFormat || !r->formatted) {
         r->health = CARD_UNFORMATTED;
         r->format_allowed = (r->type == MC_TYPE_PS2);
+        CardProgress(port, 100, "Card detected but no formatted filesystem exists",
+                     "Read/write integrity testing is skipped until the card is formatted.");
         return;
     }
 
+    snprintf(detail, sizeof(detail),
+             "PS2 card detected; formatted=%d, free clusters=%d. Checking the root directory before a %u KiB integrity test.",
+             r->formatted, r->free_clusters, test_bytes / 1024u);
+    CardProgress(port, 15, "Checking the card filesystem", detail);
     memset(&DirEntry, 0, sizeof(DirEntry));
     mcGetDir(port, 0, "/*", 0, 1, &DirEntry);
     r->root_rc = McSyncResult();
@@ -219,22 +348,34 @@ void CardInspect(int port, CardReport *r)
     if (r->root_rc == sceMcResNoFormat) {
         r->health = CARD_FILESYSTEM_BROKEN;
         r->format_allowed = (r->type == MC_TYPE_PS2);
+        CardProgress(port, 100, "Root-directory check failed",
+                     "The card reports no usable format even though metadata detection completed.");
         return;
     }
     if (r->root_rc == sceMcResFailAuth) {
         r->health = CARD_AUTH_FAILURE;
+        CardProgress(port, 100, "Root-directory check failed",
+                     "The normal filesystem path reported card authentication failure.");
         return;
     }
     if (r->root_rc <= sceMcResFailDetect) {
         r->health = CARD_DETECT_FAILURE;
+        CardProgress(port, 100, "Root-directory check failed",
+                     "The card became unavailable during filesystem inspection.");
         return;
     }
     if (r->root_rc < 0 && r->root_rc != sceMcResNoEntry) {
         r->health = CARD_IO_FAILURE;
+        CardProgress(port, 100, "Root-directory check failed",
+                     "The normal card filesystem returned an unexpected I/O error.");
         return;
     }
 
-    r->rw_rc = RunReadWriteTest(port, &r->cleanup_rc, &r->rw_stage);
+    snprintf(detail, sizeof(detail),
+             "Root directory is readable. Starting the disposable %u KiB streamed write / flush / read-back test.",
+             test_bytes / 1024u);
+    CardProgress(port, 20, "Root directory is readable", detail);
+    r->rw_rc = RunReadWriteTest(port, test_bytes, &r->cleanup_rc, &r->rw_stage);
 
     if (r->rw_rc == 0) {
         r->health = CARD_OK;
@@ -252,14 +393,24 @@ void CardInspect(int port, CardReport *r)
     }
 }
 
+void CardInspect(int port, CardReport *report)
+{
+    CardInspectSized(port, report, TEST_DEFAULT);
+}
+
 int CardFormat(int port, CardReport *report)
 {
     int rc;
 
+    CardProgress(port, 10, "Formatting the memory card",
+                 "The destructive mcFormat operation is running. Do not remove the card.");
     mcFormat(port, 0);
     rc = McSyncResult();
-    if (rc == 0)
+    if (rc == 0) {
+        CardProgress(port, 35, "Format completed; verifying the new filesystem",
+                     "Re-running the conservative 4 KiB filesystem inspection on the freshly formatted card.");
         CardInspect(port, report);
+    }
     return rc;
 }
 

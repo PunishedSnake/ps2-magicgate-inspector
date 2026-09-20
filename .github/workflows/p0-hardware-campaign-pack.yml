@@ -1,0 +1,325 @@
+name: P0 Hardware Campaign Pack
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - perf/p0-hardware-campaign
+    paths:
+      - '.github/workflows/p0-hardware-campaign-pack.yml'
+      - 'docs/P0_HARDWARE_CAMPAIGN.md'
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  SAFE_RUN_ID: '33910509140'
+  SAFE_SOURCE_SHA: 54b1e6e8a3bbe79652390198bec4917e18738471
+  SAFE_ARTIFACT_ID: '9951188483'
+  SAFE_ARTIFACT_DIGEST: sha256:66a61f2c8f27576dfa93e227ea96a3ab53e07b67eb63a9518fda7f24334515bc
+
+  ASYNC_RUN_ID: '33911363852'
+  ASYNC_SOURCE_SHA: 82a29948fb911a644b4671bb92e65634292bf2d2
+  ASYNC_ARTIFACT_ID: '9951530075'
+  ASYNC_ARTIFACT_DIGEST: sha256:fbd77011ba3350ef7390494919e284b1ce4e1c7e42a8577ef5d58cd16cc0e00c
+
+  ORIGINAL_RUN_ID: '32707959479'
+  ORIGINAL_SOURCE_SHA: a81ca03dce237fbbb48c52ce39adc3319cc0fea1
+  ORIGINAL_ARTIFACT_ID: '9512980209'
+  ORIGINAL_ARTIFACT_DIGEST: sha256:c3e05adc3c24861eb3144265e40999c3297822cc3924eff0ec1eb306121da250
+
+jobs:
+  assemble:
+    name: Assemble immutable hardware pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout campaign metadata
+        uses: actions/checkout@v4
+
+      - name: Verify exact source artifact metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .build/campaign-meta
+
+          verify_artifact() {
+            label="$1"
+            artifact_id="$2"
+            expected_digest="$3"
+            expected_run="$4"
+            expected_sha="$5"
+            output=".build/campaign-meta/${label}.json"
+
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id" > "$output"
+            python3 - "$output" "$artifact_id" "$expected_digest" "$expected_run" "$expected_sha" <<'PY'
+          import json
+          import sys
+
+          path, artifact_id, digest, run_id, source_sha = sys.argv[1:]
+          data = json.load(open(path, 'r', encoding='utf-8'))
+          assert data['id'] == int(artifact_id), (data['id'], artifact_id)
+          assert data.get('expired') is False, f"artifact {artifact_id} expired"
+          assert data.get('digest') == digest, (data.get('digest'), digest)
+          run = data.get('workflow_run') or {}
+          assert run.get('id') == int(run_id), (run.get('id'), run_id)
+          assert run.get('head_sha') == source_sha, (run.get('head_sha'), source_sha)
+          PY
+          }
+
+          verify_artifact final-safe \
+            "$SAFE_ARTIFACT_ID" "$SAFE_ARTIFACT_DIGEST" \
+            "$SAFE_RUN_ID" "$SAFE_SOURCE_SHA"
+          verify_artifact final-async \
+            "$ASYNC_ARTIFACT_ID" "$ASYNC_ARTIFACT_DIGEST" \
+            "$ASYNC_RUN_ID" "$ASYNC_SOURCE_SHA"
+          verify_artifact original-541 \
+            "$ORIGINAL_ARTIFACT_ID" "$ORIGINAL_ARTIFACT_DIGEST" \
+            "$ORIGINAL_RUN_ID" "$ORIGINAL_SOURCE_SHA"
+
+      - name: Download exact final-safe and final-async packs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=.build/campaign
+          rm -rf "$root"
+          mkdir -p "$root/source-zips" "$root/final-safe" "$root/final-async"
+
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$SAFE_ARTIFACT_ID/zip" \
+            > "$root/source-zips/final-safe.zip"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ASYNC_ARTIFACT_ID/zip" \
+            > "$root/source-zips/final-async.zip"
+
+          unzip -tq "$root/source-zips/final-safe.zip"
+          unzip -tq "$root/source-zips/final-async.zip"
+          unzip -q "$root/source-zips/final-safe.zip" -d "$root/final-safe"
+          unzip -q "$root/source-zips/final-async.zip" -d "$root/final-async"
+
+          sha256sum "$root/source-zips"/*.zip \
+            > "$root/source-zips/DOWNLOADED_ZIP_SHA256.txt"
+
+      - name: Validate expected ELF families
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=.build/campaign
+
+          require_one() {
+            pattern="$1"
+            count=$(find "$root" -type f -name "$pattern" | wc -l)
+            if [ "$count" -ne 1 ]; then
+              echo "Expected exactly one $pattern, found $count" >&2
+              find "$root" -type f -name '*.ELF' -print | sort >&2
+              exit 1
+            fi
+          }
+
+          require_one 'BASE-c88f507.ELF'
+          require_one 'FINAL-SAFE-conflict16.ELF'
+          require_one 'FINAL-SAFE-conflict32.ELF'
+          require_one 'FINAL-SAFE-conflict64.ELF'
+
+          for batch in 16 32 64; do
+            require_one "FINAL-ASYNC-SOURCE-SYNC-conflict${batch}.ELF"
+            require_one "FINAL-ASYNC-READ-conflict${batch}.ELF"
+            require_one "FINAL-ASYNC-WRITE-conflict${batch}.ELF"
+          done
+
+          # FINAL-SAFE itself already contains the exact retained #541 archive.
+          test -f "$root/final-safe/original-541/ORIGINAL-541.zip"
+          test -f "$root/final-safe/original-541/artifact-metadata.json"
+
+      - name: Flatten hardware ELFs with unambiguous names
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=.build/campaign
+          out="$root/HARDWARE_ELFS"
+          mkdir -p "$out"
+
+          copy_unique() {
+            pattern="$1"
+            output="$2"
+            src=$(find "$root" -type f -name "$pattern" -print -quit)
+            test -n "$src"
+            cp "$src" "$out/$output"
+          }
+
+          copy_unique 'BASE-c88f507.ELF' '01_BASE-c88f507.ELF'
+          copy_unique 'FINAL-SAFE-conflict16.ELF' '02_FINAL-SAFE-conflict16.ELF'
+          copy_unique 'FINAL-SAFE-conflict32.ELF' '03_FINAL-SAFE-conflict32.ELF'
+          copy_unique 'FINAL-SAFE-conflict64.ELF' '04_FINAL-SAFE-conflict64.ELF'
+
+          for batch in 16 32 64; do
+            copy_unique "FINAL-ASYNC-SOURCE-SYNC-conflict${batch}.ELF" \
+              "10_FINAL-SOURCE-SYNC-conflict${batch}.ELF"
+            copy_unique "FINAL-ASYNC-READ-conflict${batch}.ELF" \
+              "20_FINAL-ASYNC-READ-conflict${batch}.ELF"
+            copy_unique "FINAL-ASYNC-WRITE-conflict${batch}.ELF" \
+              "30_FINAL-ASYNC-WRITE-conflict${batch}.ELF"
+          done
+
+          # Keep the exact historical archive intact; do not pretend a guessed
+          # internal filename is canonical. Its own CONTENTS.txt is bundled.
+          cp "$root/final-safe/original-541/ORIGINAL-541.zip" \
+            "$out/00_ORIGINAL-541-exact-artifact.zip"
+          cp "$root/final-safe/original-541/CONTENTS.txt" \
+            "$out/00_ORIGINAL-541-CONTENTS.txt"
+
+          sha256sum "$out"/*.ELF "$out"/*.zip \
+            > "$out/HARDWARE_PAYLOAD_SHA256.txt"
+
+      - name: Generate staged campaign run sheets
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=.build/campaign
+
+          cat > "$root/START_HERE.txt" <<'EOF'
+          PS2 Memory Card Inspector - P0 hardware campaign
+          =================================================
+
+          This pack intentionally separates screening from final statistical runs.
+          Do not begin with 20 runs of every ELF; that burns console time before we
+          know which batch family is worth pursuing.
+
+          Correctness gate for every stage
+          --------------------------------
+          Stop ranking a candidate immediately if it produces a different logical
+          CRC/hash, wrong output size, failed verify/restore, new fileXio/mc/SIF
+          errors, corruption, hang, reset, or ownership anomaly.
+
+          Stage 0 - smoke / correctness
+          -----------------------------
+          One representative operation per candidate family:
+            ORIGINAL-541 exact artifact
+            01_BASE-c88f507.ELF
+            02/03/04 FINAL-SAFE conflict16/32/64
+            10 FINAL-SOURCE-SYNC conflict32
+            20 FINAL-ASYNC-READ conflict32
+            30 FINAL-ASYNC-WRITE conflict32
+
+          Purpose: catch hardware-only correctness failures before collecting timing.
+
+          Stage 1 - choose conflict batch
+          -------------------------------
+          Use only FINAL-SAFE conflict16/32/64.
+          Run 5 valid repetitions each as a screening pass, alternating order:
+            cycle A: 16, 32, 64
+            cycle B: 64, 32, 16
+            cycle C: 32, 64, 16
+            cycle D: 16, 64, 32
+            cycle E: 64, 16, 32
+
+          Rank end-to-end operation time first; use service telemetry to explain it.
+          A tiny median win with worse p99/max is not automatically a better PS2 build.
+
+          Stage 2 - async overlap on winning batch
+          -----------------------------------------
+          For the Stage-1 winning conflict batch, compare SAME-SOURCE:
+            FINAL-SOURCE-SYNC
+            FINAL-ASYNC-READ
+            FINAL-ASYNC-WRITE
+
+          Start with 5 screening runs each, rotating S/R/W order. If correctness is
+          clean and either async mode is competitive, continue to at least 20 valid
+          runs per surviving candidate.
+
+          Stage 3 - historical/project gain
+          ---------------------------------
+          Compare the exact ORIGINAL-541 reference, BASE-c88f507, the winning
+          FINAL-SAFE, and the winning same-source async candidate if one qualified.
+          Collect at least 20 valid runs for the final report where practical.
+
+          Stage 4 - re-profile
+          --------------------
+          After selecting a winner, profile the whole operation again. The original
+          bottleneck may have moved from EE copies/RPC count to card I/O, USB, SIF,
+          filesystem metadata, verification math, or another serialized stage.
+
+          Required reporting
+          ------------------
+          Record p50, p95, p99, max, correctness/deadline failures, and workload
+          metadata. Do not report only an arithmetic mean.
+          EOF
+
+          cat > "$root/STAGE1_CONFLICT_SCREEN.csv" <<'EOF'
+          sequence,variant,valid_run,operation_ticks,p50_ticks,p95_ticks,p99_ticks,max_ticks,correctness_hash,verify_result,notes
+          1,FINAL-SAFE-conflict16,,,,,,,,,
+          2,FINAL-SAFE-conflict32,,,,,,,,,
+          3,FINAL-SAFE-conflict64,,,,,,,,,
+          4,FINAL-SAFE-conflict64,,,,,,,,,
+          5,FINAL-SAFE-conflict32,,,,,,,,,
+          6,FINAL-SAFE-conflict16,,,,,,,,,
+          7,FINAL-SAFE-conflict32,,,,,,,,,
+          8,FINAL-SAFE-conflict64,,,,,,,,,
+          9,FINAL-SAFE-conflict16,,,,,,,,,
+          10,FINAL-SAFE-conflict16,,,,,,,,,
+          11,FINAL-SAFE-conflict64,,,,,,,,,
+          12,FINAL-SAFE-conflict32,,,,,,,,,
+          13,FINAL-SAFE-conflict64,,,,,,,,,
+          14,FINAL-SAFE-conflict16,,,,,,,,,
+          15,FINAL-SAFE-conflict32,,,,,,,,,
+          EOF
+
+          cat > "$root/STAGE2_ASYNC_SCREEN.csv" <<'EOF'
+          sequence,mode,batch,valid_run,operation_ticks,async_submits,async_ready,async_waits,async_wait_ticks,p50_ticks,p95_ticks,p99_ticks,max_ticks,correctness_hash,verify_result,notes
+          1,SYNC,,,,,,,,,,,,,,
+          2,READ_ASYNC,,,,,,,,,,,,,,
+          3,WRITE_ASYNC,,,,,,,,,,,,,,
+          4,READ_ASYNC,,,,,,,,,,,,,,
+          5,WRITE_ASYNC,,,,,,,,,,,,,,
+          6,SYNC,,,,,,,,,,,,,,
+          7,WRITE_ASYNC,,,,,,,,,,,,,,
+          8,SYNC,,,,,,,,,,,,,,
+          9,READ_ASYNC,,,,,,,,,,,,,,
+          10,SYNC,,,,,,,,,,,,,,
+          11,WRITE_ASYNC,,,,,,,,,,,,,,
+          12,READ_ASYNC,,,,,,,,,,,,,,
+          13,READ_ASYNC,,,,,,,,,,,,,,
+          14,SYNC,,,,,,,,,,,,,,
+          15,WRITE_ASYNC,,,,,,,,,,,,,,
+          EOF
+
+      - name: Bundle provenance and source manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=.build/campaign
+          mkdir -p "$root/PROVENANCE"
+          cp .build/campaign-meta/*.json "$root/PROVENANCE/"
+          cp docs/P0_FINAL_SAFE_MANIFEST.md "$root/PROVENANCE/"
+          cp docs/P0_FINAL_ASYNC_MANIFEST.md "$root/PROVENANCE/"
+          cp docs/P0_HARDWARE_CAMPAIGN.md "$root/PROVENANCE/"
+
+          cat > "$root/PROVENANCE/CAMPAIGN_PINS.txt" <<EOF
+          final_safe_run_id=$SAFE_RUN_ID
+          final_safe_source_sha=$SAFE_SOURCE_SHA
+          final_safe_artifact_id=$SAFE_ARTIFACT_ID
+          final_safe_artifact_digest=$SAFE_ARTIFACT_DIGEST
+          final_async_run_id=$ASYNC_RUN_ID
+          final_async_source_sha=$ASYNC_SOURCE_SHA
+          final_async_artifact_id=$ASYNC_ARTIFACT_ID
+          final_async_artifact_digest=$ASYNC_ARTIFACT_DIGEST
+          original_run_id=$ORIGINAL_RUN_ID
+          original_source_sha=$ORIGINAL_SOURCE_SHA
+          original_artifact_id=$ORIGINAL_ARTIFACT_ID
+          original_artifact_digest=$ORIGINAL_ARTIFACT_DIGEST
+          campaign_pack_source_sha=$GITHUB_SHA
+          EOF
+
+          find "$root" -type f -print | sort > "$root/ALL_FILES.txt"
+
+      - name: Upload complete hardware campaign
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS2-MCI-P0-hardware-campaign-${{ github.sha }}
+          path: .build/campaign/
+          if-no-files-found: error
+          retention-days: 30

@@ -2,6 +2,122 @@
 
 All notable changes to PS2 Memory Card Inspector are documented here.
 
+
+## [0.4.0] — 2026-09-20 — "Drebin"
+
+### FreeMcBoot installer
+
+- Promoted the project from read-only FMCB preflight to a verified cross-region installer.
+- Added capability-driven CEX/DEX/MechaPwn compatibility policy.
+- Added real regional I/A/E/C destination copies instead of legacy Multi-Install crosslinks.
+- Added early-Japan OSDSYS/OSD110 and HDD-support package handling.
+- Added preflight binding of every distinct selected KELF source before the first card mutation.
+- Replaced opaque installer binding with stage-aware SECR HEADER/BLOCK/Kbit/Kc/ICVPS2 diagnostics.
+- Added the hardware-qualified MechaPwn DEX exception that omits CEX-only ENDVDPL after its 128-byte KELF was reproduced failing at DOWNLOAD HEADER.
+- Added explicit ROM 2.30+ native-boot classification and PSX/DESR compatibility classification.
+
+### Transaction and recovery
+
+- Added durable USB recovery journals and card identity markers.
+- Added backup, write, close/reopen and full read-back verification for each installation destination.
+- Added rollback of created/replaced destinations and directories.
+- Added legacy recovery-journal v1 reader with checksum validation and in-RAM conversion to v2.
+- Fixed recovery discovery for recursively located FMCB packages.
+- Fixed post-security-session USB/card readiness handling before rollback.
+- Fixed misleading rollback success reporting and recovery UI state.
+
+### MagicGate / compatibility
+
+- Retained the hardware-validated logical mc0/mc1 -> physical SIO2 2/3 mapping only at the SECR boundary.
+- Confirmed successful FMCB installation and boot from a non-Sony card with functional MagicGate.
+- Kept non-MagicGate third-party cards as valid ordinary storage while correctly rejecting CardAuth/KELF binding.
+- Added a compatibility/exception corpus covering current MechaPwn, current FMCB, historical FMCB 1.8 behavior, current PS2SDK and representative forum/GitHub edge cases.
+
+### Card Tools
+
+- Added full-card image export, verification and exact restore.
+- Added filesystem-aware image browsing and target-conflict inspection.
+- Added selective save import/export and PSU transfer support.
+- Added card/image/USB pickers and backup-aware force-format workflows.
+- Added hot-swap-aware operation boundaries.
+
+### Settings and UI
+
+- Added Native, 480p, 576p, 720p and 1080i display modes.
+- Added persistent versioned `MCI/MCINSPECTOR.CFG` settings on USB.
+- Persisted display mode, filesystem-test profile, CNF preservation policy and installer verification mode.
+- Added temporary-file/read-back/rename/sync config saves.
+- Promoted the runtime banner to stable `v0.4.0 Drebin`.
+
+### I/O correctness and diagnostics
+
+- Fixed cross-file DREBIN/recovery corruption by serializing durable logger access against mass-storage transaction ownership.
+- Forced synchronous fileXio semantics in correctness-critical logger/installer/recovery paths.
+- Deferred logger path attachment while another subsystem owns `mass:`.
+- Added recovery/log metadata sync boundaries.
+- Added per-line RAM-ring checksums and aligned immutable flush snapshots for Drebin diagnostics.
+
+### P0 production pass
+
+- Kept `-O2 -G0` as the global optimization baseline.
+- Retained `-mtune=r5900` on measured hot objects.
+- Retained production P0 copy/streaming paths and fixed synchronous batch sizes.
+- The public release does not include USB speed-test matrices, async/NOWAIT candidates, synthetic R5900 benchmark builds or Performance Lab binaries.
+
+### Release engineering
+
+- Simplified stable CI to one production ELF.
+- Added FMCB compatibility and Settings-config invariant checks.
+- Retained pinned PS2SDK 2.0 / SECRMAN 1.4 provenance.
+- Release artifact contains the ELF, SHA-256, provenance, license, credits and third-party notices.
+
+## [0.3.0-dev] — in development
+
+### dev5 — page-scoped diagnostics and two-way navigation
+
+- Changed slot navigation to `UP/DOWN` so controller movement matches the vertical `mc0:` / `mc1:` list on screen.
+- Added `L1` for previous result page and kept `R1` for next result page.
+- Changed plain `CROSS` to run only the diagnostic represented by the current page: filesystem, MagicGate/CardAuth or FMCB preflight.
+- Added `L2 + CROSS` as the explicit complete selected-slot scan: filesystem integrity -> MagicGate/CardAuth -> FMCB package preflight.
+- Removed automatic filesystem integrity tests at startup; reports begin in a neutral `UNKNOWN` / `NOT RUN` state.
+- Removed the implicit 4 KiB filesystem re-test from MagicGate environment restoration so a MagicGate-only request stays MagicGate-only from the user's perspective.
+- Kept `SQUARE`, normal-state `CIRCLE`, and `START` reserved for future installer/write actions.
+- Updated the dashboard footer, README and development plan to describe the final diagnostic input model.
+- Advanced the development banner to `0.3.0-dev5`.
+
+### dev4 — unified selected-card scan
+
+- Simplified diagnostics to a target-centric control model.
+- `LEFT/RIGHT` selects `mc0:` or `mc1:`.
+- `CROSS` runs the complete selected-card read-only sequence: filesystem integrity -> MagicGate/CardAuth -> FMCB package preflight.
+- The currently visible result page no longer changes what `CROSS` does.
+- `SQUARE`, normal-state `CIRCLE`, and `START` are reserved for future installer/write actions.
+- Destructive formatting remains a separate armed action and `CIRCLE` remains its cancel control while confirmation is active.
+- Updated dashboard footer and README controls to match the unified interaction model.
+- Advanced the development banner to `0.3.0-dev4`.
+
+### dev3 — live GS progress
+
+- Added presentation-neutral progress callbacks for filesystem, MagicGate, FMCB preflight and IOP environment restoration.
+- Added a native GS progress page with a real filled GS progress bar, percentage, current operation and detailed explanation.
+- Tied progress to actual synchronous operation stages rather than timer animation.
+- Added word-aware status wrapping and compact sidebar result labels.
+- Real-hardware testing confirmed the progress UI and existing diagnostic mechanics remained functional.
+
+### dev2 — GUI hardware-test fixes
+
+- Moved long result text onto a dedicated row so it cannot overlap panel headings.
+- Removed the remaining runtime libdebug MagicGate restore line from the GS framebuffer path.
+- Shortened the filesystem activity sentence to avoid ugly right-edge wrapping.
+
+### dev1 — native GS frontend
+
+- Replaced the historical libdebug text dashboard with a native 640x224 FIELD GS frontend derived from the hardware-proven `fhdb-bootstrap-manager` 0.4.0 renderer architecture.
+- Added double buffering, textured MSX 8x8 font rendering, Aqua-style panels and dedicated Card / MagicGate / FMCB Preflight pages.
+- Preserved a single display personality with no video-mode selector.
+- Split runtime control into `app_main.c` and presentation into `gui.c`.
+- Preserved the hardware-validated PS2SDK 2.0 SECRMAN 1.4 MagicGate backend and Sony ROM X normal filesystem stack.
+
 ## [0.2.0] — 2026-08-22 — "Briscoe"
 
 ### MagicGate / KELF
