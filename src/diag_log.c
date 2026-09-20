@@ -77,11 +77,19 @@ static u32 LineHash(const char *text)
 {
     const unsigned char *p = (const unsigned char *)text;
     u32 hash = 2166136261u;
+    unsigned int i;
 
-    while (*p != '\0') {
-        hash ^= *p++;
+    for (i = 0u; i < DIAG_LINE_MAX; i++) {
+        unsigned char ch = p[i];
+        hash ^= ch;
         hash *= 16777619u;
+        if (ch == '\0')
+            return hash;
     }
+
+    /* A valid QueueLine slot is always NUL-terminated. Fold a distinct marker
+     * into the checksum instead of reading beyond the damaged slot. */
+    hash ^= 0xFFFFFFFFu;
     return hash;
 }
 
@@ -271,7 +279,8 @@ static void FlushPending(void)
                      index, expected, actual);
             text = corrupt;
         } else {
-            snprintf(snapshot, sizeof(snapshot), "%s", Pending[index]);
+            memcpy(snapshot, Pending[index], sizeof(snapshot));
+            snapshot[sizeof(snapshot) - 1u] = '\0';
             text = snapshot;
         }
 
