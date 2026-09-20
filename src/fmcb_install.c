@@ -20,6 +20,7 @@
 #include <io_common.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
 
 #include "fmcb_install.h"
 #include "progress.h"
@@ -34,21 +35,48 @@ extern unsigned int size_usbd_irx;
 extern unsigned char usbhdfsd_irx[];
 extern unsigned int size_usbhdfsd_irx;
 
-static const FmcbPackageEntry NormalInstallManifest[] = {
-    {"SYSTEM/FMCB.XLF",       "REGION_SYSTEM/OSD",       FMCB_FILE_REQUIRED | FMCB_FILE_KELF},
-    /* The reference FMCB installer omits ENDVDPL on a real DEX ROM. We preserve
-     * that proven distinction, but do not yet assume that every DEX-like
-     * MechaPwn configuration can omit it until that compact path is tested on
-     * hardware. */
-    {"SYSTEM/ENDVDPL.XRX",    "SYS-CONF/endvdpl.irx",   FMCB_FILE_REQUIRED | FMCB_FILE_KELF | FMCB_FILE_CEX_ONLY},
-    {"SYSTEM/FMCB.ICN",       "REGION_SYSTEM/FMCB.icn", FMCB_FILE_REQUIRED | FMCB_FILE_RESOURCE},
-    {"SYSTEM/B?ICON.SYS",     "REGION_SYSTEM/icon.sys", FMCB_FILE_REQUIRED | FMCB_FILE_RESOURCE},
-    {"SYS-CONF/FMCB_CFG.ELF", "SYS-CONF/FMCB_CFG.ELF",  FMCB_FILE_REQUIRED | FMCB_FILE_CONFIG},
-    {"SYS-CONF/FREEMCB.CNF",  "SYS-CONF/FREEMCB.CNF",   FMCB_FILE_REQUIRED | FMCB_FILE_CONFIG},
-    {"SYS-CONF/ICON.SYS",     "SYS-CONF/icon.sys",      FMCB_FILE_REQUIRED | FMCB_FILE_RESOURCE},
-    {"SYS-CONF/SYSCONF.ICN",  "SYS-CONF/sysconf.icn",   FMCB_FILE_REQUIRED | FMCB_FILE_RESOURCE},
-    {"SYS-CONF/USBD.IRX",     "SYS-CONF/USBD.IRX",      FMCB_FILE_REQUIRED},
-    {"SYS-CONF/USBHDFSD.IRX", "SYS-CONF/USBHDFSD.IRX",  FMCB_FILE_REQUIRED}
+static const FmcbPackageEntry CrossRegionInstallManifest[] = {
+    /* Reference FMCB cross-region system-update aliases. These are real copies,
+     * not legacy multi-install filesystem crosslinks. Every KELF is bound to
+     * the target card through the validated SECRMAN session before writing. */
+    {"SYSTEM/FMCB.XLF",       "BIEXEC-SYSTEM/osd130.elf",  FMCB_FILE_REQUIRED | FMCB_FILE_KELF},
+    {"SYSTEM/FMCB.XLF",       "BIEXEC-SYSTEM/osdmain.elf", FMCB_FILE_REQUIRED | FMCB_FILE_KELF},
+    {"SYSTEM/FMCB.XLF",       "BEEXEC-SYSTEM/osd130.elf",  FMCB_FILE_REQUIRED | FMCB_FILE_KELF},
+    {"SYSTEM/FMCB.XLF",       "BEEXEC-SYSTEM/osdmain.elf", FMCB_FILE_REQUIRED | FMCB_FILE_KELF},
+    {"SYSTEM/FMCB.XLF",       "BAEXEC-SYSTEM/osd120.elf",  FMCB_FILE_REQUIRED | FMCB_FILE_KELF},
+    {"SYSTEM/FMCB.XLF",       "BAEXEC-SYSTEM/osd130.elf",  FMCB_FILE_REQUIRED | FMCB_FILE_KELF},
+    {"SYSTEM/FMCB.XLF",       "BAEXEC-SYSTEM/osdmain.elf", FMCB_FILE_REQUIRED | FMCB_FILE_KELF},
+    {"SYSTEM/FMCB.XLF",       "BCEXEC-SYSTEM/osdmain.elf", FMCB_FILE_REQUIRED | FMCB_FILE_KELF},
+
+    /* Early Japanese ROM update paths are part of the reference cross-region
+     * set even when the console doing the installation is newer. */
+    {"SYSTEM/OSDSYS.XLF",     "BIEXEC-SYSTEM/osdsys.elf",  FMCB_FILE_REQUIRED | FMCB_FILE_KELF},
+    {"SYSTEM/OSD110.XLF",     "BIEXEC-SYSTEM/osd110.elf",  FMCB_FILE_REQUIRED | FMCB_FILE_KELF},
+
+    /* CEX-only DVD player update and the PCMCIA/HDD loader support needed by
+     * early Japanese machines. */
+    {"SYSTEM/ENDVDPL.XRX",    "SYS-CONF/endvdpl.irx",      FMCB_FILE_REQUIRED | FMCB_FILE_KELF | FMCB_FILE_CEX_ONLY},
+    {"SYSTEM/DEV9.IRX",       "BIEXEC-SYSTEM/dev9.irx",    FMCB_FILE_REQUIRED},
+    {"SYSTEM/ATAD.IRX",       "BIEXEC-SYSTEM/atad.irx",    FMCB_FILE_REQUIRED},
+    {"SYSTEM/HDDLOAD.IRX",    "BIEXEC-SYSTEM/hddload.irx", FMCB_FILE_REQUIRED},
+
+    /* Each regional system folder gets its own icon.sys source just like the
+     * reference installer. */
+    {"SYSTEM/FMCB.ICN",       "BIEXEC-SYSTEM/FMCB.icn",    FMCB_FILE_REQUIRED | FMCB_FILE_RESOURCE},
+    {"SYSTEM/BIICON.SYS",     "BIEXEC-SYSTEM/icon.sys",    FMCB_FILE_REQUIRED | FMCB_FILE_RESOURCE},
+    {"SYSTEM/FMCB.ICN",       "BEEXEC-SYSTEM/FMCB.icn",    FMCB_FILE_REQUIRED | FMCB_FILE_RESOURCE},
+    {"SYSTEM/BEICON.SYS",     "BEEXEC-SYSTEM/icon.sys",    FMCB_FILE_REQUIRED | FMCB_FILE_RESOURCE},
+    {"SYSTEM/FMCB.ICN",       "BAEXEC-SYSTEM/FMCB.icn",    FMCB_FILE_REQUIRED | FMCB_FILE_RESOURCE},
+    {"SYSTEM/BAICON.SYS",     "BAEXEC-SYSTEM/icon.sys",    FMCB_FILE_REQUIRED | FMCB_FILE_RESOURCE},
+    {"SYSTEM/FMCB.ICN",       "BCEXEC-SYSTEM/FMCB.icn",    FMCB_FILE_REQUIRED | FMCB_FILE_RESOURCE},
+    {"SYSTEM/BCICON.SYS",     "BCEXEC-SYSTEM/icon.sys",    FMCB_FILE_REQUIRED | FMCB_FILE_RESOURCE},
+
+    {"SYS-CONF/FMCB_CFG.ELF", "SYS-CONF/FMCB_CFG.ELF",     FMCB_FILE_REQUIRED | FMCB_FILE_CONFIG},
+    {"SYS-CONF/FREEMCB.CNF",  "SYS-CONF/FREEMCB.CNF",      FMCB_FILE_REQUIRED | FMCB_FILE_CONFIG},
+    {"SYS-CONF/ICON.SYS",     "SYS-CONF/icon.sys",         FMCB_FILE_REQUIRED | FMCB_FILE_RESOURCE},
+    {"SYS-CONF/SYSCONF.ICN",  "SYS-CONF/sysconf.icn",      FMCB_FILE_REQUIRED | FMCB_FILE_RESOURCE},
+    {"SYS-CONF/USBD.IRX",     "SYS-CONF/USBD.IRX",         FMCB_FILE_REQUIRED},
+    {"SYS-CONF/USBHDFSD.IRX", "SYS-CONF/USBHDFSD.IRX",     FMCB_FILE_REQUIRED}
 };
 
 static int ExecEmbedded(const unsigned char *module, unsigned int size,
@@ -63,14 +91,14 @@ static int ExecEmbedded(const unsigned char *module, unsigned int size,
 
 int FmcbPackageEntryCount(void)
 {
-    return (int)(sizeof(NormalInstallManifest) / sizeof(NormalInstallManifest[0]));
+    return (int)(sizeof(CrossRegionInstallManifest) / sizeof(CrossRegionInstallManifest[0]));
 }
 
 const FmcbPackageEntry *FmcbPackageEntryAt(int index)
 {
     if (index < 0 || index >= FmcbPackageEntryCount())
         return NULL;
-    return &NormalInstallManifest[index];
+    return &CrossRegionInstallManifest[index];
 }
 
 int FmcbPackageEntrySelected(const FmcbInstallPlan *plan, int index)
@@ -79,7 +107,8 @@ int FmcbPackageEntrySelected(const FmcbInstallPlan *plan, int index)
 
     if (plan == NULL || entry == NULL)
         return 0;
-    if ((entry->flags & FMCB_FILE_CEX_ONLY) && plan->console.rom_is_dex)
+    if ((entry->flags & FMCB_FILE_CEX_ONLY) &&
+        !plan->compatibility.include_cex_only_payloads)
         return 0;
     return 1;
 }
@@ -120,6 +149,12 @@ void FmcbBuildInstallPlan(int target_port, const MciConsoleProfile *console,
     plan->romver_region = plan->console.romver_region;
     plan->rom_version = plan->console.rom_version;
     plan->region_letter = plan->console.mg_folder_region;
+    plan->cross_region = 1;
+    plan->system_dir_count = FMCB_CROSS_REGION_SYSTEM_DIRS;
+    snprintf(plan->system_dirs[0], sizeof(plan->system_dirs[0]), "BIEXEC-SYSTEM");
+    snprintf(plan->system_dirs[1], sizeof(plan->system_dirs[1]), "BEEXEC-SYSTEM");
+    snprintf(plan->system_dirs[2], sizeof(plan->system_dirs[2]), "BAEXEC-SYSTEM");
+    snprintf(plan->system_dirs[3], sizeof(plan->system_dirs[3]), "BCEXEC-SYSTEM");
 
     if (plan->region_letter == 'I' || plan->region_letter == 'A' ||
         plan->region_letter == 'E' || plan->region_letter == 'C') {
@@ -131,12 +166,16 @@ void FmcbBuildInstallPlan(int target_port, const MciConsoleProfile *console,
     }
     ResolveOsdName(plan->rom_version, plan->destination_osd);
 
-    plan->compact_unlock_candidate = plan->console.compact_region_safe &&
-                                     !plan->console.rom_is_dex;
-    plan->compact_unlock_active = plan->console.rom_is_dex;
+    FmcbCompatibilityEvaluate(&plan->console, &plan->compatibility);
+    plan->compact_unlock_active =
+        !plan->compatibility.include_cex_only_payloads;
+    plan->compact_unlock_candidate =
+        plan->console.compact_region_safe && !plan->compact_unlock_active &&
+        plan->compatibility.profile_kind ==
+            FMCB_COMPAT_PROFILE_UNQUALIFIED_DEX_LIKE;
 
     for (i = 0; i < FmcbPackageEntryCount(); i++) {
-        const FmcbPackageEntry *entry = &NormalInstallManifest[i];
+        const FmcbPackageEntry *entry = &CrossRegionInstallManifest[i];
 
         if (!FmcbPackageEntrySelected(plan, i))
             continue;
@@ -232,10 +271,18 @@ out:
     if (status->filexio_init_rc < 0)
         return status->filexio_init_rc;
 
-    DelayThread(250000);
+    MciProgressUpdate(MCI_PROGRESS_ENVIRONMENT, 90,
+                      "Waiting for the USB filesystem",
+                      "USBHDFSD is resident; waiting until at least one mass: root can actually be opened.");
+    rc = MciUsbWaitForStorage(24u, 50000u);
+    if (rc < 0) {
+        status->available = 0;
+        return -ENODEV;
+    }
+
     status->available = 1;
     MciProgressUpdate(MCI_PROGRESS_ENVIRONMENT, 100, "USB package backend ready",
-                      "mass: access is available for FMCB package discovery, installation sources and recovery state.");
+                      "A mass: root was opened successfully; package and recovery I/O can now resume.");
     return 0;
 }
 
@@ -300,7 +347,7 @@ static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *repor
     profile_rc = MciConsoleProfileProbe(&console);
 
     MciProgressUpdate(MCI_PROGRESS_FMCB, 26, "Building the install plan",
-                      "Resolving the active system-update folder and rejecting region-switching states that require a verified cross-region transaction.");
+                      "Building the verified cross-region system-update set for I/A/E/C while retaining the active ROMVER target for diagnostics.");
     FmcbBuildInstallPlan(target_port, &console, &report->plan);
     report->entry_count = FmcbPackageEntryCount();
     snprintf(report->source_root, sizeof(report->source_root), "%s", root);
@@ -309,7 +356,7 @@ static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *repor
         report->status = FMCB_PACKAGE_UNSUPPORTED_CONSOLE;
         MciProgressUpdate(MCI_PROGRESS_FMCB, 100,
                           "Preflight cannot resolve a supported PS2 target",
-                          "The active ROMVER/console type did not map to a supported normal FMCB destination; no card writes were attempted.");
+                          "The active ROMVER/console type did not map to a supported FMCB target; no card writes were attempted.");
         return -1;
     }
     if (console.region_mismatch) {
@@ -319,17 +366,10 @@ static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *repor
                           "The detected Deckard DEX-like policy expects the A system-update region, but active ROMVER has not converged to it. Reboot the console before installing.");
         return -1;
     }
-    if (console.cross_region_required) {
-        report->status = FMCB_PACKAGE_CROSS_REGION_REQUIRED;
-        MciProgressUpdate(MCI_PROGRESS_FMCB, 100,
-                          "Deckard MechaPwn CEX needs cross-region FMCB",
-                          "A one-region install could stop booting after a later MechaPwn CEX region change. This build blocks writes until the verified transaction engine covers every regional system-update destination.");
-        return -1;
-    }
 
     count = report->entry_count;
     for (i = 0; i < count && i < FMCB_MAX_PACKAGE_ENTRIES; i++) {
-        const FmcbPackageEntry *entry = &NormalInstallManifest[i];
+        const FmcbPackageEntry *entry = &CrossRegionInstallManifest[i];
         FmcbPackageFileStatus *file = &report->files[i];
         int percent = 30 + ((i * 60) / (count > 0 ? count : 1));
 
@@ -343,7 +383,7 @@ static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *repor
         snprintf(full_path, sizeof(full_path), "%s/%s", root, relative);
 
         snprintf(detail, sizeof(detail), "Checking %s (%s%s).", relative,
-                 file->selected ? "selected" : "omitted for real DEX",
+                 file->selected ? "selected" : "omitted by compatibility policy",
                  (entry->flags & FMCB_FILE_REQUIRED) ? ", required" : "");
         MciProgressUpdate(MCI_PROGRESS_FMCB, percent,
                           "Scanning the package manifest", detail);
@@ -372,14 +412,15 @@ static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *repor
     report->status = report->plan.package_complete ? FMCB_PACKAGE_READY
                                                     : FMCB_PACKAGE_INCOMPLETE;
     snprintf(detail, sizeof(detail),
-             "Found %d/%d required; target %s/%s. ROM %04X %c, Mecha %u.%02u, NVM sig=%s, policy: %s.",
+             "Found %d/%d required; cross-region I/A/E/C, active target %s/%s. ROM %04X %c, Mecha %u.%02u, NVM sig=%s, compat=%s, boot=%s.",
              report->found_required, report->plan.required_files,
              report->plan.destination_system, report->plan.destination_osd,
              report->plan.rom_version, report->plan.romver_region,
              report->plan.console.mecha_major,
              report->plan.console.mecha_minor,
              report->plan.console.mechapwn_signature ? "MechaPwn" : "none",
-             MciConsoleRegionPolicyText(&report->plan.console));
+             FmcbCompatibilityProfileText(report->plan.compatibility.profile_kind),
+             FmcbNativeBootStateText(report->plan.compatibility.native_boot));
     MciProgressUpdate(MCI_PROGRESS_FMCB, 100,
                       "FMCB package preflight complete", detail);
     return report->plan.package_complete ? 0 : -1;
@@ -426,13 +467,6 @@ int FmcbProbeMassPackage(int target_port, const FmcbMassBackendStatus *backend,
         MciProgressUpdate(MCI_PROGRESS_FMCB, 100,
                           "MechaPwn region transition is not settled",
                           "The detected Deckard DEX-like policy expects the A system-update region, but active ROMVER has not converged to it. Reboot the console before installing.");
-        return -1;
-    }
-    if (console.cross_region_required) {
-        report->status = FMCB_PACKAGE_CROSS_REGION_REQUIRED;
-        MciProgressUpdate(MCI_PROGRESS_FMCB, 100,
-                          "Deckard MechaPwn CEX needs cross-region FMCB",
-                          "A one-region install could stop booting after a later MechaPwn CEX region change. This build blocks writes until the verified transaction covers every regional destination.");
         return -1;
     }
 

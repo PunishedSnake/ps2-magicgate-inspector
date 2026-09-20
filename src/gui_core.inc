@@ -1327,7 +1327,7 @@ static qword_t *render_fmcb(qword_t *q, int selected,
 
     q = rect_fill(q, 158, 93, 628, 126, Theme.panel);
     q = rect_outline(q, 158, 93, 628, 126, Theme.border);
-    snprintf(line, sizeof(line), "mass: %s   source: %s",
+    snprintf(line, sizeof(line), "mass: %s   source: %.96s",
              mass != NULL && mass->available ? "AVAILABLE" : "UNAVAILABLE",
              r->source_root[0] ? r->source_root : "not resolved");
     q = text_box(q, 172, 101, 615, 109, line, Theme.text);
@@ -1447,7 +1447,7 @@ static qword_t *footer(qword_t *q, MciGuiPage page, int confirm_format)
     if (confirm_format) {
         line = "L1+R1+TRIANGLE Confirm format        CIRCLE Cancel";
     } else if (page == MCI_GUI_SETTINGS) {
-        line = "UP/DOWN Setting   LEFT/RIGHT Change   X Apply   L1/R1 Page   SELECT Exit";
+        line = "UP/DOWN Setting   LEFT/RIGHT Change   X Apply   SQUARE Save CFG   L1/R1 Page";
     } else if (page == MCI_GUI_FMCB) {
         line = "UP/DOWN Slot  X Preflight  SQUARE Installer  TRIANGLE Tools  L1/R1 Page";
     } else {

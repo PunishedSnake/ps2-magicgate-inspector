@@ -3,7 +3,9 @@
 
 #include "fmcb_install.h"
 
-#define FMCB_RECOVERY_PATH_MAX 128
+/* source_root can use the full 192-byte package path. Recovery appends
+ * /MCI-RECOVERY, so the recovery path must not be smaller than its producer. */
+#define FMCB_RECOVERY_PATH_MAX (FMCB_SOURCE_ROOT_MAX + 32)
 #define FMCB_RECOVERY_CARD_MARKER "/__MCI04.TXN"
 
 typedef enum FmcbRecoveryState {
@@ -35,6 +37,11 @@ int FmcbRecoveryProbe(const FmcbMassBackendStatus *backend,
 int FmcbRecoveryBegin(const FmcbPackageReport *package,
                       FmcbRecoveryStatus *status);
 
+/* Remove a validated ACTIVE journal only when it has not captured a single
+ * destination and has not recorded any created card directory. This is used to
+ * recover from an interruption before the transaction becomes armed. */
+int FmcbRecoveryDiscardEmptyJournal(FmcbRecoveryStatus *status);
+
 /* After the USB journal exists, write and read-back a tiny transaction token to
  * the target card. Recovery refuses to modify a card without the matching
  * token, preventing a stale journal from being applied to a different card. */
@@ -54,10 +61,12 @@ int FmcbRecoveryCaptureTarget(FmcbRecoveryStatus *status,
 
 /* Record card directories created by this transaction so recovery can remove
  * them if they are still empty after all original files have been restored. */
-int FmcbRecoveryRecordDirectories(FmcbRecoveryStatus *status,
-                                  const char *system_dir,
-                                  int created_system_dir,
-                                  int created_sysconf_dir);
+int FmcbRecoveryRecordSystemDirectory(FmcbRecoveryStatus *status,
+                                       int index,
+                                       const char *system_dir,
+                                       int created);
+int FmcbRecoveryRecordSysconfDirectory(FmcbRecoveryStatus *status,
+                                       int created);
 
 /* Restore every prepared destination in reverse order from persistent USB
  * backups. The linked public entry point validates the USB/card identity token

@@ -3,9 +3,11 @@
  * USBHDFSD compatibility shim.
  *
  * The hardware-qualified mass: backend repeatedly returns -5 for fileXioSync
- * even when close/reopen verification succeeds. Drebin's safety gate is the
- * actual reopen/read-back comparison, not support for this optional device
- * operation. Normalize only that observed mass:/mass0:/mass1: result.
+ * even when close/reopen verification succeeds. Current PS2SDK USBHDFSD is
+ * built on the vfat driver whose IOMANX sync operation returns EIO, so this
+ * compatibility result MUST NOT be treated as a durability or reset barrier.
+ * Drebin's safety gate is close/reopen/read-back plus explicit mass: ownership.
+ * Normalize only the observed mass:/mass0:/mass1: result for legacy callers.
  */
 
 #define NEWLIB_PORT_AWARE

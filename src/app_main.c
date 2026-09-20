@@ -21,18 +21,22 @@
 #include <libmc.h>
 #include <libpad.h>
 #include <libsecr.h>
+#include <fileXio_rpc.h>
 #include <debug.h>
 #include <sbv_patches.h>
 #include <malloc.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 
 #include "card.h"
 #include "card_image.h"
 #include "card_image_fs.h"
 #include "card_raw_session.h"
+#include "diag_log.h"
 #include "magicgate.h"
+#include "kelf_cache.h"
 #include "fmcb_install.h"
 #include "fmcb_transaction.h"
 #include "fmcb_recovery.h"
@@ -47,8 +51,6 @@ extern unsigned char secrman_irx[];
 extern unsigned int size_secrman_irx;
 extern unsigned char fmcb_freesio2_irx[];
 extern unsigned int size_fmcb_freesio2_irx;
-extern unsigned char fmcb_freepad_irx[];
-extern unsigned int size_fmcb_freepad_irx;
 extern unsigned char fmcb_mcman_irx[];
 extern unsigned int size_fmcb_mcman_irx;
 extern unsigned char fmcb_mcserv_irx[];
@@ -65,6 +67,106 @@ static FmcbRecoveryStatus RecoveryStatus;
 static MciSettings Settings;
 static MciRawCardSessionStatus RawCardStatus;
 static int PadActive;
+
+/*
+ * Preflight produces the exact card-bound KELF representation consumed by the
+ * installer. Keep it only for the lifetime of one install attempt. This avoids
+ * rebooting the IOP and rebuilding USBHDFSD after recovery/journal writes have
+ * already started, while still detecting any source mutation between preflight
+ * and transaction by comparing the raw bytes again.
+ */
+typedef struct PreboundKelfEntry {
+    int valid;
+    int target_port;
+    unsigned int size;
+    unsigned char *raw;
+    unsigned char *bound;
+    char source[FMCB_PATH_MAX];
+} PreboundKelfEntry;
+
+static PreboundKelfEntry PreboundKelfs[FMCB_MAX_PACKAGE_ENTRIES];
+static int PreboundKelfCount;
+
+static void ClearPreboundKelfCache(void)
+{
+    int i;
+
+    for (i = 0; i < PreboundKelfCount; i++) {
+        free(PreboundKelfs[i].raw);
+        free(PreboundKelfs[i].bound);
+    }
+    memset(PreboundKelfs, 0, sizeof(PreboundKelfs));
+    PreboundKelfCount = 0;
+}
+
+static int StorePreboundKelf(int target_port, const char *source,
+                             const unsigned char *raw,
+                             const unsigned char *bound,
+                             unsigned int size)
+{
+    PreboundKelfEntry *entry;
+    unsigned char *raw_copy;
+    unsigned char *bound_copy;
+
+    if (source == NULL || raw == NULL || bound == NULL || size == 0u)
+        return -4740;
+    if (PreboundKelfCount >= FMCB_MAX_PACKAGE_ENTRIES)
+        return -4741;
+
+    raw_copy = malloc(size);
+    bound_copy = malloc(size);
+    if (raw_copy == NULL || bound_copy == NULL) {
+        free(raw_copy);
+        free(bound_copy);
+        return -12;
+    }
+    memcpy(raw_copy, raw, size);
+    memcpy(bound_copy, bound, size);
+
+    entry = &PreboundKelfs[PreboundKelfCount++];
+    memset(entry, 0, sizeof(*entry));
+    entry->valid = 1;
+    entry->target_port = target_port;
+    entry->size = size;
+    entry->raw = raw_copy;
+    entry->bound = bound_copy;
+    snprintf(entry->source, sizeof(entry->source), "%s", source);
+    return 0;
+}
+
+static int ApplyPreboundKelfForInstaller(int target_port,
+                                         unsigned char *buffer,
+                                         unsigned int size,
+                                         void *userdata)
+{
+    int i;
+
+    (void)userdata;
+    if (buffer == NULL || size == 0u)
+        return -4742;
+
+    for (i = 0; i < PreboundKelfCount; i++) {
+        PreboundKelfEntry *entry = &PreboundKelfs[i];
+        if (!entry->valid || entry->target_port != target_port ||
+            entry->size != size)
+            continue;
+        if (memcmp(entry->raw, buffer, size) != 0)
+            continue;
+
+        memcpy(buffer, entry->bound, size);
+        MciDiagLogTracePrintf(
+            "FMCB-BIND",
+            "reused prebound KELF source=%s target=mc%d size=%u",
+            entry->source, target_port, size);
+        return 0;
+    }
+
+    MciDiagLogTracePrintf(
+        "FMCB-BIND",
+        "prebound KELF cache MISS target=mc%d size=%u; transaction rejected",
+        target_port, size);
+    return -4743;
+}
 
 static int LoadRomModule(const char *path)
 {
@@ -172,7 +274,7 @@ static int RebootIopWithSecrman(void)
 
     MciProgressUpdate(MCI_PROGRESS_MAGICGATE, 33,
                       "Security IOP reboot complete",
-                      "The IOP is synchronized. Loading the matching SIO2, PAD and MCMAN generation next.");
+                      "The IOP is synchronized. Loading the matching SIO2 and MCMAN generation next.");
     return 0;
 }
 
@@ -202,10 +304,13 @@ static int InitMagicGateSession(MagicGateReport *report)
                       "Starting the matching SIO2 transport used by MCMAN and SECRMAN CardAuth callbacks.");
     rc = LoadEmbeddedModule(fmcb_freesio2_irx, size_fmcb_freesio2_irx);
     if (rc < 0) goto out;
-    MciProgressUpdate(MCI_PROGRESS_MAGICGATE, 38, "Loading PS2SDK 2.0 PADMAN",
-                      "Keeping the isolated module generation internally consistent while the normal controller client is stopped.");
-    rc = LoadEmbeddedModule(fmcb_freepad_irx, size_fmcb_freepad_irx);
-    if (rc < 0) goto out;
+    /* CardAuth/MagicGate needs the memory-card SIO2 path, not a controller
+     * server. Keep PADMAN out of this temporary IOP personality so the
+     * security transaction cannot touch controller service state for no
+     * functional reason. The normal ROM XPADMAN client is rebuilt after the
+     * IOP reboot by RestoreNormalEnvironment(). */
+    MciDiagLogPrintf("MAGICGATE",
+                     "temporary security IOP: PADMAN intentionally not loaded");
     MciProgressUpdate(MCI_PROGRESS_MAGICGATE, 40, "Loading PS2SDK 2.0 MCMAN",
                       "Registering the memory-card side used by SECRMAN for direct CardAuth command callbacks.");
     rc = LoadEmbeddedModule(fmcb_mcman_irx, size_fmcb_mcman_irx);
@@ -269,10 +374,13 @@ static int RunMagicGateSession(int target_port)
     int rc;
     int restore_rc;
 
+    MciDiagLogSetMassWritePaused(1);
     MagicGateResetKelfBuffer(&kelf);
     rc = MagicGatePrepareKelf(target_port, &kelf, report);
-    if (rc < 0)
+    if (rc < 0) {
+        MciDiagLogSetMassWritePaused(0);
         return rc;
+    }
 
     MciProgressUpdate(MCI_PROGRESS_MAGICGATE, 27,
                       "Closing normal clients before the security reboot",
@@ -299,6 +407,7 @@ static int RunMagicGateSession(int target_port)
                           restore_rc);
         SleepThread();
     }
+    MciDiagLogSetMassWritePaused(0);
     MciProgressUpdate(MCI_PROGRESS_MAGICGATE, 100,
                       "MagicGate probe and environment restore complete",
                       "The isolated SECRMAN session has ended and the program is returning to the results dashboard.");
@@ -309,37 +418,203 @@ static int BindKelfForInstaller(int target_port, unsigned char *buffer,
                                 unsigned int size, void *userdata)
 {
     MagicGateReport scratch;
-    void *bound;
     int rc;
     int restore_rc;
 
-    (void)size;
-    (void)userdata;
     MagicGateResetReport(&scratch, target_port);
     MciProgressUpdate(MCI_PROGRESS_FMCB, 35,
                       "Entering the KELF binding personality",
                       "The source is already in EE RAM. Normal clients are closing before the isolated SECRMAN 1.4 session.");
     ShutdownNormalClients();
     rc = InitMagicGateSession(&scratch);
-    if (rc >= 0) {
-        rc = SecrInit();
-        if (rc >= 0) {
-            bound = SecrDownloadFile(target_port, 0, buffer);
-            SecrDeinit();
-            rc = (bound == buffer) ? 0 : -4700;
-        }
-    }
+    if (rc >= 0)
+        rc = MagicGateBindPrepared(target_port, buffer, (int)size, &scratch);
+
+    MciDiagLogPrintf("FMCB-BIND",
+                     "target=mc%d size=%u rc=%d stage=%s result=%s setup=%d mcinit=%d mcinfo=%d type=%d rpc=%d header=%d reply=%d blocks=%d encrypted=%d completed=%d failed_block=%d kbit=%d kc=%d icv_required=%d icv=%d",
+                     target_port, size, rc,
+                     MagicGateStageText(scratch.stage),
+                     MagicGateResultText(scratch.result),
+                     scratch.session_setup_rc, scratch.session_mcinit_rc,
+                     scratch.session_mcinfo_rc, scratch.session_type,
+                     scratch.rpc_rc, scratch.header_rc,
+                     scratch.header_reply_size, scratch.block_count,
+                     scratch.encrypted_blocks, scratch.blocks_completed,
+                     scratch.failed_block, scratch.kbit_rc, scratch.kc_rc,
+                     scratch.icvps2_required, scratch.icvps2_rc);
 
     restore_rc = RestoreNormalEnvironment();
+    if (restore_rc >= 0 && !FmcbMassStatus.available)
+        restore_rc = -4720;
+    scratch.restore_rc = restore_rc;
+    if (userdata != NULL)
+        *(MagicGateReport *)userdata = scratch;
     if (restore_rc < 0) {
-        MciGuiRenderFatal("Installer environment restore failed",
-                          "KELF binding ended but the normal Sony ROM X environment could not be restored. No destination write is safe.",
-                          restore_rc);
-        SleepThread();
+        MciDiagLogPrintf("FMCB-BIND",
+                         "normal environment restored without usable mass backend rc=%d available=%d",
+                         restore_rc, FmcbMassStatus.available);
+        /* Do not attempt a destination write when the recovery journal cannot
+         * be reopened. Return to the transaction engine, which will retain the
+         * durable journal instead of pretending that rollback is possible. */
+        return restore_rc;
     }
     if (rc < 0)
         return rc;
-    return restore_rc;
+    return 0;
+}
+
+/*
+ * Qualify every DISTINCT KELF source selected by the compatibility policy
+ * before FmcbRecoveryBegin() or any destination mutation. Static compatibility
+ * rules choose candidates; real hardware gets the final vote.
+ *
+ * Multiple regional destinations sourced from SYSTEM/FMCB.XLF intentionally
+ * collapse to one probe. This is correctness-first and deliberately slower
+ * than a later bound-blob cache optimization.
+ */
+static int PreflightSelectedKelfSources(int target_port,
+                                        const FmcbPackageReport *package,
+                                        char *reason,
+                                        unsigned int reason_size)
+{
+    int i;
+    int probed = 0;
+
+    ClearPreboundKelfCache();
+    if (package == NULL || package->status != FMCB_PACKAGE_READY) {
+        snprintf(reason, reason_size,
+                 "FMCB package is not READY for KELF compatibility preflight.");
+        return -4730;
+    }
+
+    fileXioSetBlockMode(FXIO_WAIT);
+
+    for (i = 0; i < package->entry_count &&
+                i < FMCB_MAX_PACKAGE_ENTRIES; i++) {
+        const FmcbPackageFileStatus *file = &package->files[i];
+        unsigned char *buffer = NULL;
+        unsigned char *raw_snapshot = NULL;
+        unsigned int size = 0u;
+        int cache_hit = 0;
+        int duplicate = 0;
+        int j;
+        int rc;
+        char path[FMCB_SOURCE_ROOT_MAX + FMCB_PATH_MAX + 4];
+        char detail[256];
+        MagicGateReport *capture = NULL;
+
+        if (!file->selected || !(file->flags & FMCB_FILE_KELF))
+            continue;
+
+        for (j = 0; j < i; j++) {
+            const FmcbPackageFileStatus *prior = &package->files[j];
+            if (prior->selected && (prior->flags & FMCB_FILE_KELF) &&
+                strcmp(prior->relative_path, file->relative_path) == 0) {
+                duplicate = 1;
+                break;
+            }
+        }
+        if (duplicate)
+            continue;
+
+        if (!file->found || file->size == 0u) {
+            snprintf(reason, reason_size,
+                     "Selected KELF source is unavailable: %s.",
+                     file->relative_path);
+            return -4731;
+        }
+
+        if (snprintf(path, sizeof(path), "%s/%s",
+                     package->source_root, file->relative_path) >=
+            (int)sizeof(path)) {
+            snprintf(reason, reason_size,
+                     "Selected KELF source path is too long: %s.",
+                     file->relative_path);
+            return -4731;
+        }
+
+        snprintf(detail, sizeof(detail),
+                 "Qualifying %s on mc%d before any destination is changed.",
+                 file->relative_path, target_port);
+        MciProgressUpdate(MCI_PROGRESS_FMCB,
+                          90 + (probed < 8 ? probed : 8),
+                          "Preflighting selected KELF source", detail);
+
+        rc = MciKelfCacheClone(path, file->size, &buffer, &size, &cache_hit);
+        if (rc < 0 || buffer == NULL || size != file->size) {
+            if (buffer != NULL)
+                free(buffer);
+            snprintf(reason, reason_size,
+                     "Could not stage KELF %s for bind preflight (rc=%d).",
+                     file->relative_path, rc);
+            return rc < 0 ? rc : -4732;
+        }
+
+        /* The exact package FMCB.XLF result replaces the old redundant generic
+         * pre-install MagicGate probe in the dashboard report. */
+        if (strcmp(file->relative_path, "SYSTEM/FMCB.XLF") == 0)
+            capture = &MgReports[target_port];
+
+        raw_snapshot = malloc(size);
+        if (raw_snapshot == NULL) {
+            free(buffer);
+            ClearPreboundKelfCache();
+            snprintf(reason, reason_size,
+                     "Could not retain raw KELF %s for the verified install handoff.",
+                     file->relative_path);
+            return -12;
+        }
+        memcpy(raw_snapshot, buffer, size);
+
+        MciDiagLogPrintf("FMCB-PREFLIGHT",
+                         "bind source=%s size=%u cache_hit=%d begin",
+                         file->relative_path, size, cache_hit);
+        rc = BindKelfForInstaller(target_port, buffer, size, capture);
+        if (rc < 0) {
+            free(raw_snapshot);
+            free(buffer);
+            ClearPreboundKelfCache();
+            snprintf(reason, reason_size,
+                     "KELF compatibility preflight failed for %s (rc=%d). No memory-card destination was modified.",
+                     file->relative_path, rc);
+            MciDiagLogPrintf("FMCB-PREFLIGHT",
+                             "bind source=%s rc=%d FAIL before transaction",
+                             file->relative_path, rc);
+            return rc;
+        }
+
+        rc = StorePreboundKelf(target_port, file->relative_path,
+                               raw_snapshot, buffer, size);
+        free(raw_snapshot);
+        free(buffer);
+        if (rc < 0) {
+            ClearPreboundKelfCache();
+            snprintf(reason, reason_size,
+                     "Could not retain the verified bound KELF %s (rc=%d). No transaction was started.",
+                     file->relative_path, rc);
+            MciDiagLogPrintf("FMCB-PREFLIGHT",
+                             "cache source=%s rc=%d FAIL before transaction",
+                             file->relative_path, rc);
+            return rc;
+        }
+
+        MciDiagLogPrintf("FMCB-PREFLIGHT",
+                         "bind source=%s rc=0 PASS / cached bound image",
+                         file->relative_path);
+        probed++;
+    }
+
+    if (probed == 0 && package->plan.magicgate_required) {
+        ClearPreboundKelfCache();
+        snprintf(reason, reason_size,
+                 "Install plan requires MagicGate but selected no probeable KELF source.");
+        return -4733;
+    }
+
+    MciDiagLogPrintf("FMCB-PREFLIGHT",
+                     "all distinct selected KELF sources PASS count=%d cached=%d",
+                     probed, PreboundKelfCount);
+    return 0;
 }
 
 static void ResetCardReport(int port)
@@ -366,6 +641,58 @@ static void ResetSlotReports(int port)
 static unsigned int CurrentFsTestBytes(void)
 {
     return MciFsTestProfileBytes(Settings.fs_profile);
+}
+
+static int LoadSavedSettingsAfterMass(int *last_video_rc)
+{
+    char path[MCI_SETTINGS_CONFIG_PATH_MAX];
+    int rc;
+
+    path[0] = '\0';
+    rc = MciSettingsLoadFromMass(&Settings, path, sizeof(path));
+    if (rc == 0) {
+        MciDiagLogPrintf("SETTINGS",
+                         "loaded path=%s video=%s fs=%s preserve_cnf=%d verify=%s",
+                         path, MciVideoModeId(Settings.video_mode),
+                         MciFsTestProfileName(Settings.fs_profile),
+                         Settings.preserve_existing_cnfs,
+                         MciInstallVerifyModeName(Settings.install_verify_mode));
+
+        if (Settings.video_mode != MciGuiCurrentVideoMode()) {
+            int video_rc = MciGuiApplyVideoMode(Settings.video_mode);
+            if (last_video_rc != NULL)
+                *last_video_rc = video_rc;
+            if (video_rc < 0) {
+                MciDiagLogPrintf("SETTINGS",
+                                 "saved video mode %s failed to apply rc=%d; reverting setting to active mode %s",
+                                 MciVideoModeId(Settings.video_mode), video_rc,
+                                 MciVideoModeId(MciGuiCurrentVideoMode()));
+                Settings.video_mode = MciGuiCurrentVideoMode();
+            }
+        }
+    } else if (rc != -ENOENT) {
+        MciDiagLogPrintf("SETTINGS",
+                         "config load failed rc=%d; defaults retained", rc);
+    }
+    return rc;
+}
+
+static int SaveCurrentSettings(char *path, unsigned int path_size)
+{
+    int rc;
+
+    rc = MciSettingsSaveToMass(&Settings, path, path_size);
+    if (rc == 0) {
+        MciDiagLogPrintf("SETTINGS",
+                         "saved path=%s video=%s fs=%s preserve_cnf=%d verify=%s",
+                         path, MciVideoModeId(Settings.video_mode),
+                         MciFsTestProfileName(Settings.fs_profile),
+                         Settings.preserve_existing_cnfs,
+                         MciInstallVerifyModeName(Settings.install_verify_mode));
+    } else {
+        MciDiagLogPrintf("SETTINGS", "config save failed rc=%d", rc);
+    }
+    return rc;
 }
 
 static int RefreshRecoveryStatus(void)
@@ -419,11 +746,25 @@ static void RunSelectedFullScan(int target_port)
 static int RevalidateInstallerPreconditions(int target_port, char *reason,
                                             unsigned int reason_size)
 {
+    /* Package discovery must run before recovery discovery. Recovery journals
+     * live beside the recursively discovered package, so probing recovery first
+     * only knows the historical mass?:/FMCB fallback roots and can miss the
+     * exact journal that FmcbRecoveryBegin() will see moments later. */
+    if (FmcbProbeMassPackage(target_port, &FmcbMassStatus,
+                             &FmcbReports[target_port]) < 0 ||
+        FmcbReports[target_port].status != FMCB_PACKAGE_READY) {
+        snprintf(reason, reason_size, "FMCB package preflight is not READY (%s).",
+                 FmcbPackageStatusText(FmcbReports[target_port].status));
+        return -3;
+    }
+
     (void)RefreshRecoveryStatus();
     if (RecoveryStatus.present) {
         snprintf(reason, reason_size,
-                 "Persistent FMCB recovery state exists (%s). Recover that transaction before starting another install.",
-                 FmcbRecoveryStateText(RecoveryStatus.state));
+                 "Persistent FMCB recovery state exists (%s, prepared=%d, root=%.96s). Recover or discard the safe pre-install journal before starting another install.",
+                 FmcbRecoveryStateText(RecoveryStatus.state),
+                 RecoveryStatus.prepared_files,
+                 RecoveryStatus.source_root[0] ? RecoveryStatus.source_root : "n/a");
         return -4;
     }
 
@@ -433,19 +774,11 @@ static int RevalidateInstallerPreconditions(int target_port, char *reason,
                  CardHealthText(Reports[target_port].health));
         return -1;
     }
-    if (RunMagicGateSession(target_port) < 0 ||
-        MgReports[target_port].result != MG_RESULT_PASS) {
-        snprintf(reason, reason_size, "MagicGate/CardAuth is not FUNCTIONAL (%s).",
-                 MagicGateResultText(MgReports[target_port].result));
+    if (PreflightSelectedKelfSources(target_port,
+                                     &FmcbReports[target_port],
+                                     reason, reason_size) < 0)
         return -2;
-    }
-    if (FmcbProbeMassPackage(target_port, &FmcbMassStatus,
-                             &FmcbReports[target_port]) < 0 ||
-        FmcbReports[target_port].status != FMCB_PACKAGE_READY) {
-        snprintf(reason, reason_size, "FMCB package preflight is not READY (%s).",
-                 FmcbPackageStatusText(FmcbReports[target_port].status));
-        return -3;
-    }
+
     return 0;
 }
 
@@ -457,10 +790,21 @@ static int RunVerifiedInstaller(int target_port)
     int rc;
 
     MciGuiRenderMessage("Revalidating before installation",
-                        "The selected card, MagicGate capability, active ROMVER/MechaCon policy and USB package are re-tested immediately before the first destination write.",
+                        "The card filesystem, active compatibility profile, package and every distinct selected KELF source are re-tested on real hardware before the recovery journal or first destination write.",
                         NULL, MCI_GUI_TONE_WARNING);
+
+    /*
+     * One owner for mass: across the complete install attempt. Revalidation
+     * deliberately reboots the IOP while qualifying KELFs; no persistent
+     * DREBIN append may be interleaved with that lifecycle. The transaction
+     * then consumes the pre-bound RAM copies and performs no security reboot
+     * after the recovery journal has started touching FAT.
+     */
+    MciDiagLogSetMassWritePaused(1);
     rc = RevalidateInstallerPreconditions(target_port, reason, sizeof(reason));
     if (rc < 0) {
+        ClearPreboundKelfCache();
+        MciDiagLogSetMassWritePaused(0);
         FmcbInstallResetReport(report, target_port);
         report->result = FMCB_INSTALL_RESULT_REJECTED;
         MciGuiRenderMessage("FMCB installation rejected", reason,
@@ -471,11 +815,13 @@ static int RunVerifiedInstaller(int target_port)
 
     options.preserve_existing_cnfs = Settings.preserve_existing_cnfs;
     options.verify_mode = Settings.install_verify_mode;
-    rc = FmcbInstallNormalTransactional(target_port,
+    rc = FmcbInstallCrossRegionTransactional(target_port,
                                         &FmcbReports[target_port],
                                         &options,
-                                        BindKelfForInstaller, NULL,
+                                        ApplyPreboundKelfForInstaller, NULL,
                                         &RecoveryStatus, report);
+    ClearPreboundKelfCache();
+    MciDiagLogSetMassWritePaused(0);
     if (rc == 0) {
         char result[440];
         const char *verify_summary;
@@ -490,31 +836,39 @@ static int RunVerifiedInstaller(int target_port)
             tone = MCI_GUI_TONE_WARNING;
         }
         snprintf(result, sizeof(result),
-                 "Normal FMCB installation completed on mc%d. %d/%d selected entries committed or intentionally preserved. %s Space check: free=%d, payload=%u, reclaimable=%u, reserve=%u clusters. Persistent recovery state was committed and removed.",
+                 "Cross-region FMCB installation completed on mc%d. %d/%d selected entries committed or intentionally preserved across BI/BE/BA/BC. %s Space check: free=%d, payload=%u, reclaimable=%u, reserve=%u clusters. Persistent recovery state was committed and removed.",
                  target_port, report->files_committed, report->files_total,
                  verify_summary, report->free_clusters, report->payload_clusters,
                  report->reclaimable_clusters, report->reserve_clusters);
         MciGuiRenderMessage(FmcbInstallResultText(report->result), result,
                             "CROSS or CIRCLE returns to the dashboard.", tone);
     } else {
-        char result[420];
+        char result[720];
         const char *failed_target =
             (report->current_file >= 0 && report->current_file < FMCB_TX_MAX_FILES)
                 ? report->files[report->current_file].destination : "n/a";
         const FmcbInstallFileReport *failed_file =
             (report->current_file >= 0 && report->current_file < FMCB_TX_MAX_FILES)
                 ? &report->files[report->current_file] : NULL;
+        (void)RefreshRecoveryStatus();
         snprintf(result, sizeof(result),
-                 "Install failed at %s: %s. Target: %s. Files committed: %d/%d. inventory exact=%d parent=%d open=%d. space rc=%d, recovery rc=%d, rollback rc=%d. No new install should start while recovery state is present.",
+                 "Install failed at %s: %s. Target: %s. Files committed: %d/%d. inventory exact=%d parent=%d open=%d; rc backup=%d bind=%d write=%d verify=%d; space=%d recovery=%d rollback=%d. %s",
                  FmcbInstallStageText(report->stage),
                  FmcbInstallResultText(report->result), failed_target,
                  report->files_committed, report->files_total,
                  failed_file ? failed_file->inventory_exact_rc : -999,
                  failed_file ? failed_file->inventory_parent_rc : -999,
                  failed_file ? failed_file->inventory_open_rc : -999,
+                 failed_file ? failed_file->backup_rc : -999,
+                 failed_file ? failed_file->bind_rc : -999,
+                 failed_file ? failed_file->write_rc : -999,
+                 failed_file ? failed_file->verify_rc : -999,
                  report->space_rc, report->recovery_rc,
-                 report->rollback_rc);
-        (void)RefreshRecoveryStatus();
+                 report->rollback_rc,
+                 (!RecoveryStatus.present &&
+                  report->recovery_rc == 0 && report->rollback_rc == 0)
+                     ? "Automatic rollback completed and the card was restored to its captured pre-install state."
+                     : "Recovery state is still present; do not start another install until it is resolved.");
         MciGuiRenderMessage("FMCB install failed", result,
                             "CROSS or CIRCLE returns to the dashboard.",
                             report->result == FMCB_INSTALL_RESULT_ROLLBACK_FAILED ||
@@ -671,7 +1025,7 @@ static void RunCardImageExportAction(int port, MciCardImageFormat format)
     ShowCardImageResult("Card image export", &report, rc, 0);
 }
 
-static void RunCardImageVerifyLatest(int port, MciCardImageFormat format)
+static void __attribute__((unused)) RunCardImageVerifyLatest(int port, MciCardImageFormat format)
 {
     MciCardImageReport report;
     char path[MCI_CARD_IMAGE_PATH_MAX];
@@ -1066,7 +1420,8 @@ int main(int argc, char *argv[])
     ResetSlotReports(0);
     ResetSlotReports(1);
     fmcb_rc = FmcbInitMassBackend(&FmcbMassStatus);
-    (void)fmcb_rc;
+    if (fmcb_rc >= 0)
+        (void)LoadSavedSettingsAfterMass(&last_video_rc);
     (void)RefreshRecoveryStatus();
     if (RecoveryStatus.present)
         page = MCI_GUI_FMCB;
@@ -1184,6 +1539,32 @@ int main(int argc, char *argv[])
                 dirty = 1;
             }
 
+            if ((pressed & PAD_SQUARE) && page == MCI_GUI_SETTINGS) {
+                char config_path[MCI_SETTINGS_CONFIG_PATH_MAX];
+                char message[320];
+                int save_rc;
+
+                config_path[0] = '\0';
+                save_rc = SaveCurrentSettings(config_path, sizeof(config_path));
+                if (save_rc == 0) {
+                    snprintf(message, sizeof(message),
+                             "Settings saved to:\n%s\n\nThey will be loaded automatically on the next boot. The display mode is applied after USB initialization so Native remains the safe startup fallback.",
+                             config_path);
+                    MciGuiRenderMessage("SETTINGS SAVED", message,
+                                        "CROSS or CIRCLE returns to Settings.",
+                                        MCI_GUI_TONE_SUCCESS);
+                } else {
+                    snprintf(message, sizeof(message),
+                             "Could not save MCINSPECTOR.CFG to USB (rc=%d). Current in-memory settings are unchanged.",
+                             save_rc);
+                    MciGuiRenderMessage("SETTINGS SAVE FAILED", message,
+                                        "CROSS or CIRCLE returns to Settings.",
+                                        MCI_GUI_TONE_DANGER);
+                }
+                install_result_modal = 1;
+                dirty = 1;
+            }
+
             if ((pressed & PAD_SQUARE) && page == MCI_GUI_FMCB) {
                 (void)RefreshRecoveryStatus();
                 if (RecoveryStatus.present) {
@@ -1194,7 +1575,7 @@ int main(int argc, char *argv[])
                                             MCI_GUI_TONE_DANGER);
                         install_result_modal = 1;
                     } else {
-                        char message[360];
+                        char message[512];
                         snprintf(message, sizeof(message),
                                  "Recover the interrupted FMCB transaction recorded for mc%d?\n\nState: %s\nPrepared destinations: %d\nUSB root: %s\n\nRecovery validates the card transaction marker, restores every captured destination in reverse order, verifies restored files, then removes the journal.",
                                  RecoveryStatus.target_port,
@@ -1208,7 +1589,7 @@ int main(int argc, char *argv[])
                     }
                 } else if (FmcbReports[selected].status != FMCB_PACKAGE_READY) {
                     MciGuiRenderMessage("Installer locked",
-                                        "Run FMCB Preflight with CROSS first. The normal installer is armed only for a package that resolves every required source and destination.",
+                                        "Run FMCB Preflight with CROSS first. The cross-region installer is armed only after every I/A/E/C destination and required source has been resolved.",
                                         "CROSS or CIRCLE returns to the dashboard.",
                                         MCI_GUI_TONE_WARNING);
                     install_result_modal = 1;

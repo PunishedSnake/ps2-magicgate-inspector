@@ -33,7 +33,7 @@ typedef struct MciQuickSuperblock {
 } MciQuickSuperblock;
 #pragma pack(pop)
 
-static const char SuperblockMagic[28] = "Sony PS2 Memory Card Format ";
+static const char SuperblockMagic[28] __attribute__((nonstring)) = "Sony PS2 Memory Card Format ";
 
 int __real_fileXioRead(int fd, void *buffer, int size);
 

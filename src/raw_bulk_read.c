@@ -57,7 +57,7 @@
 #define MCI_LATENCY_BUCKETS 256u
 #define MCI_TICKS_PER_MS (kBUSCLK / 1000u)
 
-static const char SuperblockMagic[28] = "Sony PS2 Memory Card Format ";
+static const char SuperblockMagic[28] __attribute__((nonstring)) = "Sony PS2 Memory Card Format ";
 
 /* High 16 bits returned by the IOP encode one ECC-warning bit per prefetched
  * page. Low 8 bits contain the number of pages DMA-transferred. */
@@ -601,14 +601,18 @@ int MciRawBulkReadTryPage(int port, int slot, int page, void *buffer)
     u32 start;
     u32 offset;
     int rc;
+#if MCI_RAW_BULK_ASYNC
     int sequential;
+#endif
 
     if (!Stats.bound || buffer == NULL || page < 0 || Pending)
         return 0;
 
     requested = (u32)page;
+#if MCI_RAW_BULK_ASYNC
     sequential = LastPageValid && LastPort == port && LastSlot == slot &&
                  requested == LastPage + 1u;
+#endif
 
     if (!CacheContains(CurrentCache, port, slot, requested)) {
         start = BatchStart(requested);

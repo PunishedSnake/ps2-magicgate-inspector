@@ -82,7 +82,7 @@ typedef struct FmcbInstallReport {
     unsigned int reclaimable_clusters;
     unsigned int reserve_clusters;
     int minimum_remaining_clusters;
-    int created_system_dir;
+    int created_system_dirs[FMCB_CROSS_REGION_SYSTEM_DIRS];
     int created_sysconf_dir;
     FmcbInstallFileReport files[FMCB_TX_MAX_FILES];
 } FmcbInstallReport;
@@ -97,7 +97,7 @@ typedef int (*FmcbBindKelfCallback)(int target_port,
                                     void *userdata);
 
 void FmcbInstallResetReport(FmcbInstallReport *report, int target_port);
-int FmcbInstallNormalTransactional(int target_port,
+int FmcbInstallCrossRegionTransactional(int target_port,
                                    const FmcbPackageReport *package,
                                    const FmcbInstallOptions *options,
                                    FmcbBindKelfCallback bind_kelf,

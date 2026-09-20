@@ -4,6 +4,7 @@
 #define NEWLIB_PORT_AWARE
 
 #include <fileXio_rpc.h>
+#include <delaythread.h>
 #include <libmc.h>
 #include <stdio.h>
 #include <string.h>
@@ -35,7 +36,7 @@ int __real_MciRawCardSessionStart(MciRawCardSessionStatus *status);
 void __real_MciRawCardSessionStop(MciRawCardSessionStatus *status);
 int __real_FmcbInitMassBackend(FmcbMassBackendStatus *status);
 void __real_FmcbShutdownMassBackend(FmcbMassBackendStatus *status);
-int __real_FmcbInstallNormalTransactional(int target_port,
+int __real_FmcbInstallCrossRegionTransactional(int target_port,
                                           const FmcbPackageReport *package,
                                           const FmcbInstallOptions *options,
                                           FmcbBindKelfCallback bind_kelf,
@@ -380,7 +381,7 @@ int __wrap_MciImageFsImportSelected(int target_port, MciImageSaveList *list,
     return rc;
 }
 
-int __wrap_FmcbInstallNormalTransactional(int target_port,
+int __wrap_FmcbInstallCrossRegionTransactional(int target_port,
                                           const FmcbPackageReport *package,
                                           const FmcbInstallOptions *options,
                                           FmcbBindKelfCallback bind_kelf,
@@ -404,9 +405,31 @@ int __wrap_FmcbInstallNormalTransactional(int target_port,
                      recovery != NULL ? recovery->present : -1,
                      recovery != NULL ? recovery->valid : -1);
 
-    rc = __real_FmcbInstallNormalTransactional(target_port, package, options,
+    /* fileXio block mode is global to the EE client. Installer and recovery
+     * are correctness-first transactions and must never inherit NOWAIT from a
+     * prior P0 image experiment. */
+    fileXioSetBlockMode(FXIO_WAIT);
+
+    /* REAL-HARDWARE FINDING:
+     * USBHDFSD/fileXio on the tested stack can misdirect a later DREBIN append
+     * into another mass: file that participated in the same high-level
+     * workflow. We previously reproduced this with card images; FMCB recovery
+     * journal0.bin now reproduced the same signature byte-for-byte: its header
+     * was overwritten by the tail of an FMCB-FILE diagnostic line.
+     *
+     * Treat the whole installer as one exclusive mass-storage ownership scope.
+     * Trace remains in the EE ring while package/recovery descriptors and FAT
+     * metadata are live. Flush only after the transaction returned and all of
+     * its fileXio descriptors are supposed to be closed. */
+    MciDiagLogSetMassWritePaused(1);
+    rc = __real_FmcbInstallCrossRegionTransactional(target_port, package, options,
                                                 bind_kelf, bind_userdata,
                                                 recovery, report);
+    if (package != NULL && package->source_root[0] != '\0') {
+        (void)SyncPathDevice(package->source_root);
+        DelayThread(10000);
+    }
+    MciDiagLogSetMassWritePaused(0);
 
     if (report == NULL) {
         MciDiagLogPrintf("FMCB", "transaction end rc=%d report=NULL", rc);

@@ -22,9 +22,10 @@
 
 #include "fmcb_recovery.h"
 #include "progress.h"
+#include "usb_search.h"
 
 #define RECOVERY_MAGIC 0x4D434952u /* MCIR */
-#define RECOVERY_VERSION 1u
+#define RECOVERY_VERSION 2u
 #define RECOVERY_CHUNK 4096u
 #define RECOVERY_DIR "MCI-RECOVERY"
 
@@ -50,12 +51,32 @@ typedef struct RecoveryJournal {
     u32 state;
     s32 target_port;
     u32 entry_count;
+    u32 created_system_dir_mask;
+    u32 created_sysconf_dir;
+    u32 checksum;
+    char system_dirs[FMCB_CROSS_REGION_SYSTEM_DIRS][48];
+    RecoveryEntry entries[FMCB_MAX_PACKAGE_ENTRIES];
+} RecoveryJournal;
+
+#define LEGACY_RECOVERY_VERSION 1u
+#define LEGACY_RECOVERY_MAX_ENTRIES 16u
+
+/* 0.4.0 pre-cross-region journal. Keep the exact field order/array length so
+ * already-written recovery metadata remains recoverable after the v2 upgrade. */
+typedef struct LegacyRecoveryJournalV1 {
+    u32 magic;
+    u32 version;
+    u32 struct_size;
+    u32 sequence;
+    u32 state;
+    s32 target_port;
+    u32 entry_count;
     u32 created_system_dir;
     u32 created_sysconf_dir;
     u32 checksum;
     char system_dir[48];
-    RecoveryEntry entries[FMCB_MAX_PACKAGE_ENTRIES];
-} RecoveryJournal;
+    RecoveryEntry entries[LEGACY_RECOVERY_MAX_ENTRIES];
+} LegacyRecoveryJournalV1;
 
 static const char *KnownRoots[] = {
     "mass:/FMCB",
@@ -76,6 +97,52 @@ static int CloseCardFile(int fd)
     return McResult();
 }
 
+/* Protected EXEC-SYSTEM directories can reject an exact mcGetDir even when
+ * their files are readable. Keep recovery discovery consistent with P0's
+ * fail-closed transaction inventory by falling back to a read-only open/seek. */
+static int ProbeCardFileForRecovery(int port, const char *path,
+                                    int *exists, unsigned int *size)
+{
+    sceMcTblGetDir info __attribute__((aligned(64)));
+    int fd;
+    int end;
+    int close_rc;
+    int rc;
+
+    *exists = 0;
+    *size = 0u;
+
+    memset(&info, 0, sizeof(info));
+    mcGetDir(port, 0, path, 0, 1, &info);
+    rc = McResult();
+    if (rc > 0) {
+        *exists = 1;
+        *size = info.FileSizeByte;
+        return 0;
+    }
+    if (rc == 0 || rc == sceMcResNoEntry)
+        return 0;
+
+    mcOpen(port, 0, path, FIO_O_RDONLY);
+    fd = McResult();
+    if (fd == sceMcResNoEntry)
+        return 0;
+    if (fd < 0)
+        return fd;
+
+    mcSeek(fd, 0, SEEK_END);
+    end = McResult();
+    close_rc = CloseCardFile(fd);
+    if (end < 0)
+        return end;
+    if (close_rc < 0)
+        return close_rc;
+
+    *exists = 1;
+    *size = (unsigned int)end;
+    return 0;
+}
+
 static u32 FnvUpdate(u32 hash, const unsigned char *data, unsigned int size)
 {
     unsigned int i;
@@ -94,6 +161,58 @@ static u32 JournalChecksum(const RecoveryJournal *journal)
     copy.checksum = 0;
     return FnvUpdate(2166136261u, (const unsigned char *)&copy,
                      sizeof(copy));
+}
+
+static u32 LegacyJournalChecksumV1(const LegacyRecoveryJournalV1 *journal)
+{
+    LegacyRecoveryJournalV1 copy;
+
+    copy = *journal;
+    copy.checksum = 0;
+    return FnvUpdate(2166136261u, (const unsigned char *)&copy,
+                     sizeof(copy));
+}
+
+static int LegacyJournalValidV1(const LegacyRecoveryJournalV1 *journal)
+{
+    if (journal->magic != RECOVERY_MAGIC ||
+        journal->version != LEGACY_RECOVERY_VERSION ||
+        journal->struct_size != (u32)sizeof(*journal) ||
+        journal->entry_count > LEGACY_RECOVERY_MAX_ENTRIES ||
+        journal->target_port < 0 || journal->target_port > 1 ||
+        (journal->state != JOURNAL_STATE_ACTIVE &&
+         journal->state != JOURNAL_STATE_ROLLING_BACK &&
+         journal->state != JOURNAL_STATE_COMMITTED))
+        return 0;
+    return journal->checksum == LegacyJournalChecksumV1(journal);
+}
+
+static void ConvertLegacyJournalV1(const LegacyRecoveryJournalV1 *legacy,
+                                   RecoveryJournal *journal)
+{
+    unsigned int i;
+
+    memset(journal, 0, sizeof(*journal));
+    journal->magic = RECOVERY_MAGIC;
+    journal->version = RECOVERY_VERSION;
+    journal->struct_size = sizeof(*journal);
+    journal->sequence = legacy->sequence;
+    journal->state = legacy->state;
+    journal->target_port = legacy->target_port;
+    journal->entry_count = legacy->entry_count;
+    journal->created_sysconf_dir = legacy->created_sysconf_dir;
+
+    if (legacy->created_system_dir && legacy->system_dir[0] != '\0') {
+        journal->created_system_dir_mask = 1u;
+        snprintf(journal->system_dirs[0], sizeof(journal->system_dirs[0]),
+                 "%s", legacy->system_dir);
+    }
+
+    for (i = 0; i < legacy->entry_count &&
+                i < LEGACY_RECOVERY_MAX_ENTRIES; i++)
+        journal->entries[i] = legacy->entries[i];
+
+    journal->checksum = JournalChecksum(journal);
 }
 
 static void BuildPath(char *out, unsigned int size,
@@ -199,13 +318,29 @@ static int ReadJournalSlot(const char *root, int slot,
     rc = fileXioGetStat(path, &stat);
     if (rc < 0)
         return rc;
-    if (stat.size != sizeof(*journal))
-        return -5110;
-    memset(journal, 0, sizeof(*journal));
-    rc = ReadExactFile(path, journal, sizeof(*journal));
-    if (rc < 0)
-        return rc;
-    return JournalValid(journal) ? 0 : -5111;
+
+    if (stat.size == sizeof(*journal)) {
+        memset(journal, 0, sizeof(*journal));
+        rc = ReadExactFile(path, journal, sizeof(*journal));
+        if (rc < 0)
+            return rc;
+        return JournalValid(journal) ? 0 : -5111;
+    }
+
+    if (stat.size == sizeof(LegacyRecoveryJournalV1)) {
+        LegacyRecoveryJournalV1 legacy;
+
+        memset(&legacy, 0, sizeof(legacy));
+        rc = ReadExactFile(path, &legacy, sizeof(legacy));
+        if (rc < 0)
+            return rc;
+        if (!LegacyJournalValidV1(&legacy))
+            return -5111;
+        ConvertLegacyJournalV1(&legacy, journal);
+        return 0;
+    }
+
+    return -5110;
 }
 
 static int LoadLatestJournal(const char *root, RecoveryJournal *journal,
@@ -577,10 +712,56 @@ static int RemoveRecoveryFiles(const FmcbRecoveryStatus *status,
     return 0;
 }
 
+static int ProbeRecoverySourceRoot(const char *source_root,
+                                   FmcbRecoveryStatus *status)
+{
+    RecoveryJournal journal;
+    FmcbRecoveryStatus found;
+    char root[FMCB_RECOVERY_PATH_MAX];
+    int valid_slots = 0;
+    int present_slots = 0;
+    int rc;
+
+    if (source_root == NULL || source_root[0] == '\0')
+        return 0;
+
+    snprintf(root, sizeof(root), "%s/%s", source_root, RECOVERY_DIR);
+    memset(&journal, 0, sizeof(journal));
+    rc = LoadLatestJournal(root, &journal, &valid_slots, &present_slots);
+    if (rc == 0) {
+        FillStatus(&found, source_root, root, &journal);
+        if (journal.state == JOURNAL_STATE_COMMITTED) {
+            /* All card writes were already verified before this state was
+             * published. A power cut during cleanup must not turn a good
+             * installation into an apparent rollback request. */
+            RemoveRecoveryFiles(&found, &journal);
+            return 0;
+        }
+        *status = found;
+        status->probe_rc = 0;
+        return 1;
+    }
+
+    if (present_slots > 0 && valid_slots == 0) {
+        status->present = 1;
+        status->valid = 0;
+        status->state = FMCB_RECOVERY_CORRUPT;
+        status->probe_rc = rc;
+        snprintf(status->source_root, sizeof(status->source_root), "%s",
+                 source_root);
+        snprintf(status->recovery_root, sizeof(status->recovery_root), "%s",
+                 root);
+        return -1;
+    }
+    return 0;
+}
+
 int FmcbRecoveryProbe(const FmcbMassBackendStatus *backend,
                       FmcbRecoveryStatus *status)
 {
+    char verified_root[FMCB_SOURCE_ROOT_MAX];
     unsigned int i;
+    int rc;
 
     if (status == NULL)
         return -1;
@@ -593,41 +774,29 @@ int FmcbRecoveryProbe(const FmcbMassBackendStatus *backend,
         return -2;
     }
 
-    for (i = 0; i < sizeof(KnownRoots) / sizeof(KnownRoots[0]); i++) {
-        RecoveryJournal journal;
-        FmcbRecoveryStatus found;
-        char root[FMCB_RECOVERY_PATH_MAX];
-        int valid_slots = 0;
-        int present_slots = 0;
-        int rc;
-
-        snprintf(root, sizeof(root), "%s/%s", KnownRoots[i], RECOVERY_DIR);
-        memset(&journal, 0, sizeof(journal));
-        rc = LoadLatestJournal(root, &journal, &valid_slots, &present_slots);
-        if (rc == 0) {
-            FillStatus(&found, KnownRoots[i], root, &journal);
-            if (journal.state == JOURNAL_STATE_COMMITTED) {
-                /* All card writes were already verified before this state was
-                 * published. A power cut during cleanup must not turn a good
-                 * installation into an apparent rollback request. */
-                RemoveRecoveryFiles(&found, &journal);
-                continue;
-            }
-            *status = found;
-            status->probe_rc = 0;
+    /* The installer accepts recursively discovered FMCB packages, so recovery
+     * must search that exact verified root before falling back to the three
+     * historical mass?:/FMCB locations. Otherwise the dashboard can claim that
+     * no recovery exists while FmcbRecoveryBegin() immediately sees one. */
+    verified_root[0] = '\0';
+    if (MciUsbGetVerifiedPackageRoot(verified_root,
+                                     sizeof(verified_root)) == 0) {
+        rc = ProbeRecoverySourceRoot(verified_root, status);
+        if (rc > 0)
             return 0;
-        }
-        if (present_slots > 0 && valid_slots == 0) {
-            status->present = 1;
-            status->valid = 0;
-            status->state = FMCB_RECOVERY_CORRUPT;
-            status->probe_rc = rc;
-            snprintf(status->source_root, sizeof(status->source_root), "%s",
-                     KnownRoots[i]);
-            snprintf(status->recovery_root, sizeof(status->recovery_root), "%s",
-                     root);
-            return rc;
-        }
+        if (rc < 0)
+            return status->probe_rc;
+    }
+
+    for (i = 0; i < sizeof(KnownRoots) / sizeof(KnownRoots[0]); i++) {
+        if (verified_root[0] != '\0' &&
+            strcmp(verified_root, KnownRoots[i]) == 0)
+            continue;
+        rc = ProbeRecoverySourceRoot(KnownRoots[i], status);
+        if (rc > 0)
+            return 0;
+        if (rc < 0)
+            return status->probe_rc;
     }
     return -ENOENT;
 }
@@ -648,8 +817,23 @@ int FmcbRecoveryBegin(const FmcbPackageReport *package,
 
     memset(&existing, 0, sizeof(existing));
     rc = LoadLatestJournal(root, &existing, &valid_slots, &present_slots);
-    if (rc == 0 || present_slots > 0)
+    if (rc == 0) {
+        FillStatus(status, package->source_root, root, &existing);
         return -5140; /* Explicit recovery/discard is required first. */
+    }
+    if (present_slots > 0) {
+        memset(status, 0, sizeof(*status));
+        status->present = 1;
+        status->valid = 0;
+        status->target_port = package->plan.target_port;
+        status->state = FMCB_RECOVERY_CORRUPT;
+        status->probe_rc = rc;
+        snprintf(status->source_root, sizeof(status->source_root), "%s",
+                 package->source_root);
+        snprintf(status->recovery_root, sizeof(status->recovery_root), "%s",
+                 root);
+        return -5140;
+    }
 
     rc = EnsureRecoveryDirectory(root);
     if (rc < 0)
@@ -670,6 +854,31 @@ int FmcbRecoveryBegin(const FmcbPackageReport *package,
     return 0;
 }
 
+int FmcbRecoveryDiscardEmptyJournal(FmcbRecoveryStatus *status)
+{
+    RecoveryJournal journal;
+    int rc;
+
+    if (status == NULL || !status->present || !status->valid)
+        return -1;
+
+    rc = LoadLatestJournal(status->recovery_root, &journal, NULL, NULL);
+    if (rc < 0)
+        return rc;
+    if (journal.state != JOURNAL_STATE_ACTIVE ||
+        journal.entry_count != 0u ||
+        journal.created_system_dir_mask != 0u ||
+        journal.created_sysconf_dir != 0u)
+        return -5144;
+
+    RemoveRecoveryFiles(status, &journal);
+    memset(status, 0, sizeof(*status));
+    status->target_port = -1;
+    status->state = FMCB_RECOVERY_NONE;
+    status->probe_rc = -ENOENT;
+    return 0;
+}
+
 int FmcbRecoveryCaptureTarget(FmcbRecoveryStatus *status,
                               int target_port,
                               int manifest_index,
@@ -679,7 +888,6 @@ int FmcbRecoveryCaptureTarget(FmcbRecoveryStatus *status,
 {
     RecoveryJournal journal;
     RecoveryEntry *entry;
-    sceMcTblGetDir info __attribute__((aligned(64)));
     char temp_path[FMCB_RECOVERY_PATH_MAX + 32];
     char final_path[FMCB_RECOVERY_PATH_MAX + 32];
     u32 checksum = 2166136261u;
@@ -695,17 +903,21 @@ int FmcbRecoveryCaptureTarget(FmcbRecoveryStatus *status,
     if (journal.entry_count >= FMCB_MAX_PACKAGE_ENTRIES)
         return -5141;
 
-    memset(&info, 0, sizeof(info));
-    mcGetDir(target_port, 0, destination, 0, 1, &info);
-    rc = McResult();
-    if (rc < 0 && rc != sceMcResNoEntry)
-        return rc;
+    {
+        int target_exists = 0;
+        unsigned int target_size = 0u;
 
-    entry = &journal.entries[journal.entry_count];
-    memset(entry, 0, sizeof(*entry));
-    entry->manifest_index = (u32)manifest_index;
-    entry->existed = rc > 0 ? 1u : 0u;
-    entry->backup_size = entry->existed ? info.FileSizeByte : 0u;
+        rc = ProbeCardFileForRecovery(target_port, destination,
+                                      &target_exists, &target_size);
+        if (rc < 0)
+            return rc;
+
+        entry = &journal.entries[journal.entry_count];
+        memset(entry, 0, sizeof(*entry));
+        entry->manifest_index = (u32)manifest_index;
+        entry->existed = target_exists ? 1u : 0u;
+        entry->backup_size = target_exists ? target_size : 0u;
+    }
     snprintf(entry->destination, sizeof(entry->destination), "%s", destination);
 
     BackupPath(status->recovery_root, (unsigned int)manifest_index, 1,
@@ -743,10 +955,36 @@ int FmcbRecoveryCaptureTarget(FmcbRecoveryStatus *status,
     return 0;
 }
 
-int FmcbRecoveryRecordDirectories(FmcbRecoveryStatus *status,
-                                  const char *system_dir,
-                                  int created_system_dir,
-                                  int created_sysconf_dir)
+int FmcbRecoveryRecordSystemDirectory(FmcbRecoveryStatus *status,
+                                       int index,
+                                       const char *system_dir,
+                                       int created)
+{
+    RecoveryJournal journal;
+    int rc;
+
+    if (status == NULL || !status->valid || system_dir == NULL ||
+        index < 0 || index >= FMCB_CROSS_REGION_SYSTEM_DIRS)
+        return -1;
+    rc = LoadLatestJournal(status->recovery_root, &journal, NULL, NULL);
+    if (rc < 0 || journal.state != JOURNAL_STATE_ACTIVE)
+        return rc < 0 ? rc : -5142;
+
+    snprintf(journal.system_dirs[index], sizeof(journal.system_dirs[index]),
+             "%s", system_dir);
+    if (created)
+        journal.created_system_dir_mask |= (1u << index);
+    else
+        journal.created_system_dir_mask &= ~(1u << index);
+
+    rc = SaveJournal(status->recovery_root, status->source_root, &journal);
+    if (rc == 0)
+        status->sequence = journal.sequence;
+    return rc;
+}
+
+int FmcbRecoveryRecordSysconfDirectory(FmcbRecoveryStatus *status,
+                                       int created)
 {
     RecoveryJournal journal;
     int rc;
@@ -756,11 +994,8 @@ int FmcbRecoveryRecordDirectories(FmcbRecoveryStatus *status,
     rc = LoadLatestJournal(status->recovery_root, &journal, NULL, NULL);
     if (rc < 0 || journal.state != JOURNAL_STATE_ACTIVE)
         return rc < 0 ? rc : -5142;
-    journal.created_system_dir = created_system_dir ? 1u : 0u;
-    journal.created_sysconf_dir = created_sysconf_dir ? 1u : 0u;
-    if (system_dir != NULL)
-        snprintf(journal.system_dir, sizeof(journal.system_dir), "%s",
-                 system_dir);
+
+    journal.created_sysconf_dir = created ? 1u : 0u;
     rc = SaveJournal(status->recovery_root, status->source_root, &journal);
     if (rc == 0)
         status->sequence = journal.sequence;
@@ -842,12 +1077,18 @@ int FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc)
         if (rc < 0 && rc != sceMcResNoEntry && rc != sceMcResNotEmpty)
             first_error = rc;
     }
-    if (first_error == 0 && journal.created_system_dir &&
-        journal.system_dir[0] != '\0') {
-        mcDelete(status->target_port, 0, journal.system_dir);
-        rc = McResult();
-        if (rc < 0 && rc != sceMcResNoEntry && rc != sceMcResNotEmpty)
-            first_error = rc;
+    if (first_error == 0) {
+        for (i = FMCB_CROSS_REGION_SYSTEM_DIRS - 1; i >= 0; i--) {
+            if ((journal.created_system_dir_mask & (1u << i)) == 0 ||
+                journal.system_dirs[i][0] == '\0')
+                continue;
+            mcDelete(status->target_port, 0, journal.system_dirs[i]);
+            rc = McResult();
+            if (rc < 0 && rc != sceMcResNoEntry && rc != sceMcResNotEmpty) {
+                first_error = rc;
+                break;
+            }
+        }
     }
 
     if (rollback_rc != NULL)

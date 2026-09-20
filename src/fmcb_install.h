@@ -1,12 +1,13 @@
 #ifndef MCI_FMCB_INSTALL_H
 #define MCI_FMCB_INSTALL_H
 
-#include "console_profile.h"
+#include "fmcb_compat.h"
 
 /* FreeMcBoot package discovery plus the destination model shared by preflight
  * and the 0.4 verified normal-install transaction. */
 
-#define FMCB_MAX_PACKAGE_ENTRIES 16
+#define FMCB_MAX_PACKAGE_ENTRIES 32
+#define FMCB_CROSS_REGION_SYSTEM_DIRS 4
 #define FMCB_PATH_MAX 96
 #define FMCB_SOURCE_ROOT_MAX 192
 
@@ -55,11 +56,15 @@ typedef struct FmcbPackageFileStatus {
 typedef struct FmcbInstallPlan {
     int target_port;
     MciConsoleProfile console;
+    FmcbCompatibilityPolicy compatibility;
     char romver_region;
     unsigned int rom_version;
     char region_letter;
     char destination_system[32];
     char destination_osd[32];
+    int cross_region;
+    int system_dir_count;
+    char system_dirs[FMCB_CROSS_REGION_SYSTEM_DIRS][32];
     int required_files;
     int optional_files;
     int selected_files;

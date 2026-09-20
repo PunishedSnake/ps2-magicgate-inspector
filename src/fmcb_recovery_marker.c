@@ -21,11 +21,16 @@
 #include <libmc.h>
 #include <fileXio_rpc.h>
 #include <io_common.h>
+#include <iox_stat.h>
+#include <errno.h>
 #include <timer.h>
+#include <delaythread.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "fmcb_recovery.h"
+#include "diag_log.h"
+#include "usb_search.h"
 
 #define MARKER_MAGIC 0x4D434954u /* MCIT */
 #define MARKER_FILE "card-token.bin"
@@ -113,14 +118,25 @@ static int ReadMassMarker(const FmcbRecoveryStatus *status,
                           RecoveryCardMarker *marker)
 {
     char path[FMCB_RECOVERY_PATH_MAX + 32];
-    int fd;
+    int attempt;
+    int fd = -ENODEV;
     int rc;
 
     TokenPath(status, path, sizeof(path));
     memset(marker, 0, sizeof(*marker));
-    fd = fileXioOpen(path, FIO_O_RDONLY);
+
+    /* Immediately after the security IOP is replaced by the normal USB stack,
+     * USBHDFSD can be resident before the mass device is fully reopenable.
+     * Retry only ENODEV. Missing/corrupt marker evidence remains fail-closed. */
+    for (attempt = 0; attempt < 10; attempt++) {
+        fd = fileXioOpen(path, FIO_O_RDONLY);
+        if (fd >= 0 || fd != -ENODEV)
+            break;
+        DelayThread(20000);
+    }
     if (fd < 0)
         return fd;
+
     rc = fileXioRead(fd, marker, sizeof(*marker));
     fileXioClose(fd);
     if (rc != (int)sizeof(*marker))
@@ -141,6 +157,91 @@ static int MarkerAlreadyExists(int target_port)
     if (rc < 0)
         return rc;
     return 1;
+}
+
+static int MassMarkerAlreadyExists(const FmcbRecoveryStatus *status)
+{
+    char path[FMCB_RECOVERY_PATH_MAX + 32];
+    iox_stat_t stat;
+    int rc;
+
+    if (status == NULL)
+        return -1;
+    TokenPath(status, path, sizeof(path));
+    memset(&stat, 0, sizeof(stat));
+    rc = fileXioGetStat(path, &stat);
+    if (rc >= 0)
+        return 1;
+    if (rc == -ENOENT)
+        return 0;
+    return rc;
+}
+
+/* The Begin wrapper cannot return success until the card marker has been
+ * written and read back. Therefore an ACTIVE journal with no captured target,
+ * no recorded card directory and no USB/card marker is provably pre-arm state:
+ * no FMCB destination could have been touched yet. */
+static int TryDiscardUnarmedEmptyJournal(FmcbRecoveryStatus *status)
+{
+    FmcbRecoveryStatus saved;
+    char token_path[FMCB_RECOVERY_PATH_MAX + 32];
+    int mass_marker;
+    int card_marker;
+    int rc;
+
+    if (status == NULL || !status->present || !status->valid ||
+        status->prepared_files != 0)
+        return 0;
+
+    mass_marker = MassMarkerAlreadyExists(status);
+    if (mass_marker < 0)
+        return mass_marker;
+    card_marker = MarkerAlreadyExists(status->target_port);
+    if (card_marker < 0)
+        return card_marker;
+
+    if (!mass_marker && !card_marker) {
+        rc = FmcbRecoveryDiscardEmptyJournal(status);
+        return rc == 0 ? 1 : rc;
+    }
+
+    if (mass_marker && !card_marker) {
+        /* Arm writes the USB token before the card token. If the durable
+         * journal itself proves that zero destinations/directories were
+         * prepared, absence of the card token means there is no card-side
+         * transaction identity left to preserve. This also covers a freshly
+         * formatted card after an aborted pre-write attempt. Validate/remove
+         * the journal first, then discard the now-orphaned USB token. */
+        saved = *status;
+        rc = FmcbRecoveryDiscardEmptyJournal(status);
+        if (rc < 0)
+            return rc;
+        TokenPath(&saved, token_path, sizeof(token_path));
+        rc = fileXioRemove(token_path);
+        if (rc < 0 && rc != -ENOENT)
+            return rc;
+        (void)fileXioRmdir(saved.recovery_root);
+        return 1;
+    }
+
+    if (mass_marker && card_marker) {
+        /* Both markers exist. Only remove them automatically if their tokens
+         * match, proving that the empty journal and this card belong to the
+         * same never-started transaction. */
+        rc = FmcbRecoveryCheckCard(status, status->target_port);
+        if (rc < 0)
+            return 0;
+        saved = *status;
+        rc = FmcbRecoveryDiscardEmptyJournal(status);
+        if (rc < 0)
+            return rc;
+        rc = FmcbRecoveryClearCardMarker(&saved, saved.target_port);
+        return rc == 0 ? 1 : rc;
+    }
+
+    /* Card marker without the matching USB token is ambiguous. Preserve it and
+     * require explicit inspection instead of deleting evidence by guesswork. */
+    return 0;
 }
 
 static int WriteCardMarker(int target_port,
@@ -191,14 +292,29 @@ static int WriteCardMarker(int target_port,
 
 static int ReadCardMarker(int target_port, RecoveryCardMarker *marker)
 {
-    int fd;
+    int attempt;
+    int fd = -ENODEV;
     int rc;
 
     memset(marker, 0, sizeof(*marker));
-    mcOpen(target_port, 0, FMCB_RECOVERY_CARD_MARKER, FIO_O_RDONLY);
-    fd = McResult();
+
+    /* XMCMAN is primed after every normal-stack rebuild, but keep the recovery
+     * identity check tolerant of the short changed-card/detect window. Never
+     * retry NoEntry: a missing marker is durable evidence, not readiness. */
+    for (attempt = 0; attempt < 6; attempt++) {
+        mcOpen(target_port, 0, FMCB_RECOVERY_CARD_MARKER, FIO_O_RDONLY);
+        fd = McResult();
+        if (fd >= 0 ||
+            (fd != -ENODEV &&
+             fd != sceMcResChangedCard &&
+             fd != sceMcResFailDetect &&
+             fd != sceMcResFailDetect2))
+            break;
+        DelayThread(20000);
+    }
     if (fd < 0)
         return fd;
+
     mcRead(fd, marker, sizeof(*marker));
     rc = McResult();
     mcClose(fd);
@@ -255,11 +371,19 @@ int FmcbRecoveryCheckCard(FmcbRecoveryStatus *status, int target_port)
         target_port != status->target_port)
         return -1;
     rc = ReadMassMarker(status, &usb_marker);
-    if (rc < 0)
+    if (rc < 0) {
+        MciDiagLogPrintf("FMCB-RECOVERY",
+                         "identity check failed reading USB marker rc=%d root=%s",
+                         rc, status->recovery_root);
         return rc;
+    }
     rc = ReadCardMarker(target_port, &card_marker);
-    if (rc < 0)
+    if (rc < 0) {
+        MciDiagLogPrintf("FMCB-RECOVERY",
+                         "identity check failed reading card marker rc=%d target=mc%d",
+                         rc, target_port);
         return rc;
+    }
     if (memcmp(&usb_marker, &card_marker, sizeof(usb_marker)) != 0)
         return -5169;
     status->marker_token = usb_marker.token;
@@ -281,11 +405,19 @@ int FmcbRecoveryClearCardMarker(const FmcbRecoveryStatus *status,
      * identical. A wrong/missing card must never consume the USB token that is
      * needed to identify the original transaction target later. */
     rc = ReadMassMarker(status, &usb_marker);
-    if (rc < 0)
+    if (rc < 0) {
+        MciDiagLogPrintf("FMCB-RECOVERY",
+                         "identity check failed reading USB marker rc=%d root=%s",
+                         rc, status->recovery_root);
         return rc;
+    }
     rc = ReadCardMarker(target_port, &card_marker);
-    if (rc < 0)
+    if (rc < 0) {
+        MciDiagLogPrintf("FMCB-RECOVERY",
+                         "identity check failed reading card marker rc=%d target=mc%d",
+                         rc, target_port);
         return rc;
+    }
     if (memcmp(&usb_marker, &card_marker, sizeof(usb_marker)) != 0)
         return -5169;
 
@@ -318,53 +450,94 @@ static void DiscardFailedArmArtifacts(const FmcbRecoveryStatus *status)
     (void)fileXioRmdir(status->recovery_root);
 }
 
+static int ReconcileResidualRoot(const char *source_root,
+                                 FmcbRecoveryStatus *status)
+{
+    FmcbRecoveryStatus residual;
+    RecoveryCardMarker usb_marker;
+    RecoveryCardMarker card_marker;
+    int rc;
+
+    if (source_root == NULL || source_root[0] == '\0')
+        return 0;
+
+    memset(&residual, 0, sizeof(residual));
+    residual.target_port = -1;
+    snprintf(residual.source_root, sizeof(residual.source_root), "%s",
+             source_root);
+    snprintf(residual.recovery_root, sizeof(residual.recovery_root),
+             "%s/MCI-RECOVERY", source_root);
+
+    rc = ReadMassMarker(&residual, &usb_marker);
+    if (rc < 0)
+        return 0;
+
+    residual.present = 1;
+    residual.valid = 1;
+    residual.target_port = usb_marker.target_port;
+    residual.marker_token = usb_marker.token;
+    residual.probe_rc = 0;
+
+    rc = ReadCardMarker(residual.target_port, &card_marker);
+    if (rc == 0 &&
+        memcmp(&usb_marker, &card_marker, sizeof(usb_marker)) == 0) {
+        rc = FmcbRecoveryClearCardMarker(&residual,
+                                         residual.target_port);
+        if (rc == 0)
+            return 0;
+    }
+
+    /* A residual token without its matching card is deliberately sticky. The
+     * original card may not be present, so preserve identity evidence instead
+     * of guessing. */
+    residual.valid = 0;
+    residual.state = FMCB_RECOVERY_CORRUPT;
+    residual.probe_rc = rc < 0 ? rc : -5169;
+    *status = residual;
+    return residual.probe_rc;
+}
+
 static int ReconcileResidualMarkers(FmcbRecoveryStatus *status)
 {
+    char verified_root[FMCB_SOURCE_ROOT_MAX];
     unsigned int i;
+    int rc;
+
+    verified_root[0] = '\0';
+    if (MciUsbGetVerifiedPackageRoot(verified_root,
+                                     sizeof(verified_root)) == 0) {
+        rc = ReconcileResidualRoot(verified_root, status);
+        if (rc < 0)
+            return rc;
+    }
 
     for (i = 0; i < sizeof(ResidualRoots) / sizeof(ResidualRoots[0]); i++) {
-        FmcbRecoveryStatus residual;
-        RecoveryCardMarker usb_marker;
-        RecoveryCardMarker card_marker;
-        int rc;
-
-        memset(&residual, 0, sizeof(residual));
-        residual.target_port = -1;
-        snprintf(residual.source_root, sizeof(residual.source_root), "%s",
-                 ResidualRoots[i].source_root);
-        snprintf(residual.recovery_root, sizeof(residual.recovery_root), "%s",
-                 ResidualRoots[i].recovery_root);
-
-        rc = ReadMassMarker(&residual, &usb_marker);
-        if (rc < 0)
+        if (verified_root[0] != '\0' &&
+            strcmp(verified_root, ResidualRoots[i].source_root) == 0)
             continue;
-
-        residual.present = 1;
-        residual.valid = 1;
-        residual.target_port = usb_marker.target_port;
-        residual.marker_token = usb_marker.token;
-        residual.probe_rc = 0;
-
-        rc = ReadCardMarker(residual.target_port, &card_marker);
-        if (rc == 0 &&
-            memcmp(&usb_marker, &card_marker, sizeof(usb_marker)) == 0) {
-            rc = FmcbRecoveryClearCardMarker(&residual,
-                                             residual.target_port);
-            if (rc == 0)
-                continue;
-        }
-
-        /* A residual token without its matching card is deliberately sticky.
-         * This most commonly means COMMITTED cleanup was interrupted and the
-         * original card is not currently present. Block a new install rather
-         * than overwriting the only identity evidence. */
-        residual.valid = 0;
-        residual.state = FMCB_RECOVERY_CORRUPT;
-        residual.probe_rc = rc < 0 ? rc : -5169;
-        *status = residual;
-        return residual.probe_rc;
+        rc = ReconcileResidualRoot(ResidualRoots[i].source_root, status);
+        if (rc < 0)
+            return rc;
     }
     return 0;
+}
+
+static void ResumeMassLogAfterRecovery(const FmcbRecoveryStatus *status)
+{
+    if (status != NULL && status->source_root[0] != '\0') {
+        char device[16];
+        const char *colon = strchr(status->source_root, ':');
+        if (colon != NULL) {
+            unsigned int length = (unsigned int)(colon - status->source_root) + 1u;
+            if (length < sizeof(device)) {
+                memcpy(device, status->source_root, length);
+                device[length] = '\0';
+                (void)fileXioSync(device, 0);
+                DelayThread(10000);
+            }
+        }
+    }
+    MciDiagLogSetMassWritePaused(0);
 }
 
 /* Journal lifecycle wrappers. The core recovery implementation deliberately
@@ -383,15 +556,36 @@ int __wrap_FmcbRecoveryProbe(const FmcbMassBackendStatus *backend,
     int rc;
     int residual_rc;
 
+    fileXioSetBlockMode(FXIO_WAIT);
+    MciDiagLogSetMassWritePaused(1);
+
     rc = __real_FmcbRecoveryProbe(backend, status);
-    if (status == NULL || status->present)
+    if (status == NULL) {
+        ResumeMassLogAfterRecovery(status);
         return rc;
+    }
+
+    if (status->present && status->valid && status->prepared_files == 0) {
+        int discard_rc = TryDiscardUnarmedEmptyJournal(status);
+        if (discard_rc < 0) {
+            ResumeMassLogAfterRecovery(status);
+            return discard_rc;
+        }
+        if (discard_rc > 0)
+            rc = __real_FmcbRecoveryProbe(backend, status);
+    }
+
+    if (status->present) {
+        ResumeMassLogAfterRecovery(status);
+        return rc;
+    }
 
     /* The real probe intentionally treats COMMITTED as cleanup-only and may
      * remove its journals. card-token.bin survives that cleanup, allowing this
      * wrapper to remove the card marker only after proving the original card is
      * still present. If not, the residual token becomes a blocking condition. */
     residual_rc = ReconcileResidualMarkers(status);
+    ResumeMassLogAfterRecovery(status);
     return residual_rc < 0 ? residual_rc : rc;
 }
 
@@ -402,9 +596,24 @@ int __wrap_FmcbRecoveryBegin(const FmcbPackageReport *package,
     int rollback_rc = 0;
     int rc;
 
+    fileXioSetBlockMode(FXIO_WAIT);
+    MciDiagLogSetMassWritePaused(1);
+
     rc = __real_FmcbRecoveryBegin(package, status);
-    if (rc < 0)
+    if (rc == -5140 && status != NULL && status->present) {
+        int discard_rc = TryDiscardUnarmedEmptyJournal(status);
+        if (discard_rc < 0) {
+            ResumeMassLogAfterRecovery(status);
+            return discard_rc;
+        }
+        if (discard_rc > 0)
+            rc = __real_FmcbRecoveryBegin(package, status);
+    }
+    if (rc < 0) {
+        ResumeMassLogAfterRecovery(status);
         return rc;
+    }
+
     saved = *status;
     rc = FmcbRecoveryArmCard(status, status->target_port);
     if (rc < 0) {
@@ -414,8 +623,11 @@ int __wrap_FmcbRecoveryBegin(const FmcbPackageReport *package,
         (void)__real_FmcbRecoveryRun(status, &rollback_rc);
         if (rc != -5168)
             DiscardFailedArmArtifacts(&saved);
+        ResumeMassLogAfterRecovery(&saved);
         return rc;
     }
+
+    ResumeMassLogAfterRecovery(status);
     return 0;
 }
 
@@ -427,21 +639,43 @@ int __wrap_FmcbRecoveryRun(FmcbRecoveryStatus *status, int *rollback_rc)
     if (status == NULL)
         return -1;
 
-    /* This check is deliberately before the first real rollback operation.
-     * Slot number alone is not card identity; both USB and card tokens must
+    fileXioSetBlockMode(FXIO_WAIT);
+    MciDiagLogSetMassWritePaused(1);
+
+    {
+        int discard_rc = TryDiscardUnarmedEmptyJournal(status);
+        if (discard_rc < 0) {
+            ResumeMassLogAfterRecovery(status);
+            return discard_rc;
+        }
+        if (discard_rc > 0) {
+            if (rollback_rc != NULL)
+                *rollback_rc = 0;
+            ResumeMassLogAfterRecovery(status);
+            return 0;
+        }
+    }
+
+    /* Slot number alone is not card identity; both USB and card tokens must
      * agree before any destination from the journal can be restored/deleted. */
     rc = FmcbRecoveryCheckCard(status, status->target_port);
-    if (rc < 0)
+    if (rc < 0) {
+        ResumeMassLogAfterRecovery(status);
         return rc;
+    }
 
     saved = *status;
     rc = __real_FmcbRecoveryRun(status, rollback_rc);
     if (rc == 0) {
         int marker_rc = FmcbRecoveryClearCardMarker(&saved,
                                                     saved.target_port);
-        if (marker_rc < 0)
+        if (marker_rc < 0) {
+            ResumeMassLogAfterRecovery(&saved);
             return marker_rc;
+        }
     }
+
+    ResumeMassLogAfterRecovery(&saved);
     return rc;
 }
 
@@ -453,20 +687,30 @@ int __wrap_FmcbRecoveryFinish(FmcbRecoveryStatus *status)
     if (status == NULL)
         return -1;
 
+    fileXioSetBlockMode(FXIO_WAIT);
+    MciDiagLogSetMassWritePaused(1);
+
     /* Verify that the card being declared committed is still the card that was
      * armed at transaction start. The real finish removes journals/backups but
      * deliberately leaves card-token.bin for the post-commit marker cleanup. */
     rc = FmcbRecoveryCheckCard(status, status->target_port);
-    if (rc < 0)
+    if (rc < 0) {
+        ResumeMassLogAfterRecovery(status);
         return rc;
+    }
 
     saved = *status;
     rc = __real_FmcbRecoveryFinish(status);
     if (rc == 0) {
         int marker_rc = FmcbRecoveryClearCardMarker(&saved,
                                                     saved.target_port);
-        if (marker_rc < 0)
+        if (marker_rc < 0) {
+            ResumeMassLogAfterRecovery(&saved);
             return marker_rc;
+        }
     }
+
+    ResumeMassLogAfterRecovery(&saved);
     return rc;
 }
+

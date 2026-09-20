@@ -17,6 +17,7 @@
 
 #define NEWLIB_PORT_AWARE
 
+#include <tamtypes.h>
 #include <delaythread.h>
 #include <fileXio_rpc.h>
 #include <io_common.h>
@@ -29,7 +30,7 @@
 #include "diag_log.h"
 
 #define DIAG_LINE_MAX 320u
-#define DIAG_PENDING_LINES 256u
+#define DIAG_PENDING_LINES 512u
 #define DIAG_ATTACH_ATTEMPTS 4u
 #define DIAG_ATTACH_DELAY_USEC 50000u
 
@@ -45,6 +46,7 @@ static const MciDiagRoot Roots[] = {
 };
 
 static char Pending[DIAG_PENDING_LINES][DIAG_LINE_MAX];
+static u32 PendingHash[DIAG_PENDING_LINES];
 static unsigned int PendingHead;
 static unsigned int PendingCount;
 static unsigned int DroppedLines;
@@ -71,9 +73,36 @@ static int WriteAll(int fd, const char *text, unsigned int length)
     return 0;
 }
 
+static u32 LineHash(const char *text)
+{
+    const unsigned char *p = (const unsigned char *)text;
+    u32 hash = 2166136261u;
+    unsigned int i;
+
+    for (i = 0u; i < DIAG_LINE_MAX; i++) {
+        unsigned char ch = p[i];
+        hash ^= ch;
+        hash *= 16777619u;
+        if (ch == '\0')
+            return hash;
+    }
+
+    /* A valid QueueLine slot is always NUL-terminated. Fold a distinct marker
+     * into the checksum instead of reading beyond the damaged slot. */
+    hash ^= 0xFFFFFFFFu;
+    return hash;
+}
+
 static int EnsurePath(void)
 {
     unsigned int i;
+
+    /* Drebin's open/write/close code is strictly synchronous. Current PS2SDK
+     * fileXio block mode is global, and fileXioOpen() returns 0 for an accepted
+     * NOWAIT RPC instead of a real descriptor. Never allow the logger to
+     * interpret that transient zero as fd 0. Ownership guards ensure no valid
+     * async mass request should still be outstanding when this runs. */
+    fileXioSetBlockMode(FXIO_WAIT);
 
     if (PathReady)
         return 0;
@@ -132,6 +161,7 @@ static int WriteRawLineNow(const char *line)
 
     if (!IoAvailable || MassWritePauseDepth != 0u || InWrite)
         return -1;
+    fileXioSetBlockMode(FXIO_WAIT);
     if (EnsurePath() < 0)
         return -2;
 
@@ -165,6 +195,7 @@ static void QueueLine(const char *line)
         DroppedLines++;
     }
     snprintf(Pending[index], sizeof(Pending[index]), "%s", line);
+    PendingHash[index] = LineHash(Pending[index]);
 }
 
 static void EnsureInitialized(void)
@@ -176,6 +207,7 @@ static void EnsureInitialized(void)
     PendingHead = 0u;
     PendingCount = 1u;
     DroppedLines = 0u;
+    memset(PendingHash, 0, sizeof(PendingHash));
     LogPath[0] = '\0';
     LogDevice[0] = '\0';
     IoAvailable = 0;
@@ -186,6 +218,10 @@ static void EnsureInitialized(void)
     snprintf(Pending[0], sizeof(Pending[0]),
              "#%06u t=%llu [SESSION] ========== Drebin diagnostic session start ==========",
              Sequence, 0ULL);
+    /* Slot zero is born populated. Hash it immediately; leaving the checksum
+     * at its memset(0) value made the first legitimate session line look like
+     * RAM corruption on every fresh logger initialization. */
+    PendingHash[0] = LineHash(Pending[0]);
 }
 
 /* Flush the complete RAM trace with one append descriptor and one sync. The old
@@ -200,6 +236,7 @@ static void FlushPending(void)
 
     if (!IoAvailable || MassWritePauseDepth != 0u || InWrite)
         return;
+    fileXioSetBlockMode(FXIO_WAIT);
     if (PendingCount == 0u && DroppedLines == 0u)
         return;
     if (EnsurePath() < 0) {
@@ -230,12 +267,33 @@ static void FlushPending(void)
     }
 
     while (rc == 0 && PendingCount > 0u) {
+        char snapshot[DIAG_LINE_MAX] __attribute__((aligned(64)));
+        char corrupt[DIAG_LINE_MAX] __attribute__((aligned(64)));
         unsigned int index = PendingHead;
-        rc = WriteAll(fd, Pending[index],
-                      (unsigned int)strlen(Pending[index]));
+        u32 expected = PendingHash[index];
+        u32 actual = LineHash(Pending[index]);
+        const char *text;
+        unsigned int length;
+
+        if (actual != expected) {
+            snprintf(corrupt, sizeof(corrupt),
+                     "#%06u t=%llu [LOGGER] RAM ring corruption at slot=%u expected=%08X actual=%08X; damaged line suppressed",
+                     ++Sequence,
+                     (unsigned long long)(GetTimerSystemTime() - LogEpoch),
+                     index, expected, actual);
+            text = corrupt;
+        } else {
+            memcpy(snapshot, Pending[index], sizeof(snapshot));
+            snapshot[sizeof(snapshot) - 1u] = '\0';
+            text = snapshot;
+        }
+
+        length = (unsigned int)strlen(text);
+        rc = WriteAll(fd, text, length);
         if (rc == 0)
             rc = WriteAll(fd, "\n", 1u);
         if (rc == 0) {
+            PendingHash[index] = 0u;
             PendingHead = (PendingHead + 1u) % DIAG_PENDING_LINES;
             PendingCount--;
         }
@@ -274,6 +332,7 @@ void MciDiagLogReset(void)
     PendingHead = 0u;
     PendingCount = 0u;
     DroppedLines = 0u;
+    memset(PendingHash, 0, sizeof(PendingHash));
     Sequence = 0u;
     IoAvailable = 0;
     PathReady = 0;
@@ -305,6 +364,19 @@ void MciDiagLogSetIoAvailable(int available)
     if (IoAvailable && PathReady)
         return;
 
+    /* A subsystem may rebind fileXio while an outer transaction still owns
+     * mass:. Mark the client usable, but do not even Dopen/GetStat/Mkdir the
+     * logger path until the outermost ownership guard is released. */
+    if (MassWritePauseDepth != 0u) {
+        IoAvailable = 1;
+        PathReady = 0;
+        LogPath[0] = '\0';
+        LogDevice[0] = '\0';
+        MciDiagLogTracePrintf("LOGGER",
+                              "mass/fileXio returned inside protected ownership scope; path attach deferred");
+        return;
+    }
+
     /* This is called only after the application has explicitly allowed USB
      * enumeration time. Failure is non-fatal: stay RAM-only and try again at
      * the next safe lifecycle boundary. */
@@ -332,10 +404,14 @@ void MciDiagLogSetMassWritePaused(int paused)
 
     if (paused) {
         if (MassWritePauseDepth == 0u) {
-            /* This marker is durable because the outermost caller enters the
-             * guard before opening the long-lived image descriptor. */
-            MciDiagLogPrintf("LOGGER",
-                             "card-image mass I/O critical section begins; durable trace paused");
+            /* Acquire ownership BEFORE recording the marker. The old code used
+             * the durable printf path here, which performed a real DREBIN.LOG
+             * append immediately before the supposedly protected mass: operation. */
+            MassWritePauseDepth = 1u;
+            MciDiagLogTracePrintf(
+                "LOGGER",
+                "mass-storage critical section begins; durable trace paused");
+            return;
         }
         MassWritePauseDepth++;
         return;
@@ -347,9 +423,12 @@ void MciDiagLogSetMassWritePaused(int paused)
     if (MassWritePauseDepth != 0u)
         return;
 
+    /* The end marker belongs to the same RAM-only ownership interval. Queue it
+     * first, then publish the whole interval with one append descriptor. */
+    MciDiagLogTracePrintf(
+        "LOGGER",
+        "mass-storage critical section ended; durable trace resumed");
     FlushPending();
-    MciDiagLogPrintf("LOGGER",
-                     "card-image mass I/O critical section ended; durable trace resumed");
 }
 
 void MciDiagLogPrintf(const char *component, const char *format, ...)

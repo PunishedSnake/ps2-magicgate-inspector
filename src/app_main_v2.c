@@ -100,7 +100,7 @@ static void ShowSaveTransferResultV2(const char *title,
                                      const MciSaveTransferReport *report,
                                      int rc)
 {
-    char message[760];
+    char message[1024];
     MciGuiTone tone;
 
     if (report->result == MCI_SAVE_TRANSFER_OK)
@@ -337,7 +337,7 @@ static void RunSelectiveRestorePickerV2(int *active_port)
 
     rc = MciImageFsScan(path, format, &list);
     if (rc < 0 || list.save_count <= 0) {
-        char message[320];
+        char message[384];
         snprintf(message, sizeof(message),
                  "The selected image could not be indexed as a PS2 save filesystem.\n\n%s\nResult: %s (rc=%d)",
                  path, MciImageFsResultText(list.result), rc);
@@ -614,7 +614,8 @@ int main(int argc, char *argv[])
     ResetSlotReports(0);
     ResetSlotReports(1);
     fmcb_rc = FmcbInitMassBackend(&FmcbMassStatus);
-    (void)fmcb_rc;
+    if (fmcb_rc >= 0)
+        (void)LoadSavedSettingsAfterMass(&last_video_rc);
     (void)RefreshRecoveryStatus();
     if (RecoveryStatus.present)
         page = MCI_GUI_FMCB;
@@ -732,6 +733,32 @@ int main(int argc, char *argv[])
                 dirty = 1;
             }
 
+            if ((pressed & PAD_SQUARE) && page == MCI_GUI_SETTINGS) {
+                char config_path[MCI_SETTINGS_CONFIG_PATH_MAX];
+                char message[320];
+                int save_rc;
+
+                config_path[0] = '\0';
+                save_rc = SaveCurrentSettings(config_path, sizeof(config_path));
+                if (save_rc == 0) {
+                    snprintf(message, sizeof(message),
+                             "Settings saved to:\n%s\n\nThey will be loaded automatically on the next boot. The display mode is applied after USB initialization so Native remains the safe startup fallback.",
+                             config_path);
+                    MciGuiRenderMessage("SETTINGS SAVED", message,
+                                        "CROSS or CIRCLE returns to Settings.",
+                                        MCI_GUI_TONE_SUCCESS);
+                } else {
+                    snprintf(message, sizeof(message),
+                             "Could not save MCINSPECTOR.CFG to USB (rc=%d). Current in-memory settings are unchanged.",
+                             save_rc);
+                    MciGuiRenderMessage("SETTINGS SAVE FAILED", message,
+                                        "CROSS or CIRCLE returns to Settings.",
+                                        MCI_GUI_TONE_DANGER);
+                }
+                install_result_modal = 1;
+                dirty = 1;
+            }
+
             if ((pressed & PAD_SQUARE) && page == MCI_GUI_FMCB) {
                 (void)RefreshRecoveryStatus();
                 if (RecoveryStatus.present) {
@@ -742,9 +769,9 @@ int main(int argc, char *argv[])
                                             MCI_GUI_TONE_DANGER);
                         install_result_modal = 1;
                     } else {
-                        char message[360];
+                        char message[512];
                         snprintf(message, sizeof(message),
-                                 "Recover the interrupted FMCB transaction recorded for mc%d?\n\nState: %s\nPrepared destinations: %d\nUSB root: %s\n\nRecovery validates the card transaction marker, restores every captured destination in reverse order, verifies restored files, then removes the journal.",
+                                 "Recover the interrupted FMCB transaction recorded for mc%d?\n\nState: %s\nPrepared destinations: %d\nUSB root: %s\n\nRecovery validates the transaction marker, restores captured destinations in reverse order, and removes the journal. An unarmed zero-destination journal is safely discarded without touching FMCB files.",
                                  RecoveryStatus.target_port,
                                  FmcbRecoveryStateText(RecoveryStatus.state),
                                  RecoveryStatus.prepared_files,
@@ -756,7 +783,7 @@ int main(int argc, char *argv[])
                     }
                 } else if (FmcbReports[selected].status != FMCB_PACKAGE_READY) {
                     MciGuiRenderMessage("Installer locked",
-                                        "Run FMCB Preflight with CROSS first. The normal installer is armed only for a package that resolves every required source and destination.",
+                                        "Run FMCB Preflight with CROSS first. The cross-region installer is armed only after every required I/A/E/C source and destination resolves.",
                                         "CROSS or CIRCLE returns to the dashboard.",
                                         MCI_GUI_TONE_WARNING);
                     install_result_modal = 1;
@@ -766,9 +793,9 @@ int main(int argc, char *argv[])
                     char message[640];
 
                     if (plan->compact_unlock_active)
-                        compact = "Real DEX profile: compact reference manifest ACTIVE; ENDVDPL is omitted.";
+                        compact = "DEX/MechaPwn DEX profile: compact reference manifest ACTIVE; CEX-only ENDVDPL is omitted.";
                     else if (plan->compact_unlock_candidate)
-                        compact = "DEX-like/region-unlocked MechaCon detected: compact manifest candidate found, but the CEX payload is retained until hardware validation proves ENDVDPL can be omitted safely.";
+                        compact = "Unqualified DEX-like/region-unlocked MechaCon: CEX payload retained until this exact profile is proven on real hardware.";
                     else
                         compact = "Retail region policy: normal CEX manifest.";
 

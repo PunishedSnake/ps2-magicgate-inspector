@@ -23,6 +23,7 @@ on:
       - feat/0.4.0-dev3-drebin
       - feat/0.4.0-dev4-drebin-browser
       - feat/0.4.0-dev4-save-transfer-picker-impl4
+      - feat/p0-fmcb-cross-region
     paths:
       - 'src/**'
       - 'tools/**'
@@ -56,6 +57,14 @@ jobs:
       - name: Verify card-math optimization equivalence
         shell: bash
         run: python3 tools/verify_card_math.py
+
+      - name: Verify FMCB cross-region integration invariants
+        shell: bash
+        run: python3 tools/verify_fmcb_cross_region.py
+
+      - name: Verify Settings config invariants
+        shell: bash
+        run: python3 tools/verify_settings_config.py
 
       - name: Stage PS2SDK 2.0 security and card personalities
         shell: bash
@@ -273,4 +282,4 @@ jobs:
           name: PS2-Memory-Card-Inspector-0.4.0-dev4-Drebin-${{ github.sha }}
           path: artifacts/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3

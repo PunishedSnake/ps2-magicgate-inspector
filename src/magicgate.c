@@ -713,6 +713,276 @@ int MagicGateProbePrepared(int target_port, const MagicGateKelfBuffer *buffer,
     return 0;
 }
 
+static int StoreBoundKeyMaterial(unsigned char *data, int size,
+                                 const unsigned char kbit[16],
+                                 const unsigned char kc[16],
+                                 const unsigned char *icvps2,
+                                 int icvps2_required)
+{
+    const SecrKELFHeader_t *header;
+    unsigned int offset;
+    unsigned int skip;
+
+    if (data == NULL || size < (int)sizeof(SecrKELFHeader_t))
+        return MG_BIND_ERR_KEY_LAYOUT;
+
+    header = (const SecrKELFHeader_t *)data;
+    if (header->KELF_header_size < sizeof(SecrKELFHeader_t) ||
+        header->KELF_header_size > (unsigned int)size ||
+        header->BIT_count > 63)
+        return MG_BIND_ERR_KEY_LAYOUT;
+
+    offset = sizeof(SecrKELFHeader_t);
+    if ((unsigned int)header->BIT_count >
+        ((unsigned int)size - offset) / sizeof(SecrBitBlockData_t))
+        return MG_BIND_ERR_KEY_LAYOUT;
+    offset += (unsigned int)header->BIT_count * sizeof(SecrBitBlockData_t);
+
+    if (header->flags & 1) {
+        if (offset >= (unsigned int)size)
+            return MG_BIND_ERR_KEY_LAYOUT;
+        skip = (unsigned int)data[offset] + 1u;
+        if (skip > (unsigned int)size - offset)
+            return MG_BIND_ERR_KEY_LAYOUT;
+        offset += skip;
+    }
+
+    if ((header->flags & 0xF000) == 0) {
+        if (8u > (unsigned int)size - offset)
+            return MG_BIND_ERR_KEY_LAYOUT;
+        offset += 8u;
+    }
+
+    if (offset > header->KELF_header_size ||
+        32u > header->KELF_header_size - offset ||
+        offset > (unsigned int)size ||
+        32u > (unsigned int)size - offset)
+        return MG_BIND_ERR_KEY_LAYOUT;
+
+    memcpy(data + offset, kbit, 16);
+    memcpy(data + offset + 16u, kc, 16);
+
+    if (icvps2_required) {
+        unsigned int icv_offset;
+        if (icvps2 == NULL || header->KELF_header_size < 8u)
+            return MG_BIND_ERR_KEY_LAYOUT;
+        icv_offset = header->KELF_header_size - 8u;
+        if (icv_offset > (unsigned int)size ||
+            8u > (unsigned int)size - icv_offset)
+            return MG_BIND_ERR_KEY_LAYOUT;
+        memcpy(data + icv_offset, icvps2, 8);
+    }
+
+    return 0;
+}
+
+int MagicGateBindPrepared(int target_port, unsigned char *data, int size,
+                          MagicGateReport *report)
+{
+    const SecrKELFHeader_t *header;
+    unsigned char kbit[16];
+    unsigned char kc[16];
+    unsigned char icvps2[8];
+    SecrBitTable_t bit_table;
+    unsigned int offset;
+    unsigned int block_size;
+    int type = 0;
+    int free_clusters = 0;
+    int formatted = 0;
+    int rc;
+    int i;
+
+    if (report == NULL)
+        return MG_BIND_ERR_INVALID;
+
+    /* The caller has already created the isolated security session and
+     * populated session_setup_rc/session_mcinit_rc. Reset only bind-stage
+     * telemetry so those setup facts survive into the forensic record. */
+    report->target_port = target_port;
+    report->source_size = size;
+    report->source_io_rc = 0;
+    report->rpc_rc = -999;
+    report->header_rc = -999;
+    report->header_reply_size = -1;
+    report->block_count = 0;
+    report->encrypted_blocks = 0;
+    report->blocks_completed = 0;
+    report->failed_block = -1;
+    report->kbit_rc = -999;
+    report->kc_rc = -999;
+    report->icvps2_rc = -999;
+    report->result = MG_RESULT_NOT_RUN;
+
+    rc = ValidateKelf(data, size);
+    if (rc < 0) {
+        report->stage = MG_STAGE_VALIDATE_KELF;
+        report->result = MG_RESULT_INVALID_KELF;
+        report->source_io_rc = rc;
+        return MG_BIND_ERR_INVALID;
+    }
+
+    header = (const SecrKELFHeader_t *)data;
+    report->icvps2_required = (header->flags >> 1) & 1;
+
+    if (!SecrIopAvailable) {
+        report->stage = MG_STAGE_SESSION_SETUP;
+        report->result = MG_RESULT_SECR_UNAVAILABLE;
+        return MG_BIND_ERR_RPC;
+    }
+
+    report->stage = MG_STAGE_SESSION_CARD_CHECK;
+    for (i = 0; i < MG_CARD_RETRIES; i++) {
+        type = 0;
+        free_clusters = 0;
+        formatted = 0;
+        mcGetInfo(target_port, 0, &type, &free_clusters, &formatted);
+        rc = McSyncResult();
+
+        report->session_mcinfo_rc = rc;
+        report->session_type = type;
+        report->session_free_clusters = free_clusters;
+        report->session_formatted = formatted;
+
+        if (rc != sceMcResChangedCard)
+            break;
+        if (type == MC_TYPE_PS2 && i == MG_CARD_RETRIES - 1)
+            break;
+        DelayThread(MG_CARD_RETRY_USEC);
+    }
+    if (rc < 0 && rc != sceMcResNoFormat &&
+        !(rc == sceMcResChangedCard && type == MC_TYPE_PS2)) {
+        report->result = MG_RESULT_SESSION_CARD_ERROR;
+        return MG_BIND_ERR_CARD;
+    }
+    if (type != MC_TYPE_PS2) {
+        report->result = MG_RESULT_TARGET_NOT_PS2;
+        return MG_BIND_ERR_CARD;
+    }
+
+    report->stage = MG_STAGE_BIND_RPC;
+    rc = BindDownloadRpc();
+    report->rpc_rc = rc;
+    if (rc < 0) {
+        report->result = MG_RESULT_RPC_UNAVAILABLE;
+        return MG_BIND_ERR_RPC;
+    }
+
+    memset(&bit_table, 0, sizeof(bit_table));
+    report->stage = MG_STAGE_DOWNLOAD_HEADER;
+    rc = DownloadHeader(target_port, 0, data, &bit_table,
+                        &report->header_reply_size);
+    if (rc < 0) {
+        report->rpc_rc = rc;
+        report->result = MG_RESULT_RPC_UNAVAILABLE;
+        return MG_BIND_ERR_HEADER;
+    }
+    report->header_rc = rc;
+    if (rc == 0) {
+        report->result = MG_RESULT_HEADER_FAILED;
+        return MG_BIND_ERR_HEADER;
+    }
+
+    report->block_count = bit_table.header.block_count;
+    if (report->block_count < 0 || report->block_count > 63 ||
+        bit_table.header.headersize > (unsigned int)size) {
+        report->result = MG_RESULT_INVALID_KELF;
+        return MG_BIND_ERR_INVALID;
+    }
+
+    report->stage = MG_STAGE_DOWNLOAD_BLOCKS;
+    offset = bit_table.header.headersize;
+    for (i = 0; i < report->block_count; i++) {
+        block_size = bit_table.blocks[i].size;
+        if (offset > (unsigned int)size ||
+            block_size > (unsigned int)size - offset) {
+            report->failed_block = i;
+            report->result = MG_RESULT_INVALID_KELF;
+            return MG_BIND_ERR_INVALID;
+        }
+
+        if (bit_table.blocks[i].flags & 2) {
+            report->encrypted_blocks++;
+            if (block_size > 0x400u) {
+                report->failed_block = i;
+                report->result = MG_RESULT_INVALID_KELF;
+                return MG_BIND_ERR_INVALID;
+            }
+
+            rc = DownloadBlock(data + offset, (int)block_size);
+            if (rc < 0) {
+                report->rpc_rc = rc;
+                report->failed_block = i;
+                report->result = MG_RESULT_RPC_UNAVAILABLE;
+                return MG_BIND_ERR_BLOCK;
+            }
+            if (rc == 0) {
+                report->failed_block = i;
+                report->result = MG_RESULT_BLOCK_FAILED;
+                return MG_BIND_ERR_BLOCK;
+            }
+            report->blocks_completed++;
+        }
+        offset += block_size;
+    }
+
+    report->stage = MG_STAGE_GET_KBIT;
+    rc = DownloadGetKbit(target_port, 0, kbit);
+    if (rc < 0) {
+        report->rpc_rc = rc;
+        report->result = MG_RESULT_RPC_UNAVAILABLE;
+        return MG_BIND_ERR_KBIT;
+    }
+    report->kbit_rc = rc;
+    if (rc == 0) {
+        report->result = MG_RESULT_KBIT_FAILED;
+        return MG_BIND_ERR_KBIT;
+    }
+
+    report->stage = MG_STAGE_GET_KC;
+    rc = DownloadGetKc(target_port, 0, kc);
+    if (rc < 0) {
+        report->rpc_rc = rc;
+        report->result = MG_RESULT_RPC_UNAVAILABLE;
+        return MG_BIND_ERR_KC;
+    }
+    report->kc_rc = rc;
+    if (rc == 0) {
+        report->result = MG_RESULT_KC_FAILED;
+        return MG_BIND_ERR_KC;
+    }
+
+    memset(icvps2, 0, sizeof(icvps2));
+    if (report->icvps2_required) {
+        report->stage = MG_STAGE_GET_ICVPS2;
+        rc = DownloadGetIcvps2(icvps2);
+        if (rc < 0) {
+            report->rpc_rc = rc;
+            report->result = MG_RESULT_RPC_UNAVAILABLE;
+            return MG_BIND_ERR_ICVPS2;
+        }
+        report->icvps2_rc = rc;
+        if (rc == 0) {
+            report->result = MG_RESULT_ICVPS2_FAILED;
+            return MG_BIND_ERR_ICVPS2;
+        }
+    } else {
+        report->icvps2_rc = 0;
+    }
+
+    rc = StoreBoundKeyMaterial(data, size, kbit, kc,
+                               report->icvps2_required ? icvps2 : NULL,
+                               report->icvps2_required);
+    if (rc < 0) {
+        report->stage = MG_STAGE_VALIDATE_KELF;
+        report->result = MG_RESULT_INVALID_KELF;
+        return rc;
+    }
+
+    report->stage = MG_STAGE_DONE;
+    report->result = MG_RESULT_PASS;
+    return MG_BIND_OK;
+}
+
 const char *MagicGateStageText(MagicGateStage stage)
 {
     switch (stage) {
