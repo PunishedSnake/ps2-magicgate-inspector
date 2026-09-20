@@ -35,7 +35,7 @@ static qword_t *identity_banner(qword_t *q)
     q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
     q = rect_outline(q, 12, 8, 628, 31, Theme.border);
     q = text(q, 22, 14, "PS2 Memory Card Inspector", Theme.text);
-    snprintf(version, sizeof(version), "v0.4.0-dev4 Drebin  mc%d", ActiveHeaderSlot);
+    snprintf(version, sizeof(version), "v0.4.0 Drebin  mc%d", ActiveHeaderSlot);
     q = text_box(q, 462, 14, 618, 23, version, Theme.accent);
     return q;
 }
