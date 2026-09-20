@@ -1,96 +1,92 @@
 # Roadmap
 
-The roadmap is staged around hardware evidence. PS2 Memory Card Inspector should not turn a working diagnostic primitive into a destructive installer faster than it can verify and roll back its writes.
+The roadmap is evidence-driven. 0.4.0 is the first release where the project is
+not merely a diagnostic frontend but a verified write-capable memory-card tool.
 
-## v0.2.0 — Briscoe — complete
+## v0.4.0 — Drebin — release scope complete
 
-Hardware-validated release scope:
+Drebin includes:
 
-- Sony ROM X memory-card personality retained for ordinary filesystem work;
-- temporary 4 KiB filesystem write/read/compare/delete test;
-- raw `FMCB.XLF` acquisition from USB into EE RAM;
-- isolated MagicGate/KELF session with normal-stack restoration;
-- correct BIT semantics for large plaintext entries;
-- failed-GET_KBIT instrumentation on the real CardAuth path without command replay;
-- correct libmc logical `0/1` -> SECR/SIO2 physical `2/3` mapping;
-- PS2SDK 2.0 SECRMAN 1.4 promoted to the single production security backend;
-- `FUNCTIONAL` on two Sony 8 MB cards;
-- `FUNCTIONAL` on a third-party 64 MB MagicGate-capable card;
-- `NOT SUPPORTED / NO CARD AUTH ACK` on a third-party 64 MB card without functional MagicGate while ordinary storage remains usable;
-- read-only FMCB package preflight;
-- reproducible CI packaging with source provenance, SHA-256, project license, PS2SDK AFL-2.0 text, credits and third-party notices.
+- native GS UI with selectable display modes;
+- card/filesystem diagnostics;
+- hardware-validated MagicGate/CardAuth;
+- Card Tools image export/verify/restore;
+- filesystem-aware image/save browsing and transfer;
+- guarded force-format path;
+- cross-region FMCB 1.966 installation;
+- compatibility profiles for CEX/DEX/MechaPwn and PSX/DESR classification;
+- all-distinct-KELF compatibility preflight before card mutation;
+- durable transaction/recovery journal;
+- full read-back verification and rollback;
+- persistent Settings config;
+- P0 production optimization pass with R5900 tuning;
+- one stable public ELF without benchmark variants.
 
-The legacy SECRMAN 1.3 comparison path is retained only in history/documentation and is no longer part of the release build.
+## Post-0.4 qualification
 
-## Next milestone: controlled bind/write/read-back experiment
+The next work is not to add more destructive power. It is to broaden the
+hardware matrix and simplify code that no longer needs development scaffolding.
 
-Do not jump directly to a full FMCB installer. The next write-capable build should perform one deliberately narrow transaction on a disposable or fully backed-up card:
+Priorities:
 
-```text
-preflight
-  -> backup/rollback state
-  -> bind raw KELF in RAM
-  -> write one controlled target
-  -> close/reopen
-  -> full read-back
-  -> verify bytes/metadata
-  -> rollback on any failure
-```
+- more retail CEX consoles across ROM revisions;
+- real DEX hardware;
+- more MechaPwn CEX/DEX configurations;
+- ROM 1.80 / 2.10;
+- early Japanese SCPH-10000/15000/18000;
+- Chinese-region BCEXEC hardware;
+- more third-party MagicGate controllers;
+- representative modchips;
+- ROM 2.20 versus 2.30 preparation/boot behavior.
 
-Success criteria:
+## PSX/DESR
 
-- no unrelated files touched;
-- exact on-card result can be read back and verified;
-- any failure leaves enough information and backup state to restore the previous card state;
-- normal ROM X filesystem access still works after the transaction;
-- a power-cycle test is performed only after on-card verification passes.
+PSX/DESR is recognized by the compatibility layer, but the release does not yet
+enable its separate X* payload manifest/twin-sign install path.
 
-## Next: FMCB installation transaction
+A future milestone should implement and qualify:
 
-Only after the single-file write path is hardware-validated:
+- `XFMCB.XLF`;
+- `XUDNL.XRX`;
+- `XENDVDPL.XRX`;
+- PS2-to-PSX twin-sign key transfer;
+- real DESR hardware tests.
 
-- calculate required target space;
-- validate the complete user-supplied package;
-- create system/config directories safely;
-- bind required KELF payloads using the validated SECRMAN 1.4 backend;
-- copy non-KELF resources;
-- close/reopen and verify every written file;
-- preserve or back up replaceable existing content;
-- maintain rollback metadata until the whole transaction commits;
-- expose clear abort/failure states instead of leaving a partially installed card.
+## Future Card Tools work
 
-## v0.3.x — installer hardening and recovery
+Potential additions:
 
-Possible scope:
+- richer save metadata views;
+- exportable machine-readable diagnostics;
+- verification-only audit of existing FMCB installations;
+- compare installed files against a supplied package;
+- safer batch migration between cards;
+- better card-controller fingerprint database based on observed behavior rather
+  than branding.
 
-- explicit backup/export before modifying an existing FMCB installation;
-- installation journal and rollback/recovery path;
-- verification-only mode for existing installations;
-- compare existing target files against the user-supplied package;
-- detect already-bound KELFs and reject them as raw bind sources;
-- richer free-space and filesystem-health gating;
-- clearer distinction between storage health and MagicGate capability.
+## Performance work after 0.4
 
-## Later diagnostic work
+P0 production choices are frozen for the stable release.
 
-Potential additions where they provide actionable information:
+Further speed work belongs on research branches and must be justified by real
+hardware measurements, including latency tails and correctness hashes.
 
-- export test reports to USB;
-- card-controller/MagicGate behavior database based on observed protocol results rather than branding;
-- timing/retry diagnostics for borderline cards;
-- deeper CardAuth `50/51/52/53` detail view;
-- optional research builds comparing historical security backends;
-- additional safe filesystem-integrity checks.
+Candidates include:
+
+- alternate raw-card batch sizes;
+- USB image read/write overlap;
+- further copy elimination;
+- additional R5900 hot-kernel tuning.
+
+No future optimization should weaken transaction ownership, recovery or
+verification.
 
 ## Non-goals
 
-The project does not currently aim to:
+The project does not aim to:
 
-- emulate MagicGate in software;
-- bypass the Mechacon or replace Sony cryptographic hardware;
-- fabricate MagicGate capability on a controller that does not implement CardAuth;
+- emulate MagicGate cryptography in software;
+- fabricate MagicGate capability on cards that do not implement CardAuth;
 - redistribute Sony ROM modules;
-- bundle FreeMcBoot payloads;
-- automatically format or modify a card because a diagnostic stage fails.
-
-The target remains narrow: identify what a card and console can actually do, then make future installation operations explicit, verifiable and recoverable.
+- redistribute FreeMcBoot payloads;
+- replace real-hardware qualification with PCSX2 timing results.
