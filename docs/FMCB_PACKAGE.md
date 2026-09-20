@@ -16,7 +16,7 @@ hardware-validated path:
 logical mc0/mc1
   -> isolated PS2SDK 2.0 SECRMAN 1.4 + matching SIO2/MCMAN
   -> translate 0/1 to physical SIO2 2/3 only at the SECRMAN/CardAuth boundary
-  -> SecrDownloadFile in EE RAM
+  -> instrumented SECRSIF header/block/Kbit/Kc/ICVPS2 bind in EE RAM
   -> restore Sony ROM X card stack
   -> write, close, reopen and verify through ordinary libmc
 ```
@@ -56,8 +56,13 @@ FMCB/
     └── USBHDFSD.IRX
 ```
 
-`ENDVDPL.XRX` follows the reference installer and is omitted only for a real
-DEX ROM. MechaPwn DEX-like state by itself is not treated as a real DEX ROM.
+`ENDVDPL.XRX` follows the reference installer and remains required in the
+source package so one package can serve CEX and DEX-like targets. It is selected
+for normal retail/CEX profiles, but omitted for a real DEX ROM and for a
+positively fingerprinted MechaPwn DEX-mode profile. Real-hardware qualification
+on SCPH-50000 showed the 128-byte ENDVDPL KELF being rejected at SECR download
+header while FMCB.XLF/OSDSYS.XLF/OSD110.XLF bound normally. A merely DEX-like
+MechaCon without the MechaPwn fingerprint does not trigger this omission.
 
 ## Cross-region destination set
 
