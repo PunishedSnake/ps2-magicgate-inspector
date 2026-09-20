@@ -1,0 +1,7 @@
+EE_BIN = PAD_HANDOFF_PROBE.ELF
+EE_OBJS = src/pad_handoff_probe.o
+EE_LIBS = -ldebug -lpad -lkernel
+EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99
+
+include $(PS2SDK)/samples/Makefile.pref
+include $(PS2SDK)/samples/Makefile.eeglobal
