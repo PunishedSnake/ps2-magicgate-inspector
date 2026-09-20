@@ -1074,7 +1074,7 @@ static qword_t *shell(qword_t *q, MciGuiPage page, int selected)
     q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
     q = rect_outline(q, 12, 8, 628, 31, Theme.border);
     q = text(q, 22, 14, "PS2 Memory Card Inspector", Theme.text);
-    snprintf(version, sizeof(version), "v0.4.0 Drebin  mc%d", selected);
+    snprintf(version, sizeof(version), "v0.4.1 Drebin  mc%d", selected);
     q = text_box(q, 462, 14, 618, 23, version, Theme.accent);
 
     for (i = 0; i < MCI_GUI_PAGE_COUNT; i++) {
@@ -1479,7 +1479,7 @@ int MciGuiInit(void)
     MarqueeEpoch = GetTimerSystemTime();
     MarqueeNeeded = 0;
     RendererReady = 1;
-    MciGuiRenderMessage("Starting 0.4.0",
+    MciGuiRenderMessage("Starting 0.4.1",
                         "Graphics Synthesizer frontend ready.\n"
                         "Settings can switch among the display modes carried forward from the hardware-tested 0.4.3 HDD-manager backend.",
                         NULL, MCI_GUI_TONE_INFO);
@@ -1559,7 +1559,7 @@ void MciGuiRenderMessage(const char *title,
     q = rect_fill(q, 0, 0, UI_W, 4, accent);
     q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
     q = rect_outline(q, 12, 8, 628, 31, Theme.border);
-    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.4.0 Drebin", Theme.text);
+    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.4.1 Drebin", Theme.text);
     q = text_box(q, 20, 39, 620, 48, title != NULL ? title : "Status", accent);
     q = rect_fill(q, 16, 53, 624, body_bottom, Theme.panel);
     q = rect_outline(q, 16, 53, 624, body_bottom, Theme.border);
@@ -1601,7 +1601,7 @@ void MciGuiRenderProgress(const char *title,
     q = rect_fill(q, 0, 0, UI_W, 4, accent);
     q = rect_fill(q, 12, 8, 628, 31, Theme.panel);
     q = rect_outline(q, 12, 8, 628, 31, Theme.border);
-    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.4.0 Drebin", Theme.text);
+    q = text(q, 22, 14, "PS2 Memory Card Inspector  v0.4.1 Drebin", Theme.text);
     q = text_box(q, 20, 39, 620, 48, title != NULL ? title : "Working", accent);
     q = rect_fill(q, 16, 53, 624, 196, Theme.panel);
     q = rect_outline(q, 16, 53, 624, 196, Theme.border);

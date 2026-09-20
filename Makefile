@@ -10,7 +10,7 @@ EE_LIBS = -ldebug -ldraw -lgraph -lpacket -ldma -lpad -lmc -lfileXio -lcdvd -lse
 EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections \
 	-DMG_SECR_PROFILE_PS2SDK14=1
 
-# Stable 0.4.0 release policy:
+# Stable 0.4.1 release policy:
 # - keep the hardware-qualified P0 production paths;
 # - keep transport synchronous and single-owner;
 # - no USB speed-test matrix, async candidates or Performance Lab;

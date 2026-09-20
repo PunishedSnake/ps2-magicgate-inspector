@@ -3,6 +3,23 @@
 All notable changes to PS2 Memory Card Inspector are documented here.
 
 
+## [0.4.1] — 2026-09-21 — "Drebin"
+
+### USB/FMCB hotfix
+
+- Fixed real-hardware USB FAT corruption during FMCB installation where
+  diagnostic text could appear as malformed files/directories on `mass:`.
+- Extended the logger's RAM-only mass-storage ownership scope across complete
+  installer revalidation and transaction execution.
+- Reused preflight-bound KELFs from EE RAM so no MagicGate IOP/USB rebuild is
+  needed after the recovery journal becomes active.
+- Removed unnecessary PADMAN loading from the temporary MagicGate IOP
+  personality.
+- Fixed the false initial Drebin RAM-ring checksum warning.
+- Hardware re-test confirmed FMCB installation no longer corrupts the USB
+  filesystem.
+- Release packaging contains one production ELF only; no benchmark variants.
+
 ## [0.4.0] — 2026-09-20 — "Drebin"
 
 ### FreeMcBoot installer

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * PS2 Memory Card Inspector 0.4.0 release controller.
+ * PS2 Memory Card Inspector 0.4.1 release controller.
  *
  * 0.4 retains the hardware-tested diagnostic boundaries from 0.3 while adding
  * configurable GS output, deeper filesystem profiles and a guarded normal
@@ -51,8 +51,6 @@ extern unsigned char secrman_irx[];
 extern unsigned int size_secrman_irx;
 extern unsigned char fmcb_freesio2_irx[];
 extern unsigned int size_fmcb_freesio2_irx;
-extern unsigned char fmcb_freepad_irx[];
-extern unsigned int size_fmcb_freepad_irx;
 extern unsigned char fmcb_mcman_irx[];
 extern unsigned int size_fmcb_mcman_irx;
 extern unsigned char fmcb_mcserv_irx[];
@@ -69,6 +67,106 @@ static FmcbRecoveryStatus RecoveryStatus;
 static MciSettings Settings;
 static MciRawCardSessionStatus RawCardStatus;
 static int PadActive;
+
+/*
+ * Preflight produces the exact card-bound KELF representation consumed by the
+ * installer. Keep it only for the lifetime of one install attempt. This avoids
+ * rebooting the IOP and rebuilding USBHDFSD after recovery/journal writes have
+ * already started, while still detecting any source mutation between preflight
+ * and transaction by comparing the raw bytes again.
+ */
+typedef struct PreboundKelfEntry {
+    int valid;
+    int target_port;
+    unsigned int size;
+    unsigned char *raw;
+    unsigned char *bound;
+    char source[FMCB_PATH_MAX];
+} PreboundKelfEntry;
+
+static PreboundKelfEntry PreboundKelfs[FMCB_MAX_PACKAGE_ENTRIES];
+static int PreboundKelfCount;
+
+static void ClearPreboundKelfCache(void)
+{
+    int i;
+
+    for (i = 0; i < PreboundKelfCount; i++) {
+        free(PreboundKelfs[i].raw);
+        free(PreboundKelfs[i].bound);
+    }
+    memset(PreboundKelfs, 0, sizeof(PreboundKelfs));
+    PreboundKelfCount = 0;
+}
+
+static int StorePreboundKelf(int target_port, const char *source,
+                             const unsigned char *raw,
+                             const unsigned char *bound,
+                             unsigned int size)
+{
+    PreboundKelfEntry *entry;
+    unsigned char *raw_copy;
+    unsigned char *bound_copy;
+
+    if (source == NULL || raw == NULL || bound == NULL || size == 0u)
+        return -4740;
+    if (PreboundKelfCount >= FMCB_MAX_PACKAGE_ENTRIES)
+        return -4741;
+
+    raw_copy = malloc(size);
+    bound_copy = malloc(size);
+    if (raw_copy == NULL || bound_copy == NULL) {
+        free(raw_copy);
+        free(bound_copy);
+        return -12;
+    }
+    memcpy(raw_copy, raw, size);
+    memcpy(bound_copy, bound, size);
+
+    entry = &PreboundKelfs[PreboundKelfCount++];
+    memset(entry, 0, sizeof(*entry));
+    entry->valid = 1;
+    entry->target_port = target_port;
+    entry->size = size;
+    entry->raw = raw_copy;
+    entry->bound = bound_copy;
+    snprintf(entry->source, sizeof(entry->source), "%s", source);
+    return 0;
+}
+
+static int ApplyPreboundKelfForInstaller(int target_port,
+                                         unsigned char *buffer,
+                                         unsigned int size,
+                                         void *userdata)
+{
+    int i;
+
+    (void)userdata;
+    if (buffer == NULL || size == 0u)
+        return -4742;
+
+    for (i = 0; i < PreboundKelfCount; i++) {
+        PreboundKelfEntry *entry = &PreboundKelfs[i];
+        if (!entry->valid || entry->target_port != target_port ||
+            entry->size != size)
+            continue;
+        if (memcmp(entry->raw, buffer, size) != 0)
+            continue;
+
+        memcpy(buffer, entry->bound, size);
+        MciDiagLogTracePrintf(
+            "FMCB-BIND",
+            "reused prebound KELF source=%s target=mc%d size=%u",
+            entry->source, target_port, size);
+        return 0;
+    }
+
+    MciDiagLogTracePrintf(
+        "FMCB-BIND",
+        "prebound KELF cache MISS target=mc%d size=%u; transaction rejected",
+        target_port, size);
+    return -4743;
+}
 
 static int LoadRomModule(const char *path)
 {
@@ -176,7 +274,7 @@ static int RebootIopWithSecrman(void)
 
     MciProgressUpdate(MCI_PROGRESS_MAGICGATE, 33,
                       "Security IOP reboot complete",
-                      "The IOP is synchronized. Loading the matching SIO2, PAD and MCMAN generation next.");
+                      "The IOP is synchronized. Loading the matching SIO2 and MCMAN generation next.");
     return 0;
 }
 
@@ -206,10 +304,13 @@ static int InitMagicGateSession(MagicGateReport *report)
                       "Starting the matching SIO2 transport used by MCMAN and SECRMAN CardAuth callbacks.");
     rc = LoadEmbeddedModule(fmcb_freesio2_irx, size_fmcb_freesio2_irx);
     if (rc < 0) goto out;
-    MciProgressUpdate(MCI_PROGRESS_MAGICGATE, 38, "Loading PS2SDK 2.0 PADMAN",
-                      "Keeping the isolated module generation internally consistent while the normal controller client is stopped.");
-    rc = LoadEmbeddedModule(fmcb_freepad_irx, size_fmcb_freepad_irx);
-    if (rc < 0) goto out;
+    /* CardAuth/MagicGate needs the memory-card SIO2 path, not a controller
+     * server. Keep PADMAN out of this temporary IOP personality so the
+     * security transaction cannot touch controller service state for no
+     * functional reason. The normal ROM XPADMAN client is rebuilt after the
+     * IOP reboot by RestoreNormalEnvironment(). */
+    MciDiagLogPrintf("MAGICGATE",
+                     "temporary security IOP: PADMAN intentionally not loaded");
     MciProgressUpdate(MCI_PROGRESS_MAGICGATE, 40, "Loading PS2SDK 2.0 MCMAN",
                       "Registering the memory-card side used by SECRMAN for direct CardAuth command callbacks.");
     rc = LoadEmbeddedModule(fmcb_mcman_irx, size_fmcb_mcman_irx);
@@ -273,10 +374,13 @@ static int RunMagicGateSession(int target_port)
     int rc;
     int restore_rc;
 
+    MciDiagLogSetMassWritePaused(1);
     MagicGateResetKelfBuffer(&kelf);
     rc = MagicGatePrepareKelf(target_port, &kelf, report);
-    if (rc < 0)
+    if (rc < 0) {
+        MciDiagLogSetMassWritePaused(0);
         return rc;
+    }
 
     MciProgressUpdate(MCI_PROGRESS_MAGICGATE, 27,
                       "Closing normal clients before the security reboot",
@@ -303,6 +407,7 @@ static int RunMagicGateSession(int target_port)
                           restore_rc);
         SleepThread();
     }
+    MciDiagLogSetMassWritePaused(0);
     MciProgressUpdate(MCI_PROGRESS_MAGICGATE, 100,
                       "MagicGate probe and environment restore complete",
                       "The isolated SECRMAN session has ended and the program is returning to the results dashboard.");
@@ -364,8 +469,9 @@ static int BindKelfForInstaller(int target_port, unsigned char *buffer,
  * rules choose candidates; real hardware gets the final vote.
  *
  * Multiple regional destinations sourced from SYSTEM/FMCB.XLF intentionally
- * collapse to one probe. This is correctness-first and deliberately slower
- * than a later bound-blob cache optimization.
+ * collapse to one probe. The resulting bound bytes are retained only for the
+ * immediately following transaction so no security reboot is needed after the
+ * USB recovery journal becomes active.
  */
 static int PreflightSelectedKelfSources(int target_port,
                                         const FmcbPackageReport *package,
@@ -375,6 +481,7 @@ static int PreflightSelectedKelfSources(int target_port,
     int i;
     int probed = 0;
 
+    ClearPreboundKelfCache();
     if (package == NULL || package->status != FMCB_PACKAGE_READY) {
         snprintf(reason, reason_size,
                  "FMCB package is not READY for KELF compatibility preflight.");
@@ -387,6 +494,7 @@ static int PreflightSelectedKelfSources(int target_port,
                 i < FMCB_MAX_PACKAGE_ENTRIES; i++) {
         const FmcbPackageFileStatus *file = &package->files[i];
         unsigned char *buffer = NULL;
+        unsigned char *raw_snapshot = NULL;
         unsigned int size = 0u;
         int cache_hit = 0;
         int duplicate = 0;
@@ -448,13 +556,25 @@ static int PreflightSelectedKelfSources(int target_port,
         if (strcmp(file->relative_path, "SYSTEM/FMCB.XLF") == 0)
             capture = &MgReports[target_port];
 
+        raw_snapshot = malloc(size);
+        if (raw_snapshot == NULL) {
+            free(buffer);
+            ClearPreboundKelfCache();
+            snprintf(reason, reason_size,
+                     "Could not retain raw KELF %s for the verified install handoff.",
+                     file->relative_path);
+            return -12;
+        }
+        memcpy(raw_snapshot, buffer, size);
+
         MciDiagLogPrintf("FMCB-PREFLIGHT",
                          "bind source=%s size=%u cache_hit=%d begin",
                          file->relative_path, size, cache_hit);
         rc = BindKelfForInstaller(target_port, buffer, size, capture);
-        free(buffer);
-
         if (rc < 0) {
+            free(raw_snapshot);
+            free(buffer);
+            ClearPreboundKelfCache();
             snprintf(reason, reason_size,
                      "KELF compatibility preflight failed for %s (rc=%d). No memory-card destination was modified.",
                      file->relative_path, rc);
@@ -464,19 +584,37 @@ static int PreflightSelectedKelfSources(int target_port,
             return rc;
         }
 
+        rc = StorePreboundKelf(target_port, file->relative_path,
+                               raw_snapshot, buffer, size);
+        free(raw_snapshot);
+        free(buffer);
+        if (rc < 0) {
+            ClearPreboundKelfCache();
+            snprintf(reason, reason_size,
+                     "Could not retain the verified bound KELF %s (rc=%d). No transaction was started.",
+                     file->relative_path, rc);
+            MciDiagLogPrintf("FMCB-PREFLIGHT",
+                             "cache source=%s rc=%d FAIL before transaction",
+                             file->relative_path, rc);
+            return rc;
+        }
+
         MciDiagLogPrintf("FMCB-PREFLIGHT",
-                         "bind source=%s rc=0 PASS", file->relative_path);
+                         "bind source=%s rc=0 PASS / cached bound image",
+                         file->relative_path);
         probed++;
     }
 
     if (probed == 0 && package->plan.magicgate_required) {
+        ClearPreboundKelfCache();
         snprintf(reason, reason_size,
                  "Install plan requires MagicGate but selected no probeable KELF source.");
         return -4733;
     }
 
     MciDiagLogPrintf("FMCB-PREFLIGHT",
-                     "all distinct selected KELF sources PASS count=%d", probed);
+                     "all distinct selected KELF sources PASS count=%d cached=%d",
+                     probed, PreboundKelfCount);
     return 0;
 }
 
@@ -655,8 +793,19 @@ static int RunVerifiedInstaller(int target_port)
     MciGuiRenderMessage("Revalidating before installation",
                         "The card filesystem, active compatibility profile, package and every distinct selected KELF source are re-tested on real hardware before the recovery journal or first destination write.",
                         NULL, MCI_GUI_TONE_WARNING);
+
+    /*
+     * One owner for mass: across the complete install attempt. Revalidation
+     * deliberately reboots the IOP while qualifying KELFs; no persistent
+     * DREBIN append may be interleaved with that lifecycle. The transaction
+     * then consumes the pre-bound RAM copies and performs no security reboot
+     * after the recovery journal has started touching FAT.
+     */
+    MciDiagLogSetMassWritePaused(1);
     rc = RevalidateInstallerPreconditions(target_port, reason, sizeof(reason));
     if (rc < 0) {
+        ClearPreboundKelfCache();
+        MciDiagLogSetMassWritePaused(0);
         FmcbInstallResetReport(report, target_port);
         report->result = FMCB_INSTALL_RESULT_REJECTED;
         MciGuiRenderMessage("FMCB installation rejected", reason,
@@ -670,8 +819,10 @@ static int RunVerifiedInstaller(int target_port)
     rc = FmcbInstallCrossRegionTransactional(target_port,
                                         &FmcbReports[target_port],
                                         &options,
-                                        BindKelfForInstaller, NULL,
+                                        ApplyPreboundKelfForInstaller, NULL,
                                         &RecoveryStatus, report);
+    ClearPreboundKelfCache();
+    MciDiagLogSetMassWritePaused(0);
     if (rc == 0) {
         char result[440];
         const char *verify_summary;
@@ -1252,7 +1403,7 @@ int main(int argc, char *argv[])
     init_scr();
     if (MciGuiInit() < 0) {
         scr_clear();
-        scr_printf("PS2 Memory Card Inspector 0.4.0 Drebin\n\n");
+        scr_printf("PS2 Memory Card Inspector 0.4.1 Drebin\n\n");
         scr_printf("GS frontend initialization failed.\n");
         SleepThread();
     }
