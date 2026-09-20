@@ -1,6 +1,6 @@
 # MagicGate / CardAuth findings
 
-This document preserves the hardware findings behind Briscoe so the low-level conclusions do not disappear into development logs or get reintroduced as regressions.
+This document preserves the hardware findings behind Briscoe and the security baseline retained by 0.4.0 Drebin, so the low-level conclusions do not disappear into development logs or get reintroduced as regressions.
 
 ## What Inspector tests
 
@@ -121,7 +121,7 @@ It reproduced the same hardware matrix:
 - third-party 64 MB with functional MagicGate: `FUNCTIONAL`;
 - third-party 64 MB without functional MagicGate: `NOT SUPPORTED / NO CARD AUTH ACK`.
 
-That result allowed the project to retire the historical compatibility backend and ship 0.2.0 with PS2SDK 2.0 SECRMAN 1.4 as the single production security implementation.
+That result allowed the project to retire the historical compatibility backend. 0.4.0 Drebin retains PS2SDK 2.0 SECRMAN 1.4 as the single production security implementation for both capability probes and transactional FMCB KELF binding.
 
 ## Positive and negative controls
 
@@ -194,4 +194,4 @@ Successful GET_KBIT behavior is unchanged and no persistent/on-card diagnostic f
 
 A `FUNCTIONAL` result proves that the tested card/controller can complete the KELF-binding operations exercised by this probe on the tested PS2/security stack. It does not certify every possible MagicGate operation, every console revision or long-term card reliability.
 
-The next project milestone is not deeper read-only authentication. It is a deliberately controlled **bind -> write -> close/reopen -> read-back -> verify -> rollback** experiment before any general FMCB installation mode is enabled.
+Drebin 0.4.0 completes the milestone that was still future work in Briscoe: the same validated security path is now used by a transactional FMCB installer with all-distinct-KELF preflight, write/close/reopen/read-back verification and durable rollback. Passing the MagicGate probe remains a capability result, not permission to bypass transaction safety.
