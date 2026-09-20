@@ -122,9 +122,13 @@ assert "ApplyPreboundKelfForInstaller, NULL" in run_installer_text, (
     "transaction must consume the preflight-bound KELF instead of rebooting the security IOP"
 )
 assert "BindKelfForInstaller, NULL" not in run_installer_text
-assert run_installer_text.index("FmcbInstallCrossRegionTransactional") < run_installer_text.index(
-    "MciDiagLogSetMassWritePaused(0)"
-), "mass logger must stay paused until the whole installer transaction returns"
+transaction_pos = run_installer_text.index("FmcbInstallCrossRegionTransactional")
+resume_after_transaction = run_installer_text.find(
+    "MciDiagLogSetMassWritePaused(0)", transaction_pos
+)
+assert resume_after_transaction > transaction_pos, (
+    "mass logger must stay paused until the whole installer transaction returns"
+)
 run_mg = re.search(
     r"static int RunMagicGateSession\(int target_port\).*?\n\}",
     app_c,
