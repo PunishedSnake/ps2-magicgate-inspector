@@ -17,6 +17,7 @@
 
 #define NEWLIB_PORT_AWARE
 
+#include <tamtypes.h>
 #include <delaythread.h>
 #include <fileXio_rpc.h>
 #include <io_common.h>
@@ -29,7 +30,7 @@
 #include "diag_log.h"
 
 #define DIAG_LINE_MAX 320u
-#define DIAG_PENDING_LINES 256u
+#define DIAG_PENDING_LINES 512u
 #define DIAG_ATTACH_ATTEMPTS 4u
 #define DIAG_ATTACH_DELAY_USEC 50000u
 
@@ -45,6 +46,7 @@ static const MciDiagRoot Roots[] = {
 };
 
 static char Pending[DIAG_PENDING_LINES][DIAG_LINE_MAX];
+static u32 PendingHash[DIAG_PENDING_LINES];
 static unsigned int PendingHead;
 static unsigned int PendingCount;
 static unsigned int DroppedLines;
@@ -69,6 +71,18 @@ static int WriteAll(int fd, const char *text, unsigned int length)
         done += (unsigned int)rc;
     }
     return 0;
+}
+
+static u32 LineHash(const char *text)
+{
+    const unsigned char *p = (const unsigned char *)text;
+    u32 hash = 2166136261u;
+
+    while (*p != '\0') {
+        hash ^= *p++;
+        hash *= 16777619u;
+    }
+    return hash;
 }
 
 static int EnsurePath(void)
@@ -173,6 +187,7 @@ static void QueueLine(const char *line)
         DroppedLines++;
     }
     snprintf(Pending[index], sizeof(Pending[index]), "%s", line);
+    PendingHash[index] = LineHash(Pending[index]);
 }
 
 static void EnsureInitialized(void)
@@ -184,6 +199,7 @@ static void EnsureInitialized(void)
     PendingHead = 0u;
     PendingCount = 1u;
     DroppedLines = 0u;
+    memset(PendingHash, 0, sizeof(PendingHash));
     LogPath[0] = '\0';
     LogDevice[0] = '\0';
     IoAvailable = 0;
@@ -239,12 +255,32 @@ static void FlushPending(void)
     }
 
     while (rc == 0 && PendingCount > 0u) {
+        char snapshot[DIAG_LINE_MAX] __attribute__((aligned(64)));
+        char corrupt[DIAG_LINE_MAX] __attribute__((aligned(64)));
         unsigned int index = PendingHead;
-        rc = WriteAll(fd, Pending[index],
-                      (unsigned int)strlen(Pending[index]));
+        u32 expected = PendingHash[index];
+        u32 actual = LineHash(Pending[index]);
+        const char *text;
+        unsigned int length;
+
+        if (actual != expected) {
+            snprintf(corrupt, sizeof(corrupt),
+                     "#%06u t=%llu [LOGGER] RAM ring corruption at slot=%u expected=%08X actual=%08X; damaged line suppressed",
+                     ++Sequence,
+                     (unsigned long long)(GetTimerSystemTime() - LogEpoch),
+                     index, expected, actual);
+            text = corrupt;
+        } else {
+            snprintf(snapshot, sizeof(snapshot), "%s", Pending[index]);
+            text = snapshot;
+        }
+
+        length = (unsigned int)strlen(text);
+        rc = WriteAll(fd, text, length);
         if (rc == 0)
             rc = WriteAll(fd, "\n", 1u);
         if (rc == 0) {
+            PendingHash[index] = 0u;
             PendingHead = (PendingHead + 1u) % DIAG_PENDING_LINES;
             PendingCount--;
         }
@@ -283,6 +319,7 @@ void MciDiagLogReset(void)
     PendingHead = 0u;
     PendingCount = 0u;
     DroppedLines = 0u;
+    memset(PendingHash, 0, sizeof(PendingHash));
     Sequence = 0u;
     IoAvailable = 0;
     PathReady = 0;
