@@ -63,9 +63,16 @@ Then repeat the probe on the compatible third-party MagicGate card.
 
 Use a complete user-supplied FMCB package as documented in `FMCB_PACKAGE.md`.
 
-The integrated manifest contains 28 destinations. For a normal retail/CEX ROM
-path all 28 are selected and 11 are KELFs. A real DEX ROM intentionally skips
-the CEX-only ENDVDPL entry, leaving 27 selected and 10 KELFs.
+The integrated manifest contains 28 source/destination definitions. For a
+normal retail/CEX profile all 28 are selected and 11 are KELFs. Real DEX and a
+positively fingerprinted MechaPwn DEX-mode profile intentionally skip the
+CEX-only ENDVDPL entry, leaving 27 selected destinations and 10 KELFs.
+
+Real-hardware qualification on the SCPH-50000 MechaPwn DEX-like test console
+proved this boundary directly: FMCB.XLF, OSDSYS.XLF and OSD110.XLF completed
+SECR header/Kbit/Kc binding, while the 128-byte ENDVDPL.XRX returned
+DOWNLOAD HEADER failure before CardAuth. Generic DEX-like profiles without the
+MechaPwn fingerprint are not promoted automatically and retain ENDVDPL.
 
 Preflight must report READY before installation is armed.
 
@@ -129,8 +136,10 @@ The installer binder now reports stage-specific negative codes:
 ```
 
 `SYSTEM/ENDVDPL.XRX` is a special 128-byte CEX KELF used by FMCB to enable
-DVD-player support. Keep it in the normal retail/CEX qualification; do not
-silently skip it merely because a MechaPwn configuration is region-unlocked.
+DVD-player support. Keep it in normal retail/CEX qualification. It is omitted
+for real DEX and for the positively fingerprinted MechaPwn DEX-mode policy,
+matching the reference install split and the real-hardware header-rejection
+reproduction. Region unlock by itself is not sufficient evidence to omit it.
 
 ## Stage E: reboot/boot validation
 
@@ -176,6 +185,20 @@ The USB backend is considered restored only after a real mass:/mass0:/mass1:
 root can be opened. Recovery identity reads retry only short ENODEV/card-detect
 readiness windows; missing markers, token mismatch and corrupt metadata remain
 fail-closed.
+
+## Drebin integrity diagnostics
+
+During the same hardware qualification, raw `DREBIN.LOG` contained the
+recovery-journal magic `MCIR` and journal structure bytes embedded inside a
+text progress record. This proves that the damaged file cannot be explained by
+plain text truncation alone.
+
+The logger therefore keeps an FNV checksum for every RAM-ring slot and copies a
+validated line into a 64-byte-aligned immutable snapshot before fileXio write.
+A checksum mismatch is emitted as `RAM ring corruption` and the damaged line
+is suppressed. If the next hardware log still contains journal bytes while no
+RAM-ring checksum failure is reported, the remaining fault is below the ring,
+in the mass/fileXio/USBHDFSD write path or descriptor ownership.
 
 ## Pass criteria
 
