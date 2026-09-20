@@ -523,8 +523,9 @@ static int RunVerifiedInstaller(int target_port)
         const FmcbInstallFileReport *failed_file =
             (report->current_file >= 0 && report->current_file < FMCB_TX_MAX_FILES)
                 ? &report->files[report->current_file] : NULL;
+        (void)RefreshRecoveryStatus();
         snprintf(result, sizeof(result),
-                 "Install failed at %s: %s. Target: %s. Files committed: %d/%d. inventory exact=%d parent=%d open=%d; rc backup=%d bind=%d write=%d verify=%d; space=%d recovery=%d rollback=%d. No new install should start while recovery state is present.",
+                 "Install failed at %s: %s. Target: %s. Files committed: %d/%d. inventory exact=%d parent=%d open=%d; rc backup=%d bind=%d write=%d verify=%d; space=%d recovery=%d rollback=%d. %s",
                  FmcbInstallStageText(report->stage),
                  FmcbInstallResultText(report->result), failed_target,
                  report->files_committed, report->files_total,
@@ -536,8 +537,11 @@ static int RunVerifiedInstaller(int target_port)
                  failed_file ? failed_file->write_rc : -999,
                  failed_file ? failed_file->verify_rc : -999,
                  report->space_rc, report->recovery_rc,
-                 report->rollback_rc);
-        (void)RefreshRecoveryStatus();
+                 report->rollback_rc,
+                 (!RecoveryStatus.present &&
+                  report->recovery_rc == 0 && report->rollback_rc == 0)
+                     ? "Automatic rollback completed and the card was restored to its captured pre-install state."
+                     : "Recovery state is still present; do not start another install until it is resolved.");
         MciGuiRenderMessage("FMCB install failed", result,
                             "CROSS or CIRCLE returns to the dashboard.",
                             report->result == FMCB_INSTALL_RESULT_ROLLBACK_FAILED ||
