@@ -1,6 +1,6 @@
 # Security backend provenance
 
-PS2 Memory Card Inspector 0.2.0 uses one production security backend: **PS2SDK 2.0 SECRMAN 1.4** with matching PS2SDK 2.0 SECRSIF and card-side modules.
+PS2 Memory Card Inspector 0.4.0 continues to use one production security backend: **PS2SDK 2.0 SECRMAN 1.4** with matching PS2SDK 2.0 SECRSIF and card-side modules.
 
 The earlier FreeMcBoot-compatible SECRMAN 1.3 path was essential during investigation, but it has been retired from the release build after the modern PS2SDK stack reproduced the same positive and negative hardware results.
 
@@ -29,7 +29,7 @@ PS2SDK 2.0 mcman
 PS2SDK 2.0 mcserv  # staged/embedded for session plumbing, intentionally not started
 ```
 
-The normal application personality is separate and continues to use Sony ROM `XSIO2MAN/XPADMAN/XMCMAN/XMCSERV`.
+The normal application personality is separate and continues to use Sony ROM `XSIO2MAN/XPADMAN/XMCMAN/XMCSERV`. Card Tools also use a separately staged raw-page MCMAN/MCSERV personality; this does not replace the production MagicGate backend.
 
 ## Hardware result
 
