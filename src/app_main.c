@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 
 #include "card.h"
 #include "card_image.h"
@@ -503,6 +504,58 @@ static void ResetSlotReports(int port)
 static unsigned int CurrentFsTestBytes(void)
 {
     return MciFsTestProfileBytes(Settings.fs_profile);
+}
+
+static int LoadSavedSettingsAfterMass(int *last_video_rc)
+{
+    char path[MCI_SETTINGS_CONFIG_PATH_MAX];
+    int rc;
+
+    path[0] = '\0';
+    rc = MciSettingsLoadFromMass(&Settings, path, sizeof(path));
+    if (rc == 0) {
+        MciDiagLogPrintf("SETTINGS",
+                         "loaded path=%s video=%s fs=%s preserve_cnf=%d verify=%s",
+                         path, MciVideoModeId(Settings.video_mode),
+                         MciFsTestProfileName(Settings.fs_profile),
+                         Settings.preserve_existing_cnfs,
+                         MciInstallVerifyModeName(Settings.install_verify_mode));
+
+        if (Settings.video_mode != MciGuiCurrentVideoMode()) {
+            int video_rc = MciGuiApplyVideoMode(Settings.video_mode);
+            if (last_video_rc != NULL)
+                *last_video_rc = video_rc;
+            if (video_rc < 0) {
+                MciDiagLogPrintf("SETTINGS",
+                                 "saved video mode %s failed to apply rc=%d; reverting setting to active mode %s",
+                                 MciVideoModeId(Settings.video_mode), video_rc,
+                                 MciVideoModeId(MciGuiCurrentVideoMode()));
+                Settings.video_mode = MciGuiCurrentVideoMode();
+            }
+        }
+    } else if (rc != -ENOENT) {
+        MciDiagLogPrintf("SETTINGS",
+                         "config load failed rc=%d; defaults retained", rc);
+    }
+    return rc;
+}
+
+static int SaveCurrentSettings(char *path, unsigned int path_size)
+{
+    int rc;
+
+    rc = MciSettingsSaveToMass(&Settings, path, path_size);
+    if (rc == 0) {
+        MciDiagLogPrintf("SETTINGS",
+                         "saved path=%s video=%s fs=%s preserve_cnf=%d verify=%s",
+                         path, MciVideoModeId(Settings.video_mode),
+                         MciFsTestProfileName(Settings.fs_profile),
+                         Settings.preserve_existing_cnfs,
+                         MciInstallVerifyModeName(Settings.install_verify_mode));
+    } else {
+        MciDiagLogPrintf("SETTINGS", "config save failed rc=%d", rc);
+    }
+    return rc;
 }
 
 static int RefreshRecoveryStatus(void)
@@ -1217,7 +1270,8 @@ int main(int argc, char *argv[])
     ResetSlotReports(0);
     ResetSlotReports(1);
     fmcb_rc = FmcbInitMassBackend(&FmcbMassStatus);
-    (void)fmcb_rc;
+    if (fmcb_rc >= 0)
+        (void)LoadSavedSettingsAfterMass(&last_video_rc);
     (void)RefreshRecoveryStatus();
     if (RecoveryStatus.present)
         page = MCI_GUI_FMCB;
@@ -1332,6 +1386,32 @@ int main(int argc, char *argv[])
                 } else {
                     RunSelectedPageTest(selected, page);
                 }
+                dirty = 1;
+            }
+
+            if ((pressed & PAD_SQUARE) && page == MCI_GUI_SETTINGS) {
+                char config_path[MCI_SETTINGS_CONFIG_PATH_MAX];
+                char message[320];
+                int save_rc;
+
+                config_path[0] = '\0';
+                save_rc = SaveCurrentSettings(config_path, sizeof(config_path));
+                if (save_rc == 0) {
+                    snprintf(message, sizeof(message),
+                             "Settings saved to:\n%s\n\nThey will be loaded automatically on the next boot. The display mode is applied after USB initialization so Native remains the safe startup fallback.",
+                             config_path);
+                    MciGuiRenderMessage("SETTINGS SAVED", message,
+                                        "CROSS or CIRCLE returns to Settings.",
+                                        MCI_GUI_TONE_SUCCESS);
+                } else {
+                    snprintf(message, sizeof(message),
+                             "Could not save MCINSPECTOR.CFG to USB (rc=%d). Current in-memory settings are unchanged.",
+                             save_rc);
+                    MciGuiRenderMessage("SETTINGS SAVE FAILED", message,
+                                        "CROSS or CIRCLE returns to Settings.",
+                                        MCI_GUI_TONE_DANGER);
+                }
+                install_result_modal = 1;
                 dirty = 1;
             }
 
