@@ -1,7 +1,7 @@
 #ifndef MCI_FMCB_INSTALL_H
 #define MCI_FMCB_INSTALL_H
 
-#include "console_profile.h"
+#include "fmcb_compat.h"
 
 /* FreeMcBoot package discovery plus the destination model shared by preflight
  * and the 0.4 verified normal-install transaction. */
@@ -56,6 +56,7 @@ typedef struct FmcbPackageFileStatus {
 typedef struct FmcbInstallPlan {
     int target_port;
     MciConsoleProfile console;
+    FmcbCompatibilityPolicy compatibility;
     char romver_region;
     unsigned int rom_version;
     char region_letter;
