@@ -74,7 +74,7 @@ jobs:
             -v "$GITHUB_WORKSPACE:/work" \
             -w /work \
             ps2dev/ps2dev:v2.0.0 \
-            sh -c 'set -eu; apk add --no-cache build-base >/dev/null; make clean; make MC_INSPECTOR.ELF'
+            sh -c 'set -eu; apk add --no-cache build-base >/dev/null; make MC_INSPECTOR.ELF'
 
       - name: Verify production profile
         shell: bash
