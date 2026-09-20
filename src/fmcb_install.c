@@ -107,13 +107,8 @@ int FmcbPackageEntrySelected(const FmcbInstallPlan *plan, int index)
 
     if (plan == NULL || entry == NULL)
         return 0;
-    /* Reference FMCB omits ENDVDPL from real DEX installs. Real-hardware
-     * qualification on SCPH-50000 MechaPwn DEX-like mode reproduced the same
-     * boundary: ordinary FMCB/OSDSYS KELFs bind, while the 128-byte ENDVDPL
-     * KELF is rejected at SECR DOWNLOAD HEADER before CardAuth begins. Only a
-     * positive MechaPwn fingerprint + DEX-mode signal is promoted here; a
-     * generic DEX-like MechaCon remains a diagnostic candidate, not policy. */
-    if ((entry->flags & FMCB_FILE_CEX_ONLY) && plan->compact_unlock_active)
+    if ((entry->flags & FMCB_FILE_CEX_ONLY) &&
+        !plan->compatibility.include_cex_only_payloads)
         return 0;
     return 1;
 }
@@ -171,10 +166,13 @@ void FmcbBuildInstallPlan(int target_port, const MciConsoleProfile *console,
     }
     ResolveOsdName(plan->rom_version, plan->destination_osd);
 
+    FmcbCompatibilityEvaluate(&plan->console, &plan->compatibility);
     plan->compact_unlock_active =
-        plan->console.rom_is_dex || plan->console.mechapwn_dex_mode;
+        !plan->compatibility.include_cex_only_payloads;
     plan->compact_unlock_candidate =
-        plan->console.compact_region_safe && !plan->compact_unlock_active;
+        plan->console.compact_region_safe && !plan->compact_unlock_active &&
+        plan->compatibility.profile_kind ==
+            FMCB_COMPAT_PROFILE_UNQUALIFIED_DEX_LIKE;
 
     for (i = 0; i < FmcbPackageEntryCount(); i++) {
         const FmcbPackageEntry *entry = &CrossRegionInstallManifest[i];
@@ -385,7 +383,7 @@ static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *repor
         snprintf(full_path, sizeof(full_path), "%s/%s", root, relative);
 
         snprintf(detail, sizeof(detail), "Checking %s (%s%s).", relative,
-                 file->selected ? "selected" : "omitted for DEX/MechaPwn DEX mode",
+                 file->selected ? "selected" : "omitted by compatibility policy",
                  (entry->flags & FMCB_FILE_REQUIRED) ? ", required" : "");
         MciProgressUpdate(MCI_PROGRESS_FMCB, percent,
                           "Scanning the package manifest", detail);
@@ -414,14 +412,15 @@ static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *repor
     report->status = report->plan.package_complete ? FMCB_PACKAGE_READY
                                                     : FMCB_PACKAGE_INCOMPLETE;
     snprintf(detail, sizeof(detail),
-             "Found %d/%d required; cross-region I/A/E/C, active target %s/%s. ROM %04X %c, Mecha %u.%02u, NVM sig=%s, policy: %s.",
+             "Found %d/%d required; cross-region I/A/E/C, active target %s/%s. ROM %04X %c, Mecha %u.%02u, NVM sig=%s, compat=%s, boot=%s.",
              report->found_required, report->plan.required_files,
              report->plan.destination_system, report->plan.destination_osd,
              report->plan.rom_version, report->plan.romver_region,
              report->plan.console.mecha_major,
              report->plan.console.mecha_minor,
              report->plan.console.mechapwn_signature ? "MechaPwn" : "none",
-             MciConsoleRegionPolicyText(&report->plan.console));
+             FmcbCompatibilityProfileText(report->plan.compatibility.profile_kind),
+             FmcbNativeBootStateText(report->plan.compatibility.native_boot));
     MciProgressUpdate(MCI_PROGRESS_FMCB, 100,
                       "FMCB package preflight complete", detail);
     return report->plan.package_complete ? 0 : -1;
