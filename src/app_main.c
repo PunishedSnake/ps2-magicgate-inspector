@@ -21,6 +21,7 @@
 #include <libmc.h>
 #include <libpad.h>
 #include <libsecr.h>
+#include <fileXio_rpc.h>
 #include <debug.h>
 #include <sbv_patches.h>
 #include <malloc.h>
@@ -34,6 +35,7 @@
 #include "card_raw_session.h"
 #include "diag_log.h"
 #include "magicgate.h"
+#include "kelf_cache.h"
 #include "fmcb_install.h"
 #include "fmcb_transaction.h"
 #include "fmcb_recovery.h"
@@ -313,7 +315,6 @@ static int BindKelfForInstaller(int target_port, unsigned char *buffer,
     int rc;
     int restore_rc;
 
-    (void)userdata;
     MagicGateResetReport(&scratch, target_port);
     MciProgressUpdate(MCI_PROGRESS_FMCB, 35,
                       "Entering the KELF binding personality",
@@ -339,6 +340,9 @@ static int BindKelfForInstaller(int target_port, unsigned char *buffer,
     restore_rc = RestoreNormalEnvironment();
     if (restore_rc >= 0 && !FmcbMassStatus.available)
         restore_rc = -4720;
+    scratch.restore_rc = restore_rc;
+    if (userdata != NULL)
+        *(MagicGateReport *)userdata = scratch;
     if (restore_rc < 0) {
         MciDiagLogPrintf("FMCB-BIND",
                          "normal environment restored without usable mass backend rc=%d available=%d",
@@ -350,6 +354,128 @@ static int BindKelfForInstaller(int target_port, unsigned char *buffer,
     }
     if (rc < 0)
         return rc;
+    return 0;
+}
+
+/*
+ * Qualify every DISTINCT KELF source selected by the compatibility policy
+ * before FmcbRecoveryBegin() or any destination mutation. Static compatibility
+ * rules choose candidates; real hardware gets the final vote.
+ *
+ * Multiple regional destinations sourced from SYSTEM/FMCB.XLF intentionally
+ * collapse to one probe. This is correctness-first and deliberately slower
+ * than a later bound-blob cache optimization.
+ */
+static int PreflightSelectedKelfSources(int target_port,
+                                        const FmcbPackageReport *package,
+                                        char *reason,
+                                        unsigned int reason_size)
+{
+    int i;
+    int probed = 0;
+
+    if (package == NULL || package->status != FMCB_PACKAGE_READY) {
+        snprintf(reason, reason_size,
+                 "FMCB package is not READY for KELF compatibility preflight.");
+        return -4730;
+    }
+
+    fileXioSetBlockMode(FXIO_WAIT);
+
+    for (i = 0; i < package->entry_count &&
+                i < FMCB_MAX_PACKAGE_ENTRIES; i++) {
+        const FmcbPackageFileStatus *file = &package->files[i];
+        unsigned char *buffer = NULL;
+        unsigned int size = 0u;
+        int cache_hit = 0;
+        int duplicate = 0;
+        int j;
+        int rc;
+        char path[FMCB_SOURCE_ROOT_MAX + FMCB_PATH_MAX + 4];
+        char detail[256];
+        MagicGateReport *capture = NULL;
+
+        if (!file->selected || !(file->flags & FMCB_FILE_KELF))
+            continue;
+
+        for (j = 0; j < i; j++) {
+            const FmcbPackageFileStatus *prior = &package->files[j];
+            if (prior->selected && (prior->flags & FMCB_FILE_KELF) &&
+                strcmp(prior->relative_path, file->relative_path) == 0) {
+                duplicate = 1;
+                break;
+            }
+        }
+        if (duplicate)
+            continue;
+
+        if (!file->found || file->size == 0u) {
+            snprintf(reason, reason_size,
+                     "Selected KELF source is unavailable: %s.",
+                     file->relative_path);
+            return -4731;
+        }
+
+        if (snprintf(path, sizeof(path), "%s/%s",
+                     package->source_root, file->relative_path) >=
+            (int)sizeof(path)) {
+            snprintf(reason, reason_size,
+                     "Selected KELF source path is too long: %s.",
+                     file->relative_path);
+            return -4731;
+        }
+
+        snprintf(detail, sizeof(detail),
+                 "Qualifying %s on mc%d before any destination is changed.",
+                 file->relative_path, target_port);
+        MciProgressUpdate(MCI_PROGRESS_FMCB,
+                          90 + (probed < 8 ? probed : 8),
+                          "Preflighting selected KELF source", detail);
+
+        rc = MciKelfCacheClone(path, file->size, &buffer, &size, &cache_hit);
+        if (rc < 0 || buffer == NULL || size != file->size) {
+            if (buffer != NULL)
+                free(buffer);
+            snprintf(reason, reason_size,
+                     "Could not stage KELF %s for bind preflight (rc=%d).",
+                     file->relative_path, rc);
+            return rc < 0 ? rc : -4732;
+        }
+
+        /* The exact package FMCB.XLF result replaces the old redundant generic
+         * pre-install MagicGate probe in the dashboard report. */
+        if (strcmp(file->relative_path, "SYSTEM/FMCB.XLF") == 0)
+            capture = &MgReports[target_port];
+
+        MciDiagLogPrintf("FMCB-PREFLIGHT",
+                         "bind source=%s size=%u cache_hit=%d begin",
+                         file->relative_path, size, cache_hit);
+        rc = BindKelfForInstaller(target_port, buffer, size, capture);
+        free(buffer);
+
+        if (rc < 0) {
+            snprintf(reason, reason_size,
+                     "KELF compatibility preflight failed for %s (rc=%d). No memory-card destination was modified.",
+                     file->relative_path, rc);
+            MciDiagLogPrintf("FMCB-PREFLIGHT",
+                             "bind source=%s rc=%d FAIL before transaction",
+                             file->relative_path, rc);
+            return rc;
+        }
+
+        MciDiagLogPrintf("FMCB-PREFLIGHT",
+                         "bind source=%s rc=0 PASS", file->relative_path);
+        probed++;
+    }
+
+    if (probed == 0 && package->plan.magicgate_required) {
+        snprintf(reason, reason_size,
+                 "Install plan requires MagicGate but selected no probeable KELF source.");
+        return -4733;
+    }
+
+    MciDiagLogPrintf("FMCB-PREFLIGHT",
+                     "all distinct selected KELF sources PASS count=%d", probed);
     return 0;
 }
 
@@ -458,12 +584,10 @@ static int RevalidateInstallerPreconditions(int target_port, char *reason,
                  CardHealthText(Reports[target_port].health));
         return -1;
     }
-    if (RunMagicGateSession(target_port) < 0 ||
-        MgReports[target_port].result != MG_RESULT_PASS) {
-        snprintf(reason, reason_size, "MagicGate/CardAuth is not FUNCTIONAL (%s).",
-                 MagicGateResultText(MgReports[target_port].result));
+    if (PreflightSelectedKelfSources(target_port,
+                                     &FmcbReports[target_port],
+                                     reason, reason_size) < 0)
         return -2;
-    }
 
     return 0;
 }
@@ -476,7 +600,7 @@ static int RunVerifiedInstaller(int target_port)
     int rc;
 
     MciGuiRenderMessage("Revalidating before installation",
-                        "The selected card, hardware-validated MagicGate capability, active ROMVER/MechaCon policy and complete cross-region USB package are re-tested immediately before the first destination write.",
+                        "The card filesystem, active compatibility profile, package and every distinct selected KELF source are re-tested on real hardware before the recovery journal or first destination write.",
                         NULL, MCI_GUI_TONE_WARNING);
     rc = RevalidateInstallerPreconditions(target_port, reason, sizeof(reason));
     if (rc < 0) {
