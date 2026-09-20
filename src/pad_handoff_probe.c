@@ -9,6 +9,7 @@
 
 #include <tamtypes.h>
 #include <kernel.h>
+#include <delaythread.h>
 #include <sifrpc.h>
 #include <libpad.h>
 #include <debug.h>
