@@ -766,9 +766,9 @@ int main(int argc, char *argv[])
                     char message[640];
 
                     if (plan->compact_unlock_active)
-                        compact = "Real DEX profile: compact reference manifest ACTIVE; ENDVDPL is omitted.";
+                        compact = "DEX/MechaPwn DEX profile: compact reference manifest ACTIVE; CEX-only ENDVDPL is omitted.";
                     else if (plan->compact_unlock_candidate)
-                        compact = "DEX-like/region-unlocked MechaCon detected: compact manifest candidate found, but the CEX payload is retained until hardware validation proves ENDVDPL can be omitted safely.";
+                        compact = "Unqualified DEX-like/region-unlocked MechaCon: CEX payload retained until this exact profile is proven on real hardware.";
                     else
                         compact = "Retail region policy: normal CEX manifest.";
 
