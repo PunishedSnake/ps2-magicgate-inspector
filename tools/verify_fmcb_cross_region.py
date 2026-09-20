@@ -90,6 +90,8 @@ assert "FmcbInstallNormalTransactional" not in tx_c
 assert "FmcbInstallNormalTransactional" not in app_c
 assert "MagicGateBindPrepared" in app_c
 assert "SecrDownloadFile(target_port" not in app_c
+assert "Automatic rollback completed and the card was restored" in app_c
+assert "Recovery state is still present; do not start another install" in app_c
 assert "!FmcbMassStatus.available" in app_c
 assert "MciUsbWaitForStorage(24u, 50000u)" in install_c
 
