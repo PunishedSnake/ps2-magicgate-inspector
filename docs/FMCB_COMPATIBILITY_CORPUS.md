@@ -265,6 +265,41 @@ They are not a reason to copy the old low-level MCID implementation into the
 current installer. The current project uses the hardware-qualified SECR path and
 stage diagnostics instead.
 
+## Third-party MagicGate card qualification
+
+**POTWIERDZONE, real hardware, 2026-09-20:** a non-Sony PlayStation 2 memory
+card with functional MagicGate support successfully completed the current
+cross-region FMCB installation after the compatibility fixes and subsequently
+booted FMCB correctly on real hardware.
+
+Observed implications:
+
+- the card passed the project's MagicGate/CardAuth path;
+- the selected FMCB KELFs could be bound successfully under the corrected
+  compatibility policy;
+- the transaction completed instead of failing on the previously selected
+  incompatible ENDVDPL class;
+- the resulting card was not merely writable: the installed FMCB was actually
+  accepted by the console's OSDSYS boot path and launched.
+
+**INFERENCJA:** Sony branding, nominal capacity and "third-party" status are not
+valid primary compatibility predicates. A non-original card can be fully usable
+for native FMCB when its controller implements the required MagicGate behavior
+correctly.
+
+**CURRENT PROJECT POLICY:** never reject a card solely because it is third-party
+or non-Sony. Qualification is behavioral:
+
+1. PS2 card/filesystem checks;
+2. MagicGate/CardAuth;
+3. bind-preflight of every distinct selected KELF source;
+4. verified transactional writes;
+5. real boot validation when establishing a new compatibility class.
+
+This result is deliberately not generalized to all clone cards. Older FMCB
+history documents clone-specific MCID failures, so cards that only partially
+implement MagicGate remain a separate failure class.
+
 ## Multi-install filesystem exception
 
 **HISTORYCZNE/CURRENT reference behavior:** classic Multi Install saves space by
@@ -365,7 +400,7 @@ created, replaced or deleted.
 | Early Japan <=1.20 | retain special BI update + HDD-support payloads | probe selected early-Japan KELFs | reference-source confirmed |
 | PSX/DESR | separate X* manifest + twin-sign required | future dedicated qualification | classified, not yet enabled |
 | Unknown modchip | no chip-name rule | selected-KELF preflight | behavior-driven |
-| Third-party/clone MC | no brand-name rule | filesystem + actual MagicGate/KELF probe | behavior-driven |
+| Third-party/clone MC | no brand-name rule | filesystem + actual MagicGate/KELF probe | at least one non-Sony MagicGate card confirmed install + boot on real hardware; other controllers remain behavior-driven |
 | Classic Multi Install | never generate crosslinks | n/a | intentionally unsupported |
 
 ## Open hardware matrix
