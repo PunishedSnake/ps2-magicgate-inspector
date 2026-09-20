@@ -1,23 +1,52 @@
 .DEFAULT_GOAL := MC_INSPECTOR.ELF
 
 EE_BIN = MC_INSPECTOR.ELF
-EE_OBJS = src/app_main_v2.o src/gui_v2.o src/gui_message_compat.o src/progress.o src/diag_log.o src/diag_wrap.o src/raw_bulk_read.o src/card_math.o src/image_read_ahead.o src/image_write_behind.o src/image_quick_verify.o src/mass_sync_compat.o src/card_hot_swap.o src/card_hot_swap_wrap.o src/force_format_vmc.o src/save_transfer.o src/save_transfer_psu.o src/save_title.o src/image_save_title.o src/image_browser_titles.o src/usb_file_picker.o src/usb_file_picker_ui.o src/card_save_picker.o src/card_image_picker.o src/card.o src/magicgate.o src/fmcb_install.o \
+EE_OBJS = src/app_main_v2.o src/gui_v2.o src/gui_message_compat.o src/progress.o src/diag_log.o src/diag_wrap.o src/raw_bulk_read.o src/r5900_memops.o src/card_math.o src/image_read_ahead.o src/image_write_behind.o src/image_quick_verify.o src/mass_sync_compat.o src/card_hot_swap.o src/card_hot_swap_wrap.o src/force_format_vmc.o src/save_transfer.o src/save_transfer_psu.o src/save_title.o src/image_save_title.o src/image_browser_titles.o src/usb_file_picker.o src/usb_file_picker_ui.o src/card_save_picker.o src/card_image_picker.o src/card.o src/magicgate.o src/fmcb_install.o \
 	src/usb_search.o src/fmcb_transaction.o src/fmcb_recovery.o src/fmcb_recovery_marker.o src/console_profile.o src/fmcb_compat.o \
 	src/magicgate_session.o src/magicgate_diag.o src/video_mode.o src/ui_layout.o src/settings.o \
 	src/kelf_cache.o src/card_raw_session.o src/card_image.o src/card_image_fs.o
 EE_LIBS = -ldebug -ldraw -lgraph -lpacket -ldma -lpad -lmc -lfileXio -lcdvd -lsecr \
 	-lioprpgen -liopreboot -lpatches -lkernel
 EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections \
-	-DMG_SECR_PROFILE_PS2SDK14=1 -DMCI_BASIC_BUILD=1
+	-DMG_SECR_PROFILE_PS2SDK14=1
 
 # Stable 0.4.0 release policy:
-# - no synthetic R5900 benchmark instrumentation;
-# - no async/NOWAIT transport experiments;
-# - no build-time batch-size A/B variants;
-# - no target-specific -mtune specialization.
+# - keep the hardware-qualified P0 production paths;
+# - keep transport synchronous and single-owner;
+# - no USB speed-test matrix, async candidates or Performance Lab;
+# - no synthetic R5900 benchmark instrumentation in the public release.
 #
-# The functional streaming modules keep their conservative synchronous source
-# defaults. MCI_BASIC_BUILD also forces MciFastCopy() back to libc memcpy.
+# Production P0 batch sizes are fixed here rather than exposed as release
+# variants. They can still be changed on research branches for hardware A/B.
+RAW_BULK_PAGES := 16
+IMAGE_READ_PAGES := 32
+IMAGE_WRITE_PAGES := 32
+
+src/raw_bulk_read.o: EE_CFLAGS += \
+	-DMCI_ENABLE_R5900_BENCH=0 \
+	-DMCI_RAW_BULK_PAGES=$(RAW_BULK_PAGES) \
+	-DMCI_RAW_BULK_ASYNC=0
+
+src/image_read_ahead.o: EE_CFLAGS += \
+	-DMCI_IMAGE_READ_AHEAD_PAGES=$(IMAGE_READ_PAGES) \
+	-DMCI_IMAGE_READ_AHEAD_ASYNC=0
+
+src/image_write_behind.o: EE_CFLAGS += \
+	-DMCI_IMAGE_READ_AHEAD_ASYNC=0 \
+	-DMCI_IMAGE_WRITE_PAGES=$(IMAGE_WRITE_PAGES) \
+	-DMCI_IMAGE_WRITE_ASYNC=0
+
+# P0 R5900 tuning remains on the measured hot objects. The release keeps -O2
+# globally to avoid I-cache growth from broad -O3/inlining.
+R5900_HOT_OBJS = \
+	src/raw_bulk_read.o \
+	src/card_math.o \
+	src/image_read_ahead.o \
+	src/image_write_behind.o \
+	src/image_quick_verify.o \
+	src/card_image.o
+
+$(R5900_HOT_OBJS): EE_CFLAGS += -mtune=r5900
 # These two v2 composition sources intentionally call low-level fileXio/newlib
 # side by side. Existing backend sources already opt in locally, so keep this
 # target-scoped instead of redefining NEWLIB_PORT_AWARE across the whole build.
