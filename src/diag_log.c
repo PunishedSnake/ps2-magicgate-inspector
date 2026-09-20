@@ -405,8 +405,8 @@ void MciDiagLogSetMassWritePaused(int paused)
     if (paused) {
         if (MassWritePauseDepth == 0u) {
             /* Acquire ownership BEFORE recording the marker. The old code used
-             * MciDiagLogPrintf() here, which performed a real DREBIN.LOG append
-             * immediately before the supposedly protected mass: operation. */
+             * the durable printf path here, which performed a real DREBIN.LOG
+             * append immediately before the supposedly protected mass: operation. */
             MassWritePauseDepth = 1u;
             MciDiagLogTracePrintf(
                 "LOGGER",
