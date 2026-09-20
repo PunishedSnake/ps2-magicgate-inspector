@@ -614,7 +614,8 @@ int main(int argc, char *argv[])
     ResetSlotReports(0);
     ResetSlotReports(1);
     fmcb_rc = FmcbInitMassBackend(&FmcbMassStatus);
-    (void)fmcb_rc;
+    if (fmcb_rc >= 0)
+        (void)LoadSavedSettingsAfterMass(&last_video_rc);
     (void)RefreshRecoveryStatus();
     if (RecoveryStatus.present)
         page = MCI_GUI_FMCB;
@@ -729,6 +730,32 @@ int main(int argc, char *argv[])
                 } else {
                     RunSelectedPageTest(selected, page);
                 }
+                dirty = 1;
+            }
+
+            if ((pressed & PAD_SQUARE) && page == MCI_GUI_SETTINGS) {
+                char config_path[MCI_SETTINGS_CONFIG_PATH_MAX];
+                char message[320];
+                int save_rc;
+
+                config_path[0] = '\0';
+                save_rc = SaveCurrentSettings(config_path, sizeof(config_path));
+                if (save_rc == 0) {
+                    snprintf(message, sizeof(message),
+                             "Settings saved to:\n%s\n\nThey will be loaded automatically on the next boot. The display mode is applied after USB initialization so Native remains the safe startup fallback.",
+                             config_path);
+                    MciGuiRenderMessage("SETTINGS SAVED", message,
+                                        "CROSS or CIRCLE returns to Settings.",
+                                        MCI_GUI_TONE_SUCCESS);
+                } else {
+                    snprintf(message, sizeof(message),
+                             "Could not save MCINSPECTOR.CFG to USB (rc=%d). Current in-memory settings are unchanged.",
+                             save_rc);
+                    MciGuiRenderMessage("SETTINGS SAVE FAILED", message,
+                                        "CROSS or CIRCLE returns to Settings.",
+                                        MCI_GUI_TONE_DANGER);
+                }
+                install_result_modal = 1;
                 dirty = 1;
             }
 
