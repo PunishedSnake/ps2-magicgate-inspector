@@ -78,6 +78,9 @@ assert 'snprintf(plan->system_dirs[0]' in install_c and '"BIEXEC-SYSTEM"' in ins
 assert 'snprintf(plan->system_dirs[1]' in install_c and '"BEEXEC-SYSTEM"' in install_c
 assert 'snprintf(plan->system_dirs[2]' in install_c and '"BAEXEC-SYSTEM"' in install_c
 assert 'snprintf(plan->system_dirs[3]' in install_c and '"BCEXEC-SYSTEM"' in install_c
+assert "plan->console.rom_is_dex || plan->console.mechapwn_dex_mode" in install_c
+assert "(entry->flags & FMCB_FILE_CEX_ONLY) && plan->compact_unlock_active" in install_c
+assert "omitted for DEX/MechaPwn DEX mode" in install_c
 
 assert "FmcbInstallCrossRegionTransactional" in tx_h
 assert "FmcbInstallCrossRegionTransactional" in tx_c
@@ -212,6 +215,10 @@ set_io_text = set_io.group(0)
 assert "MassWritePauseDepth != 0u" in set_io_text, (
     "logger attach must be deferred while another subsystem owns mass:"
 )
+assert "#define DIAG_PENDING_LINES 512u" in diag_log_c
+assert "PendingHash[DIAG_PENDING_LINES]" in diag_log_c
+assert "RAM ring corruption at slot=" in diag_log_c
+assert "__attribute__((aligned(64)))" in diag_log_c
 assert set_io_text.index("MassWritePauseDepth != 0u") < set_io_text.index("for (attempt = 0u"), (
     "ownership check must happen before EnsurePath retry loop"
 )
