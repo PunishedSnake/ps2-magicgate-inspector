@@ -62,6 +62,10 @@ jobs:
         shell: bash
         run: python3 tools/verify_fmcb_cross_region.py
 
+      - name: Verify Settings config invariants
+        shell: bash
+        run: python3 tools/verify_settings_config.py
+
       - name: Stage PS2SDK 2.0 security and card personalities
         shell: bash
         run: |
