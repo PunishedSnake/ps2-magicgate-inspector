@@ -1,39 +1,13 @@
-name: Build PS2 Memory Card Inspector
+name: Build PS2 Memory Card Inspector 0.4.0
 
 on:
   workflow_dispatch:
   pull_request:
-    branches:
-      - main
-      - feat/0.4.0
-    paths:
-      - 'src/**'
-      - 'tools/**'
-      - 'docs/**'
-      - 'Makefile'
-      - '.github/workflows/build.yml'
-      - 'LICENSE'
-      - 'CREDITS.md'
-      - 'THIRD_PARTY_NOTICES.md'
-      - 'licenses/**'
+    branches: [main]
   push:
     branches:
       - main
-      - feat/0.4.0
-      - feat/0.4.0-dev3-drebin
-      - feat/0.4.0-dev4-drebin-browser
-      - feat/0.4.0-dev4-save-transfer-picker-impl4
-      - feat/p0-fmcb-cross-region
-    paths:
-      - 'src/**'
-      - 'tools/**'
-      - 'docs/**'
-      - 'Makefile'
-      - '.github/workflows/build.yml'
-      - 'LICENSE'
-      - 'CREDITS.md'
-      - 'THIRD_PARTY_NOTICES.md'
-      - 'licenses/**'
+      - release/0.4.0-drebin
 
 permissions:
   contents: read
@@ -44,27 +18,22 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Verify host Docker
-        shell: bash
         run: docker --version
 
-      - name: Verify card-math optimization equivalence
+      - name: Verify source invariants
         shell: bash
-        run: python3 tools/verify_card_math.py
-
-      - name: Verify FMCB cross-region integration invariants
-        shell: bash
-        run: python3 tools/verify_fmcb_cross_region.py
-
-      - name: Verify Settings config invariants
-        shell: bash
-        run: python3 tools/verify_settings_config.py
+        run: |
+          set -euo pipefail
+          python3 tools/verify_card_math.py
+          python3 tools/verify_fmcb_cross_region.py
+          python3 tools/verify_settings_config.py
 
       - name: Stage PS2SDK 2.0 security and card personalities
         shell: bash
@@ -96,190 +65,68 @@ jobs:
               PS2SDKSRC=/tmp/ps2sdk-src make -C /tmp/ps2sdk-src/iop/memorycard/mcserv all MCMAN_BUILDING_XMCSERV=0; \
               cp /tmp/ps2sdk-src/iop/memorycard/mcman/irx/mcman.irx /work/.build/ps2sdk2-raw/mcman.irx; \
               cp /tmp/ps2sdk-src/iop/memorycard/mcserv/irx/mcserv.irx /work/.build/ps2sdk2-raw/mcserv.irx'
-          echo 'Normal MagicGate/X-style modules:'
-          sha256sum .build/ps2sdk2-mg/*.irx
-          echo 'Security modules:'
-          sha256sum .build/ps2sdk2-secr14/*.irx
-          echo 'Legacy raw-page modules:'
-          sha256sum .build/ps2sdk2-raw/*.irx
 
-      - name: Build production ELF in PS2DEV v2.0.0
+      - name: Build production ELF
         shell: bash
         run: |
           set -euo pipefail
-          docker pull ps2dev/ps2dev:v2.0.0
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/work" \
             -w /work \
             ps2dev/ps2dev:v2.0.0 \
-            sh -c 'set -eu; \
-              apk add --no-cache build-base >/dev/null; \
-              mips64r5900el-ps2-elf-gcc --version; \
-              echo "R5900 target options:"; \
-              mips64r5900el-ps2-elf-gcc -Q --help=target -c -x c /dev/null -o /tmp/r5900-target-probe.o 2>/dev/null | grep -E "march=|mtune=|mfix-r5900" || true; \
-              make R5900_BENCH=0 RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 IMAGE_READ_PAGES=32 IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0'
+            sh -c 'set -eu; apk add --no-cache build-base >/dev/null; make clean; make MC_INSPECTOR.ELF'
 
-      - name: Build P0 transport hardware A-B matrix
+      - name: Verify production profile
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p artifacts .build/p0-ab
-          cp MC_INSPECTOR.ELF .build/p0-ab/MC_INSPECTOR-production.ELF
-          docker run --rm \
-            -v "$GITHUB_WORKSPACE:/work" \
-            -w /work \
-            ps2dev/ps2dev:v2.0.0 \
-            sh -c 'set -eu; \
-              apk add --no-cache build-base >/dev/null; \
-              build_variant() { \
-                name="$1"; raw_pages="$2"; raw_async="$3"; read_pages="$4"; write_pages="$5"; write_async="$6"; \
-                rm -f src/raw_bulk_read.o src/image_read_ahead.o src/image_write_behind.o MC_INSPECTOR.ELF; \
-                make R5900_BENCH=0 RAW_BULK_PAGES="$raw_pages" RAW_BULK_ASYNC="$raw_async" IMAGE_READ_PAGES="$read_pages" IMAGE_WRITE_PAGES="$write_pages" IMAGE_WRITE_ASYNC="$write_async" MC_INSPECTOR.ELF; \
-                cp MC_INSPECTOR.ELF "artifacts/$name"; \
-              }; \
-              build_variant MC_INSPECTOR-p0-raw-sync4.ELF 4 0 32 32 0; \
-              build_variant MC_INSPECTOR-p0-raw-sync8.ELF 8 0 32 32 0; \
-              build_variant MC_INSPECTOR-p0-raw-async8.ELF 8 1 32 32 0; \
-              build_variant MC_INSPECTOR-p0-raw-async16.ELF 16 1 32 32 0; \
-              build_variant MC_INSPECTOR-p0-read-sync16.ELF 16 0 16 32 0; \
-              build_variant MC_INSPECTOR-p0-read-sync64.ELF 16 0 64 32 0; \
-              build_variant MC_INSPECTOR-p0-usb-sync16.ELF 16 0 32 16 0; \
-              build_variant MC_INSPECTOR-p0-usb-sync64.ELF 16 0 32 64 0; \
-              build_variant MC_INSPECTOR-p0-usb-async32.ELF 16 0 32 32 1; \
-              build_variant MC_INSPECTOR-p0-usb-async64.ELF 16 0 32 64 1; \
-              rm -f src/raw_bulk_read.o src/image_read_ahead.o src/image_write_behind.o MC_INSPECTOR.ELF; \
-              make R5900_BENCH=0 RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 IMAGE_READ_PAGES=32 IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0 MC_INSPECTOR.ELF; \
-              cmp -s MC_INSPECTOR.ELF .build/p0-ab/MC_INSPECTOR-production.ELF'
-          cat > artifacts/P0_TRANSPORT_AB_README.txt <<'EOF'
-          P0 transport hardware A/B matrix
+          grep -q -- '-mtune=r5900' Makefile
+          grep -q 'DMCI_RAW_BULK_ASYNC=0' Makefile
+          grep -q 'DMCI_IMAGE_READ_AHEAD_ASYNC=0' Makefile
+          grep -q 'DMCI_IMAGE_WRITE_ASYNC=0' Makefile
+          ! grep -q 'src/r5900_bench.o' Makefile
+          ! grep -q 'src/r5900_perf.o' Makefile
 
-          Production baseline:
-            MC_INSPECTOR.ELF
-            raw bulk: 16 pages, synchronous
-            verification read-ahead: 32 pages, synchronous
-            USB write-behind: 32 records, synchronous
-
-          Raw/SIF candidates, USB read/write held at production settings:
-            MC_INSPECTOR-p0-raw-sync4.ELF
-            MC_INSPECTOR-p0-raw-sync8.ELF
-            MC_INSPECTOR-p0-raw-async8.ELF
-            MC_INSPECTOR-p0-raw-async16.ELF
-
-          Verification/readback candidates, raw and output held at production:
-            MC_INSPECTOR-p0-read-sync16.ELF
-            MC_INSPECTOR-p0-read-sync64.ELF
-
-          USB output candidates, raw/readback held at production settings:
-            MC_INSPECTOR-p0-usb-sync16.ELF
-            MC_INSPECTOR-p0-usb-sync64.ELF
-            MC_INSPECTOR-p0-usb-async32.ELF
-            MC_INSPECTOR-p0-usb-async64.ELF
-
-          Use the same physical console, card, USB device, image format and workload.
-          Require identical logical CRC / verification result before comparing time.
-          Compare RAW-PERF setup/active/total, RAW-BULK-PERF p50/p95/p99/max and
-          async ready/wait counts, plus IMAGE-IO read/write calls/bytes/ticks/tails.
-          Production stays synchronous until a candidate wins on real hardware without
-          correctness regressions. Analyze logs with tools/analyze_drebin_perf.py.
-          EOF
-
-      - name: Analyze R5900 hot path and compiler variants
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts
-          docker run --rm \
-            -v "$GITHUB_WORKSPACE:/work" \
-            -w /work \
-            ps2dev/ps2dev:v2.0.0 \
-            sh tools/r5900_static_report.sh artifacts/R5900_STATIC_REPORT.txt
-          echo 'R5900 report summary:'
-          grep -E '^(Compiler:|Target:|Final ELF|card_math compiler|[[:space:]]*text)' artifacts/R5900_STATIC_REPORT.txt || true
-
-      - name: Build explicit R5900 Performance Lab A-B candidates
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p .build/r5900-ab artifacts
-          cp MC_INSPECTOR.ELF .build/r5900-ab/MC_INSPECTOR-production.ELF
-          docker run --rm \
-            -v "$GITHUB_WORKSPACE:/work" \
-            -w /work \
-            ps2dev/ps2dev:v2.0.0 \
-            sh -c 'set -eu; \
-              apk add --no-cache build-base >/dev/null; \
-              rm -f src/raw_bulk_read.o src/image_read_ahead.o src/image_write_behind.o MC_INSPECTOR.ELF; \
-              make R5900_BENCH=1 RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 IMAGE_READ_PAGES=32 IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0 MC_INSPECTOR.ELF; \
-              cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-perflab-O2.ELF; \
-              mips64r5900el-ps2-elf-gcc \
-                -D_EE -G0 -O2 -Wall -gdwarf-2 -gz \
-                -O3 -G0 -Wall -Wextra -std=gnu99 \
-                -fdata-sections -ffunction-sections \
-                -DMG_SECR_PROFILE_PS2SDK14=1 -mtune=r5900 \
-                -I/usr/local/ps2dev/ps2sdk/ee/include \
-                -I/usr/local/ps2dev/ps2sdk/common/include -I. \
-                -c src/card_math.c -o src/card_math.o; \
-              rm -f MC_INSPECTOR.ELF; \
-              make R5900_BENCH=1 RAW_BULK_PAGES=16 RAW_BULK_ASYNC=0 IMAGE_READ_PAGES=32 IMAGE_WRITE_PAGES=32 IMAGE_WRITE_ASYNC=0 MC_INSPECTOR.ELF; \
-              cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-perflab-cardmath-O3.ELF; \
-              cp .build/r5900-ab/MC_INSPECTOR-production.ELF MC_INSPECTOR.ELF'
-          {
-            echo 'R5900 Performance Lab hardware A/B candidates'
-            echo 'Production: MC_INSPECTOR.ELF has no synthetic CPU benchmark in the normal imaging path.'
-            echo 'Candidate A: MC_INSPECTOR-perflab-O2.ELF enables R5900-PERF with the normal O2 card_math policy.'
-            echo 'Candidate B: MC_INSPECTOR-perflab-cardmath-O3.ELF enables the same benchmark and changes only card_math.c to -O3 -mtune=r5900.'
-            echo 'Compare R5900-PERF and R5900-COPY-AB on the same real console/workload and require identical result hash plus normal image correctness.'
-          } > artifacts/R5900_AB_README.txt
-
-      - name: Assemble development artifact
+      - name: Assemble release artifact
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p artifacts/licenses
-          cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR.ELF
+          cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-0.4.0-Drebin.ELF
+          cp README.md artifacts/README.md
+          cp RELEASE_NOTES.md artifacts/RELEASE_NOTES.md
           cp LICENSE artifacts/LICENSE
           cp CREDITS.md artifacts/CREDITS.md
           cp THIRD_PARTY_NOTICES.md artifacts/THIRD_PARTY_NOTICES.md
-          cp README.md artifacts/README.md
           cp licenses/PS2SDK-AFL-2.0.txt artifacts/licenses/PS2SDK-AFL-2.0.txt
-          cp tools/analyze_drebin_perf.py artifacts/analyze_drebin_perf.py
           {
-            echo "PS2 Memory Card Inspector 0.4.0-dev4 - Drebin"
+            echo "PS2 Memory Card Inspector 0.4.0 - Drebin"
             echo "Project revision: $GITHUB_SHA"
-            echo "Frontend: configurable Native / 480p / 576p / 720p / 1080i GS dashboard"
-            echo "Card Tools: PCSX2 .ps2 and OPL .vmc imaging plus filesystem-aware browser/selective restore"
-            echo "Raw page backend: dedicated legacy PS2SDK MCMAN/MCSERV built with XMC compatibility disabled"
-            echo "Raw port contract: MCSERV preserves logical mc0/mc1 ports 0/1; MCMAN owns the final physical SIO2 channel 2/3 mapping"
-            echo "Production raw acquisition: private 16-page/8192-byte synchronous MCSERV bulk-read RPC with legacy mcReadPage fallback and telemetry"
-            echo "Production image verification: 32-page synchronous sequential fileXio read-ahead"
-            echo "Production USB image output: 32-record synchronous write-behind; P0 A/B artifacts exercise bounded raw NOWAIT, read batch and fileXio NOWAIT variants"
-            echo "EE stream copy: native R5900 LQ/SQ qword path for aligned image buffers with memcpy fallback"
-            echo "Production profiling: real image operations record SIF/USB batching and wait-time telemetry without running a synthetic CPU benchmark"
-            echo "Performance Lab: separate O2 and card_math-O3 ELFs enable the bounded R5900 PCCR/PCR copy/CRC32/ECC benchmark"
-            echo "Compiler audit: R5900_STATIC_REPORT.txt records target flags, optimizer switches, sizes and hot-path disassembly"
-            echo "Normal card restore fix: XMC mcInit re-primes card detection after temporary IOP personalities"
-            echo "Selective restore: source geometry is never copied; saves are streamed through PS2 filesystem/FAT parsing into the destination card"
-            echo "MagicGate: immutable raw FMCB.XLF cache in EE RAM with disposable per-bind clones"
-            echo "Installer: protected-target inventory fallback, configurable read-back policy and persistent USB recovery journal"
-            echo "Region policy: ROMVER + read-only MechaCon/MechaPwn profiling; unsafe Deckard CEX one-region installs are blocked"
-            echo "PS2SDK source: https://github.com/ps2dev/ps2sdk/commit/$PS2SDK_SECURITY_COMMIT"
-            echo "SECRMAN: PS2SDK 2.0 module version 1.4, instrumented by tools/patch_secrman14_diag.py"
-            echo "Raw MCSERV: patched reproducibly by tools/patch_raw_mcserv_ports.py"
+            echo "Build profile: P0 production"
+            echo "Optimization baseline: -O2 -G0"
+            echo "R5900 tuning: -mtune=r5900 on measured hot objects"
+            echo "USB/image transport: synchronous production batching"
+            echo "USB speed-test variants: not built"
+            echo "Performance Lab: not built"
+            echo "Compiler: PS2DEV / PS2SDK 2.0.0 container"
+            echo "PS2SDK security source: https://github.com/ps2dev/ps2sdk/commit/$PS2SDK_SECURITY_COMMIT"
           } > artifacts/SOURCE_PROVENANCE.txt
+          sha256sum artifacts/MC_INSPECTOR-0.4.0-Drebin.ELF > artifacts/SHA256SUMS.txt
 
-      - name: Verify output
+      - name: Verify artifact
         shell: bash
         run: |
           set -euo pipefail
-          file artifacts/MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-perflab-O2.ELF artifacts/MC_INSPECTOR-perflab-cardmath-O3.ELF artifacts/MC_INSPECTOR-p0-*.ELF
-          python3 -m py_compile artifacts/analyze_drebin_perf.py
-          ls -lh artifacts/MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-perflab-O2.ELF artifacts/MC_INSPECTOR-perflab-cardmath-O3.ELF artifacts/MC_INSPECTOR-p0-*.ELF artifacts/R5900_STATIC_REPORT.txt
-          sha256sum artifacts/MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-perflab-O2.ELF artifacts/MC_INSPECTOR-perflab-cardmath-O3.ELF artifacts/MC_INSPECTOR-p0-*.ELF | tee artifacts/SHA256SUMS.txt
+          file artifacts/MC_INSPECTOR-0.4.0-Drebin.ELF
+          test ! -e artifacts/MC_INSPECTOR-perflab-O2.ELF
+          test ! -e artifacts/MC_INSPECTOR-p0-raw-sync4.ELF
+          grep -q 'Build profile: P0 production' artifacts/SOURCE_PROVENANCE.txt
+          cat artifacts/SHA256SUMS.txt
 
-      - name: Upload development build
+      - name: Upload release candidate
         uses: actions/upload-artifact@v4
         with:
-          name: PS2-Memory-Card-Inspector-0.4.0-dev4-Drebin-${{ github.sha }}
+          name: PS2-Memory-Card-Inspector-0.4.0-Drebin-${{ github.sha }}
           path: artifacts/
           if-no-files-found: error
           retention-days: 3
