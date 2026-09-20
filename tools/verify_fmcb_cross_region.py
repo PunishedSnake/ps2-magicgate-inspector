@@ -21,6 +21,8 @@ diag_c = (ROOT / "src/diag_wrap.c").read_text(encoding="utf-8")
 diag_log_c = (ROOT / "src/diag_log.c").read_text(encoding="utf-8")
 makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
 app_c = (ROOT / "src/app_main.c").read_text(encoding="utf-8")
+compat_c = (ROOT / "src/fmcb_compat.c").read_text(encoding="utf-8")
+compat_h = (ROOT / "src/fmcb_compat.h").read_text(encoding="utf-8")
 
 manifest_match = re.search(
     r"static const FmcbPackageEntry CrossRegionInstallManifest\[\] = \{(.*?)\n\};",
@@ -78,9 +80,17 @@ assert 'snprintf(plan->system_dirs[0]' in install_c and '"BIEXEC-SYSTEM"' in ins
 assert 'snprintf(plan->system_dirs[1]' in install_c and '"BEEXEC-SYSTEM"' in install_c
 assert 'snprintf(plan->system_dirs[2]' in install_c and '"BAEXEC-SYSTEM"' in install_c
 assert 'snprintf(plan->system_dirs[3]' in install_c and '"BCEXEC-SYSTEM"' in install_c
-assert "plan->console.rom_is_dex || plan->console.mechapwn_dex_mode" in install_c
-assert "(entry->flags & FMCB_FILE_CEX_ONLY) && plan->compact_unlock_active" in install_c
-assert "omitted for DEX/MechaPwn DEX mode" in install_c
+assert "FmcbCompatibilityEvaluate(&plan->console, &plan->compatibility)" in install_c
+assert "!plan->compatibility.include_cex_only_payloads" in install_c
+assert "omitted by compatibility policy" in install_c
+assert "FMCB_COMPAT_PROFILE_MECHAPWN_DEX" in compat_c
+assert "console->rom_is_dex" in compat_c
+assert "console->mechapwn_signature" in compat_c
+assert "console->mechapwn_dex_mode" in compat_c
+assert "console->rom_version >= 0x0230u" in compat_c
+assert "console->rom_version == 0x0180u || console->rom_version == 0x0210u" in compat_c
+assert "console->mg_folder_region == 'I' && console->rom_version <= 0x0120u" in compat_c
+assert "FMCB_COMPAT_PROFILE_PSX_DESR" in compat_h
 
 assert "FmcbInstallCrossRegionTransactional" in tx_h
 assert "FmcbInstallCrossRegionTransactional" in tx_c
@@ -90,6 +100,11 @@ assert "FmcbInstallNormalTransactional" not in tx_c
 assert "FmcbInstallNormalTransactional" not in app_c
 assert "MagicGateBindPrepared" in app_c
 assert "SecrDownloadFile(target_port" not in app_c
+assert "PreflightSelectedKelfSources" in app_c
+assert "KELF compatibility preflight failed for %s" in app_c
+assert "No memory-card destination was modified." in app_c
+assert "MciKelfCacheClone(path, file->size" in app_c
+assert "strcmp(prior->relative_path, file->relative_path) == 0" in app_c
 assert "Automatic rollback completed and the card was restored" in app_c
 assert "Recovery state is still present; do not start another install" in app_c
 assert "!FmcbMassStatus.available" in app_c
@@ -102,6 +117,12 @@ revalidate = re.search(
 )
 assert revalidate, "RevalidateInstallerPreconditions not found"
 revalidate_text = revalidate.group(0)
+assert "PreflightSelectedKelfSources" in revalidate_text, (
+    "installer revalidation must bind-probe every distinct selected KELF before transaction start"
+)
+assert "RunMagicGateSession" not in revalidate_text, (
+    "single FMCB.XLF probe must not stand in for full selected-KELF qualification"
+)
 assert revalidate_text.index("FmcbProbeMassPackage") < revalidate_text.index("RefreshRecoveryStatus"), (
     "package root must be resolved before recovery revalidation"
 )
@@ -195,6 +216,7 @@ for wrapper_name in (
 
 assert "--wrap=FmcbInstallCrossRegionTransactional" in makefile
 assert "--wrap=FmcbInstallNormalTransactional" not in makefile
+assert "src/fmcb_compat.o" in makefile
 
 ensure_path = re.search(
     r"static int EnsurePath\(void\).*?\n\}",
