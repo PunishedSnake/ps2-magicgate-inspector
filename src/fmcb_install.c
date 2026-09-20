@@ -107,7 +107,13 @@ int FmcbPackageEntrySelected(const FmcbInstallPlan *plan, int index)
 
     if (plan == NULL || entry == NULL)
         return 0;
-    if ((entry->flags & FMCB_FILE_CEX_ONLY) && plan->console.rom_is_dex)
+    /* Reference FMCB omits ENDVDPL from real DEX installs. Real-hardware
+     * qualification on SCPH-50000 MechaPwn DEX-like mode reproduced the same
+     * boundary: ordinary FMCB/OSDSYS KELFs bind, while the 128-byte ENDVDPL
+     * KELF is rejected at SECR DOWNLOAD HEADER before CardAuth begins. Only a
+     * positive MechaPwn fingerprint + DEX-mode signal is promoted here; a
+     * generic DEX-like MechaCon remains a diagnostic candidate, not policy. */
+    if ((entry->flags & FMCB_FILE_CEX_ONLY) && plan->compact_unlock_active)
         return 0;
     return 1;
 }
@@ -165,9 +171,10 @@ void FmcbBuildInstallPlan(int target_port, const MciConsoleProfile *console,
     }
     ResolveOsdName(plan->rom_version, plan->destination_osd);
 
-    plan->compact_unlock_candidate = plan->console.compact_region_safe &&
-                                     !plan->console.rom_is_dex;
-    plan->compact_unlock_active = plan->console.rom_is_dex;
+    plan->compact_unlock_active =
+        plan->console.rom_is_dex || plan->console.mechapwn_dex_mode;
+    plan->compact_unlock_candidate =
+        plan->console.compact_region_safe && !plan->compact_unlock_active;
 
     for (i = 0; i < FmcbPackageEntryCount(); i++) {
         const FmcbPackageEntry *entry = &CrossRegionInstallManifest[i];
@@ -378,7 +385,7 @@ static int ProbeRoot(const char *root, int target_port, FmcbPackageReport *repor
         snprintf(full_path, sizeof(full_path), "%s/%s", root, relative);
 
         snprintf(detail, sizeof(detail), "Checking %s (%s%s).", relative,
-                 file->selected ? "selected" : "omitted for real DEX",
+                 file->selected ? "selected" : "omitted for DEX/MechaPwn DEX mode",
                  (entry->flags & FMCB_FILE_REQUIRED) ? ", required" : "");
         MciProgressUpdate(MCI_PROGRESS_FMCB, percent,
                           "Scanning the package manifest", detail);
