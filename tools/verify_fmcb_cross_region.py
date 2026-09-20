@@ -105,6 +105,38 @@ assert "KELF compatibility preflight failed for %s" in app_c
 assert "No memory-card destination was modified." in app_c
 assert "MciKelfCacheClone(path, file->size" in app_c
 assert "strcmp(prior->relative_path, file->relative_path) == 0" in app_c
+assert "StorePreboundKelf" in app_c
+assert "ApplyPreboundKelfForInstaller" in app_c
+assert "reused prebound KELF" in app_c
+assert "temporary security IOP: PADMAN intentionally not loaded" in app_c
+assert "fmcb_freepad_irx" not in app_c
+run_installer = re.search(
+    r"static int RunVerifiedInstaller\(int target_port\).*?\n\}",
+    app_c,
+    re.S,
+)
+assert run_installer, "RunVerifiedInstaller not found"
+run_installer_text = run_installer.group(0)
+assert run_installer_text.index("MciDiagLogSetMassWritePaused(1)") < run_installer_text.index(
+    "RevalidateInstallerPreconditions"
+), "Drebin must be RAM-only before KELF revalidation can reboot the IOP"
+assert "ApplyPreboundKelfForInstaller, NULL" in run_installer_text, (
+    "transaction must consume the preflight-bound KELF instead of rebooting the security IOP"
+)
+assert "BindKelfForInstaller, NULL" not in run_installer_text
+transaction_pos = run_installer_text.index("FmcbInstallCrossRegionTransactional")
+resume_after_transaction = run_installer_text.find(
+    "MciDiagLogSetMassWritePaused(0)", transaction_pos
+)
+assert resume_after_transaction > transaction_pos, (
+    "mass logger must stay paused until the whole installer transaction returns"
+)
+run_mg = re.search(
+    r"static int RunMagicGateSession\(int target_port\).*?\n\}",
+    app_c,
+    re.S,
+)
+assert run_mg and "MciDiagLogSetMassWritePaused(1)" in run_mg.group(0)
 assert "Automatic rollback completed and the card was restored" in app_c
 assert "Recovery state is still present; do not start another install" in app_c
 assert "!FmcbMassStatus.available" in app_c
@@ -243,6 +275,23 @@ assert "#define DIAG_PENDING_LINES 512u" in diag_log_c
 assert "PendingHash[DIAG_PENDING_LINES]" in diag_log_c
 assert "RAM ring corruption at slot=" in diag_log_c
 assert "__attribute__((aligned(64)))" in diag_log_c
+assert "PendingHash[0] = LineHash(Pending[0]);" in diag_log_c, (
+    "initial populated logger slot must have a matching checksum"
+)
+pause_guard = re.search(
+    r"void MciDiagLogSetMassWritePaused\(int paused\).*?\n\}",
+    diag_log_c,
+    re.S,
+)
+assert pause_guard, "MciDiagLogSetMassWritePaused not found"
+pause_guard_text = pause_guard.group(0)
+assert "MciDiagLogTracePrintf" in pause_guard_text
+assert "MciDiagLogPrintf(" not in pause_guard_text, (
+    "ownership acquisition/release markers must never perform immediate mass: writes"
+)
+assert pause_guard_text.index("MassWritePauseDepth = 1u") < pause_guard_text.index(
+    "mass-storage critical section begins"
+), "logger must acquire mass ownership before queueing the begin marker"
 assert set_io_text.index("MassWritePauseDepth != 0u") < set_io_text.index("for (attempt = 0u"), (
     "ownership check must happen before EnsurePath retry loop"
 )
