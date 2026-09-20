@@ -23,12 +23,16 @@ void MciR5900CopyQwords(void *dst, const void *src, unsigned int qwords);
 
 static inline void MciFastCopy(void *dst, const void *src, unsigned int size)
 {
+#if defined(MCI_BASIC_BUILD) && MCI_BASIC_BUILD
+    memcpy(dst, src, size);
+#else
     if (size != 0u &&
         ((((u32)dst | (u32)src | (u32)size) & 0x0Fu) == 0u)) {
         MciR5900CopyQwords(dst, src, size >> 4);
         return;
     }
     memcpy(dst, src, size);
+#endif
 }
 
 #endif /* MCI_R5900_MEMOPS_H */
