@@ -96,11 +96,15 @@ old Multi Install crosslink trick.
 Before the first destination is changed, the installer:
 
 1. re-runs card filesystem verification;
-2. re-runs the hardware MagicGate/CardAuth test;
-3. re-probes the complete USB package and active ROMVER/MechaCon policy;
-4. simulates free-space use including all four regional directories;
-5. creates a dual-slot checksummed recovery journal on USB;
-6. arms the target card with the transaction identity marker.
+2. re-probes the complete USB package and active ROMVER/MechaCon compatibility policy;
+3. bind-probes every distinct selected KELF source on the actual target card;
+4. verifies that the normal card/USB personality returns after each security-session probe;
+5. simulates free-space use including all four regional directories;
+6. creates a dual-slot checksummed recovery journal on USB;
+7. arms the target card with the transaction identity marker.
+
+This means a KELF-class incompatibility such as the qualified MechaPwn DEX
+ENDVDPL case is rejected before the first memory-card destination is mutated.
 
 For each destination it then:
 
