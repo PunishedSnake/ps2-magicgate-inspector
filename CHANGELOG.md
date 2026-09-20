@@ -2,6 +2,75 @@
 
 All notable changes to PS2 Memory Card Inspector are documented here.
 
+
+## [0.4.0] — 2026-09-20 — "Drebin"
+
+### FreeMcBoot installer
+
+- Promoted the project from read-only FMCB preflight to a verified cross-region installer.
+- Added capability-driven CEX/DEX/MechaPwn compatibility policy.
+- Added real regional I/A/E/C destination copies instead of legacy Multi-Install crosslinks.
+- Added early-Japan OSDSYS/OSD110 and HDD-support package handling.
+- Added preflight binding of every distinct selected KELF source before the first card mutation.
+- Replaced opaque installer binding with stage-aware SECR HEADER/BLOCK/Kbit/Kc/ICVPS2 diagnostics.
+- Added the hardware-qualified MechaPwn DEX exception that omits CEX-only ENDVDPL after its 128-byte KELF was reproduced failing at DOWNLOAD HEADER.
+- Added explicit ROM 2.30+ native-boot classification and PSX/DESR compatibility classification.
+
+### Transaction and recovery
+
+- Added durable USB recovery journals and card identity markers.
+- Added backup, write, close/reopen and full read-back verification for each installation destination.
+- Added rollback of created/replaced destinations and directories.
+- Added legacy recovery-journal v1 reader with checksum validation and in-RAM conversion to v2.
+- Fixed recovery discovery for recursively located FMCB packages.
+- Fixed post-security-session USB/card readiness handling before rollback.
+- Fixed misleading rollback success reporting and recovery UI state.
+
+### MagicGate / compatibility
+
+- Retained the hardware-validated logical mc0/mc1 -> physical SIO2 2/3 mapping only at the SECR boundary.
+- Confirmed successful FMCB installation and boot from a non-Sony card with functional MagicGate.
+- Kept non-MagicGate third-party cards as valid ordinary storage while correctly rejecting CardAuth/KELF binding.
+- Added a compatibility/exception corpus covering current MechaPwn, current FMCB, historical FMCB 1.8 behavior, current PS2SDK and representative forum/GitHub edge cases.
+
+### Card Tools
+
+- Added full-card image export, verification and exact restore.
+- Added filesystem-aware image browsing and target-conflict inspection.
+- Added selective save import/export and PSU transfer support.
+- Added card/image/USB pickers and backup-aware force-format workflows.
+- Added hot-swap-aware operation boundaries.
+
+### Settings and UI
+
+- Added Native, 480p, 576p, 720p and 1080i display modes.
+- Added persistent versioned `MCI/MCINSPECTOR.CFG` settings on USB.
+- Persisted display mode, filesystem-test profile, CNF preservation policy and installer verification mode.
+- Added temporary-file/read-back/rename/sync config saves.
+- Promoted the runtime banner to stable `v0.4.0 Drebin`.
+
+### I/O correctness and diagnostics
+
+- Fixed cross-file DREBIN/recovery corruption by serializing durable logger access against mass-storage transaction ownership.
+- Forced synchronous fileXio semantics in correctness-critical logger/installer/recovery paths.
+- Deferred logger path attachment while another subsystem owns `mass:`.
+- Added recovery/log metadata sync boundaries.
+- Added per-line RAM-ring checksums and aligned immutable flush snapshots for Drebin diagnostics.
+
+### P0 production pass
+
+- Kept `-O2 -G0` as the global optimization baseline.
+- Retained `-mtune=r5900` on measured hot objects.
+- Retained production P0 copy/streaming paths and fixed synchronous batch sizes.
+- The public release does not include USB speed-test matrices, async/NOWAIT candidates, synthetic R5900 benchmark builds or Performance Lab binaries.
+
+### Release engineering
+
+- Simplified stable CI to one production ELF.
+- Added FMCB compatibility and Settings-config invariant checks.
+- Retained pinned PS2SDK 2.0 / SECRMAN 1.4 provenance.
+- Release artifact contains the ELF, SHA-256, provenance, license, credits and third-party notices.
+
 ## [0.3.0-dev] — in development
 
 ### dev5 — page-scoped diagnostics and two-way navigation
