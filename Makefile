@@ -1,80 +1,27 @@
 .DEFAULT_GOAL := MC_INSPECTOR.ELF
 
 EE_BIN = MC_INSPECTOR.ELF
-EE_OBJS = src/app_main_v2.o src/gui_v2.o src/gui_message_compat.o src/progress.o src/diag_log.o src/diag_wrap.o src/raw_bulk_read.o src/r5900_memops.o src/r5900_perf.o src/r5900_bench.o src/card_math.o src/image_read_ahead.o src/image_write_behind.o src/image_quick_verify.o src/mass_sync_compat.o src/card_hot_swap.o src/card_hot_swap_wrap.o src/force_format_vmc.o src/save_transfer.o src/save_transfer_psu.o src/save_title.o src/image_save_title.o src/image_browser_titles.o src/usb_file_picker.o src/usb_file_picker_ui.o src/card_save_picker.o src/card_image_picker.o src/card.o src/magicgate.o src/fmcb_install.o \
+EE_OBJS = src/app_main_v2.o src/gui_v2.o src/gui_message_compat.o src/progress.o src/diag_log.o src/diag_wrap.o src/raw_bulk_read.o src/card_math.o src/image_read_ahead.o src/image_write_behind.o src/image_quick_verify.o src/mass_sync_compat.o src/card_hot_swap.o src/card_hot_swap_wrap.o src/force_format_vmc.o src/save_transfer.o src/save_transfer_psu.o src/save_title.o src/image_save_title.o src/image_browser_titles.o src/usb_file_picker.o src/usb_file_picker_ui.o src/card_save_picker.o src/card_image_picker.o src/card.o src/magicgate.o src/fmcb_install.o \
 	src/usb_search.o src/fmcb_transaction.o src/fmcb_recovery.o src/fmcb_recovery_marker.o src/console_profile.o src/fmcb_compat.o \
 	src/magicgate_session.o src/magicgate_diag.o src/video_mode.o src/ui_layout.o src/settings.o \
 	src/kelf_cache.o src/card_raw_session.o src/card_image.o src/card_image_fs.o
 EE_LIBS = -ldebug -ldraw -lgraph -lpacket -ldma -lpad -lmc -lfileXio -lcdvd -lsecr \
 	-lioprpgen -liopreboot -lpatches -lkernel
 EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections \
-	-DMG_SECR_PROFILE_PS2SDK14=1
+	-DMG_SECR_PROFILE_PS2SDK14=1 -DMCI_BASIC_BUILD=1
 
-# Synthetic R5900 counters are a Performance Lab feature, not part of ordinary
-# backup/restore latency. Production builds keep this at zero. CI can rebuild
-# raw_bulk_read.o with R5900_BENCH=1 for explicit hardware A/B artifacts.
-R5900_BENCH ?= 0
-
-# Raw-card streaming knobs are explicit hardware A/B inputs, not universal
-# truths. Production keeps the previously qualified synchronous 16-page batch.
-# Candidate builds can use NOWAIT one-batch read-ahead and/or a 4 KiB batch to
-# test whether reducing EE D-cache pressure beats the extra RPC frequency.
-RAW_BULK_PAGES ?= 16
-RAW_BULK_ASYNC ?= 0
-src/raw_bulk_read.o: EE_CFLAGS += \
-	-DMCI_ENABLE_R5900_BENCH=$(R5900_BENCH) \
-	-DMCI_RAW_BULK_PAGES=$(RAW_BULK_PAGES) \
-	-DMCI_RAW_BULK_ASYNC=$(RAW_BULK_ASYNC)
-
-# Sequential verification/readback batching is its own P0 axis. Production uses
-# the established 16896-byte refill: 33 VMC records or 32 PCSX2 records, both
-# without splitting a record. Async candidates keep exactly one next refill in
-# flight while EE consumes the current buffer. The default remains synchronous.
-IMAGE_READ_PAGES ?= 32
-IMAGE_READ_ASYNC ?= 0
-src/image_read_ahead.o: EE_CFLAGS += \
-	-DMCI_IMAGE_READ_AHEAD_PAGES=$(IMAGE_READ_PAGES) \
-	-DMCI_IMAGE_READ_AHEAD_ASYNC=$(IMAGE_READ_ASYNC)
-# fileXio block mode/completion state is global. The close wrapper only needs the
-# read-side drain hook in explicit async-read candidates; compile it out otherwise.
-src/image_write_behind.o: EE_CFLAGS += \
-	-DMCI_IMAGE_READ_AHEAD_ASYNC=$(IMAGE_READ_ASYNC)
-
-# USB image output is a separate A/B axis. Keep production on the existing
-# synchronous 32-record batch until real hardware proves a different batch or
-# one-request-deep fileXio NOWAIT pipeline. BOT remains command-serialized, so
-# async means overlap with EE/card production, not multiple outstanding BOT I/O.
-IMAGE_WRITE_PAGES ?= 32
-IMAGE_WRITE_ASYNC ?= 0
-src/image_write_behind.o: EE_CFLAGS += \
-	-DMCI_IMAGE_WRITE_PAGES=$(IMAGE_WRITE_PAGES) \
-	-DMCI_IMAGE_WRITE_ASYNC=$(IMAGE_WRITE_ASYNC)
-
-# CURRENT IMPLEMENTATION: fileXio has one global block mode/completion state.
-# Read and write NOWAIT pipelines therefore cannot own it simultaneously.
-ifeq ($(IMAGE_READ_ASYNC)$(IMAGE_WRITE_ASYNC),11)
-$(error IMAGE_READ_ASYNC=1 and IMAGE_WRITE_ASYNC=1 cannot be enabled together)
-endif
-
+# Stable 0.4.0 release policy:
+# - no synthetic R5900 benchmark instrumentation;
+# - no async/NOWAIT transport experiments;
+# - no build-time batch-size A/B variants;
+# - no target-specific -mtune specialization.
+#
+# The functional streaming modules keep their conservative synchronous source
+# defaults. MCI_BASIC_BUILD also forces MciFastCopy() back to libc memcpy.
 # These two v2 composition sources intentionally call low-level fileXio/newlib
 # side by side. Existing backend sources already opt in locally, so keep this
 # target-scoped instead of redefining NEWLIB_PORT_AWARE across the whole build.
 src/app_main_v2.o src/card_save_picker.o: EE_CFLAGS += -DNEWLIB_PORT_AWARE
-
-# The 2026 research corpus points out an important distinction: current PS2DEV
-# GCC contains a dedicated R5900 pipeline model in gcc/config/mips/5900.md even
-# though `gcc -Q --help=target` reports the driver default tune value as mips1.
-# Keep -mtune=r5900 scoped to measured hot objects and let CI disassembly plus
-# real EE counters decide whether it is actually beneficial before widening it.
-R5900_HOT_OBJS = \
-	src/raw_bulk_read.o \
-	src/r5900_bench.o \
-	src/card_math.o \
-	src/image_read_ahead.o \
-	src/image_write_behind.o \
-	src/image_quick_verify.o \
-	src/card_image.o
-$(R5900_HOT_OBJS): EE_CFLAGS += -mtune=r5900
 
 EE_LDFLAGS = -Wl,--gc-sections \
 	-Wl,--wrap=SifExecModuleBuffer \
@@ -112,18 +59,6 @@ EE_LDFLAGS = -Wl,--gc-sections \
 	-Wl,--wrap=FmcbRecoveryBegin \
 	-Wl,--wrap=FmcbRecoveryRun \
 	-Wl,--wrap=FmcbRecoveryFinish
-
-# Optional execution probe for the zero-copy producer -> write-slot path.
-# Keep this out of primary timing builds: it intentionally adds per-record
-# counters so hardware logs can prove that Reserve/Commit actually executed.
-IMAGE_WRITE_PROBE ?= 0
-ifeq ($(IMAGE_WRITE_PROBE),1)
-EE_OBJS += src/image_write_slot_probe.o
-EE_LDFLAGS += \
-	-Wl,--wrap=MciImageWriteBehindSetEnabled \
-	-Wl,--wrap=MciImageWriteBehindReserve \
-	-Wl,--wrap=MciImageWriteBehindCommit
-endif
 
 # 0.4.x keeps the hardware-validated Briscoe security backend: PS2SDK 2.0
 # SECRMAN 1.4 plus the normal matching X-style card generation. Raw page RPCs
