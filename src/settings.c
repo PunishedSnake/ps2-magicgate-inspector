@@ -1,3 +1,5 @@
+#define NEWLIB_PORT_AWARE
+
 #include "settings.h"
 
 #include <fileXio_rpc.h>
