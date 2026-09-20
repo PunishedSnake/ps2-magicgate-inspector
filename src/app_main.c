@@ -51,8 +51,6 @@ extern unsigned char secrman_irx[];
 extern unsigned int size_secrman_irx;
 extern unsigned char fmcb_freesio2_irx[];
 extern unsigned int size_fmcb_freesio2_irx;
-extern unsigned char fmcb_freepad_irx[];
-extern unsigned int size_fmcb_freepad_irx;
 extern unsigned char fmcb_mcman_irx[];
 extern unsigned int size_fmcb_mcman_irx;
 extern unsigned char fmcb_mcserv_irx[];
@@ -176,7 +174,7 @@ static int RebootIopWithSecrman(void)
 
     MciProgressUpdate(MCI_PROGRESS_MAGICGATE, 33,
                       "Security IOP reboot complete",
-                      "The IOP is synchronized. Loading the matching SIO2, PAD and MCMAN generation next.");
+                      "The IOP is synchronized. Loading the matching SIO2 and MCMAN generation next.");
     return 0;
 }
 
@@ -206,10 +204,13 @@ static int InitMagicGateSession(MagicGateReport *report)
                       "Starting the matching SIO2 transport used by MCMAN and SECRMAN CardAuth callbacks.");
     rc = LoadEmbeddedModule(fmcb_freesio2_irx, size_fmcb_freesio2_irx);
     if (rc < 0) goto out;
-    MciProgressUpdate(MCI_PROGRESS_MAGICGATE, 38, "Loading PS2SDK 2.0 PADMAN",
-                      "Keeping the isolated module generation internally consistent while the normal controller client is stopped.");
-    rc = LoadEmbeddedModule(fmcb_freepad_irx, size_fmcb_freepad_irx);
-    if (rc < 0) goto out;
+    /* CardAuth/MagicGate needs the memory-card SIO2 path, not a controller
+     * server. Keep PADMAN out of this temporary IOP personality so the
+     * security transaction cannot touch controller service state for no
+     * functional reason. The normal ROM XPADMAN client is rebuilt after the
+     * IOP reboot by RestoreNormalEnvironment(). */
+    MciDiagLogPrintf("MAGICGATE",
+                     "temporary security IOP: PADMAN intentionally not loaded");
     MciProgressUpdate(MCI_PROGRESS_MAGICGATE, 40, "Loading PS2SDK 2.0 MCMAN",
                       "Registering the memory-card side used by SECRMAN for direct CardAuth command callbacks.");
     rc = LoadEmbeddedModule(fmcb_mcman_irx, size_fmcb_mcman_irx);
