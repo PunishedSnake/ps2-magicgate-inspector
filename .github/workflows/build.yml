@@ -1,4 +1,4 @@
-name: Build PS2 Memory Card Inspector 0.4.0
+name: Build PS2 Memory Card Inspector 0.4.1
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
   push:
     branches:
       - main
-      - release/0.4.0-drebin
+      - release/0.4.1-drebin
 
 permissions:
   contents: write
@@ -91,79 +91,39 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p artifacts/licenses
-          cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-0.4.0-Drebin.ELF
-          cp README.md artifacts/README.md
-          cp RELEASE_NOTES.md artifacts/RELEASE_NOTES.md
-          cp LICENSE artifacts/LICENSE
-          cp CREDITS.md artifacts/CREDITS.md
-          cp THIRD_PARTY_NOTICES.md artifacts/THIRD_PARTY_NOTICES.md
-          cp licenses/PS2SDK-AFL-2.0.txt artifacts/licenses/PS2SDK-AFL-2.0.txt
-          {
-            echo "PS2 Memory Card Inspector 0.4.0 - Drebin"
-            echo "Project revision: $GITHUB_SHA"
-            echo "Build profile: P0 production"
-            echo "Optimization baseline: -O2 -G0"
-            echo "R5900 tuning: -mtune=r5900 on measured hot objects"
-            echo "USB/image transport: synchronous production batching"
-            echo "USB speed-test variants: not built"
-            echo "Performance Lab: not built"
-            echo "Compiler: PS2DEV / PS2SDK 2.0.0 container"
-            echo "PS2SDK security source: https://github.com/ps2dev/ps2sdk/commit/$PS2SDK_SECURITY_COMMIT"
-          } > artifacts/SOURCE_PROVENANCE.txt
-          sha256sum artifacts/MC_INSPECTOR-0.4.0-Drebin.ELF > artifacts/SHA256SUMS.txt
+          mkdir -p artifacts
+          cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-0.4.1-Drebin.ELF
 
       - name: Verify artifact
         shell: bash
         run: |
           set -euo pipefail
-          file artifacts/MC_INSPECTOR-0.4.0-Drebin.ELF
+          file artifacts/MC_INSPECTOR-0.4.1-Drebin.ELF
           test ! -e artifacts/MC_INSPECTOR-perflab-O2.ELF
           test ! -e artifacts/MC_INSPECTOR-p0-raw-sync4.ELF
-          grep -q 'Build profile: P0 production' artifacts/SOURCE_PROVENANCE.txt
-          cat artifacts/SHA256SUMS.txt
 
       - name: Upload release candidate
         uses: actions/upload-artifact@v4
         with:
-          name: PS2-Memory-Card-Inspector-0.4.0-Drebin-${{ github.sha }}
-          path: artifacts/
+          name: PS2-Memory-Card-Inspector-0.4.1-Drebin-${{ github.sha }}
+          path: artifacts/MC_INSPECTOR-0.4.1-Drebin.ELF
           if-no-files-found: error
           retention-days: 3
 
-      - name: Package GitHub release ZIP
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 -m zipfile -c \
-            PS2-Memory-Card-Inspector-0.4.0-Drebin.zip \
-            artifacts/MC_INSPECTOR-0.4.0-Drebin.ELF \
-            artifacts/SHA256SUMS.txt \
-            artifacts/SOURCE_PROVENANCE.txt \
-            artifacts/README.md \
-            artifacts/RELEASE_NOTES.md \
-            artifacts/LICENSE \
-            artifacts/CREDITS.md \
-            artifacts/THIRD_PARTY_NOTICES.md \
-            artifacts/licenses/PS2SDK-AFL-2.0.txt
-          sha256sum PS2-Memory-Card-Inspector-0.4.0-Drebin.zip
-
-      - name: Publish 0.4.0 Drebin
+      - name: Publish 0.4.1 Drebin
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          TAG="0.4.0-Drebin"
+          TAG="0.4.1-Drebin"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists; leaving it untouched."
             exit 0
           fi
           gh release create "$TAG" \
             --target "$GITHUB_SHA" \
-            --title "0.4.0 - Drebin" \
+            --title "0.4.1 - Drebin" \
             --notes-file RELEASE_NOTES.md \
-            artifacts/MC_INSPECTOR-0.4.0-Drebin.ELF \
-            PS2-Memory-Card-Inspector-0.4.0-Drebin.zip
+            artifacts/MC_INSPECTOR-0.4.1-Drebin.ELF
