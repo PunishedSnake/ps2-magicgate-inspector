@@ -218,6 +218,10 @@ static void EnsureInitialized(void)
     snprintf(Pending[0], sizeof(Pending[0]),
              "#%06u t=%llu [SESSION] ========== Drebin diagnostic session start ==========",
              Sequence, 0ULL);
+    /* Slot zero is born populated. Hash it immediately; leaving the checksum
+     * at its memset(0) value made the first legitimate session line look like
+     * RAM corruption on every fresh logger initialization. */
+    PendingHash[0] = LineHash(Pending[0]);
 }
 
 /* Flush the complete RAM trace with one append descriptor and one sync. The old
@@ -400,10 +404,14 @@ void MciDiagLogSetMassWritePaused(int paused)
 
     if (paused) {
         if (MassWritePauseDepth == 0u) {
-            /* This marker is durable because the outermost caller enters the
-             * guard before opening the long-lived image descriptor. */
-            MciDiagLogPrintf("LOGGER",
-                             "mass-storage critical section begins; durable trace paused");
+            /* Acquire ownership BEFORE recording the marker. The old code used
+             * MciDiagLogPrintf() here, which performed a real DREBIN.LOG append
+             * immediately before the supposedly protected mass: operation. */
+            MassWritePauseDepth = 1u;
+            MciDiagLogTracePrintf(
+                "LOGGER",
+                "mass-storage critical section begins; durable trace paused");
+            return;
         }
         MassWritePauseDepth++;
         return;
@@ -415,9 +423,12 @@ void MciDiagLogSetMassWritePaused(int paused)
     if (MassWritePauseDepth != 0u)
         return;
 
+    /* The end marker belongs to the same RAM-only ownership interval. Queue it
+     * first, then publish the whole interval with one append descriptor. */
+    MciDiagLogTracePrintf(
+        "LOGGER",
+        "mass-storage critical section ended; durable trace resumed");
     FlushPending();
-    MciDiagLogPrintf("LOGGER",
-                     "mass-storage critical section ended; durable trace resumed");
 }
 
 void MciDiagLogPrintf(const char *component, const char *format, ...)
