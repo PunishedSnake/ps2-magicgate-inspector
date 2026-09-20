@@ -1,0 +1,44 @@
+name: Build PAD handoff forensic probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - debug/pad-handoff-forensics
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build no-reset PAD probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull ps2dev/ps2dev:v2.0.0
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            ps2dev/ps2dev:v2.0.0 \
+            sh -c 'set -eu; apk add --no-cache build-base >/dev/null; make -f Makefile.padprobe'
+
+      - name: Verify output
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f PAD_HANDOFF_PROBE.ELF
+          file PAD_HANDOFF_PROBE.ELF
+
+      - name: Upload probe
+        uses: actions/upload-artifact@v4
+        with:
+          name: PAD-HANDOFF-PROBE-${{ github.sha }}
+          path: PAD_HANDOFF_PROBE.ELF
+          if-no-files-found: error
+          retention-days: 3
