@@ -1447,7 +1447,7 @@ static qword_t *footer(qword_t *q, MciGuiPage page, int confirm_format)
     if (confirm_format) {
         line = "L1+R1+TRIANGLE Confirm format        CIRCLE Cancel";
     } else if (page == MCI_GUI_SETTINGS) {
-        line = "UP/DOWN Setting   LEFT/RIGHT Change   X Apply   L1/R1 Page   SELECT Exit";
+        line = "UP/DOWN Setting   LEFT/RIGHT Change   X Apply   SQUARE Save CFG   L1/R1 Page";
     } else if (page == MCI_GUI_FMCB) {
         line = "UP/DOWN Slot  X Preflight  SQUARE Installer  TRIANGLE Tools  L1/R1 Page";
     } else {
