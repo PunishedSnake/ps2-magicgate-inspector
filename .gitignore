@@ -10,3 +10,7 @@ out/
 # Local editor or migration backups
 *.bak
 *.mgci.bak
+
+# Host unit-test build output
+tests/build/
+__pycache__/

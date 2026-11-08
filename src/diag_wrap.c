@@ -19,6 +19,7 @@
 #include "image_read_ahead.h"
 #include "image_write_behind.h"
 #include "raw_bulk_read.h"
+#include "sha256.h"
 
 int __real_MciCardImageProbeGeometry(int port, MciCardGeometry *geometry);
 int __real_MciCardImageExport(int port, MciCardImageFormat format,
@@ -73,6 +74,21 @@ static void LogImageReport(const char *operation, int rc,
                      report->geometry.pages_per_block,
                      report->geometry.clusters_per_card,
                      report->geometry.from_superblock);
+    if (report->verified) {
+        char sha_hex[65];
+
+        if (report->has_sha256)
+            sha256_hex(report->sha256, sha_hex);
+        else
+            snprintf(sha_hex, sizeof(sha_hex), "none");
+        MciDiagLogPrintf("IMAGE",
+                         "%s integrity sha256=%s ecc_legacy_pages=%u sb=%s health=%s health_flags=0x%04X bad_blocks=%u",
+                         operation, sha_hex, report->ecc_legacy_pages,
+                         MciMcSuperblockErrorText(report->health.validate_rc),
+                         MciMcHealthVerdict(&report->health),
+                         (unsigned int)report->health.flags,
+                         report->health.bad_block_count);
+    }
 }
 
 static int SyncPathDevice(const char *path)

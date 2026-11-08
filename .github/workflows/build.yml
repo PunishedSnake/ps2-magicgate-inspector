@@ -35,6 +35,14 @@ jobs:
           python3 tools/verify_fmcb_cross_region.py
           python3 tools/verify_settings_config.py
 
+      - name: Host unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -C tests
+          make -C tests clean
+          make -C tests SAN=1
+
       - name: Stage PS2SDK 2.0 security and card personalities
         shell: bash
         run: |

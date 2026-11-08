@@ -22,6 +22,8 @@
 
 #include "card_image.h"
 #include "card_math.h"
+#include "mc_fs_format.h"
+#include "sha256.h"
 #include "image_write_behind.h"
 #include "progress.h"
 
@@ -33,24 +35,6 @@
 #define IMAGE_PROGRESS_INTERVAL 128u
 #define IMAGE_DIR_NAME "MCI"
 
-#pragma pack(push, 1)
-typedef struct MciPs2Superblock {
-    char magic[28];
-    char version[12];
-    u16 page_len;
-    u16 pages_per_cluster;
-    u16 pages_per_block;
-    u16 unused;
-    u32 clusters_per_card;
-    u32 alloc_offset;
-    u32 alloc_end;
-    u32 rootdir_cluster;
-    u32 backup_block1;
-    u32 backup_block2;
-} MciPs2Superblock;
-#pragma pack(pop)
-
-static const char SuperblockMagic[28] __attribute__((nonstring)) = "Sony PS2 Memory Card Format ";
 static const char *const MassRoots[] = {"mass:/", "mass0:/", "mass1:/"};
 
 static int CompleteMcCommand(int issue_rc)
@@ -86,53 +70,38 @@ static int EraseBlock(int port, u32 block)
     return CompleteMcCommand(mcEraseBlock(port, 0, (int)block, -1));
 }
 
-static int SpareMatches(const unsigned char data[IMAGE_PAGE_DATA],
-                        const unsigned char spare[IMAGE_PAGE_SPARE])
+/* Returns MCI_ECC_MATCH_* (non-zero on success). 0.4.x images carrying the
+ * legacy bit-7 ECC artefact are accepted and counted by the caller. */
+static MciCardMathEccMatch SpareMatches(const unsigned char data[IMAGE_PAGE_DATA],
+                                        const unsigned char spare[IMAGE_PAGE_SPARE])
 {
-    unsigned char expected[IMAGE_PAGE_SPARE] __attribute__((aligned(16)));
-
-    MciCardMathBuildSpare(data, expected);
-    return memcmp(spare, expected, 12u) == 0;
+    return MciCardMathSpareCompare(data, spare);
 }
 
 static int ParseSuperblock(const unsigned char page[IMAGE_PAGE_DATA],
                            MciCardGeometry *geometry)
 {
-    const MciPs2Superblock *sb = (const MciPs2Superblock *)page;
-    u64 pages;
+    MciMcSuperblock sb;
+    int rc;
 
-    if (memcmp(sb->magic, SuperblockMagic, sizeof(SuperblockMagic)) != 0)
-        return -1;
-    if (sb->page_len != IMAGE_PAGE_DATA || sb->pages_per_cluster == 0u ||
-        sb->pages_per_block == 0u || sb->clusters_per_card == 0u)
-        return -2;
-    pages = (u64)sb->pages_per_cluster * (u64)sb->clusters_per_card;
-    if (pages == 0u || pages > IMAGE_MAX_PAGES)
-        return -3;
+    memcpy(&sb, page, sizeof(sb));
+    rc = MciMcSuperblockValidate(&sb, MCI_MC_VALIDATE_GEOMETRY);
+    if (rc < 0)
+        return rc;
 
     memset(geometry, 0, sizeof(*geometry));
-    geometry->page_size = sb->page_len;
-    geometry->pages_per_cluster = sb->pages_per_cluster;
-    geometry->pages_per_block = sb->pages_per_block;
-    geometry->clusters_per_card = sb->clusters_per_card;
-    geometry->total_pages = (u32)pages;
+    geometry->page_size = sb.page_len;
+    geometry->pages_per_cluster = sb.pages_per_cluster;
+    geometry->pages_per_block = sb.pages_per_block;
+    geometry->clusters_per_card = sb.clusters_per_card;
+    geometry->total_pages = MciMcSuperblockTotalPages(&sb);
     geometry->from_superblock = 1;
     return 0;
 }
 
 static int KnownPageCount(u32 pages)
 {
-    switch (pages) {
-        case 8192u:    /* 4 MiB */
-        case 16384u:   /* 8 MiB */
-        case 32768u:   /* 16 MiB */
-        case 65536u:   /* 32 MiB */
-        case 131072u:  /* 64 MiB */
-        case 262144u:  /* 128 MiB */
-            return 1;
-        default:
-            return 0;
-    }
+    return MciMcKnownPageCount(pages);
 }
 
 void MciCardImageResetReport(MciCardImageReport *report, int port,
@@ -144,6 +113,7 @@ void MciCardImageResetReport(MciCardImageReport *report, int port,
     report->result = MCI_CARD_IMAGE_NOT_RUN;
     report->verify_rc = -999;
     report->format_rc = -999;
+    report->health.validate_rc = MCI_MC_SB_BAD_ARGS;
 }
 
 const char *MciCardImageFormatName(MciCardImageFormat format)
@@ -297,23 +267,69 @@ static int ReadExact(int fd, void *buffer, unsigned int size)
 static int WriteSidecar(const MciCardImageReport *report)
 {
     char path[MCI_CARD_IMAGE_PATH_MAX + 16];
-    char text[512];
+    char text[1024];
+    char sha_hex[65];
+    char flags_text[32];
     int fd;
     int length;
+    int extra;
     int rc;
+    u32 i;
 
     snprintf(path, sizeof(path), "%s.mci.txt", report->path);
+    if (report->has_sha256)
+        sha256_hex(report->sha256, sha_hex);
+    else
+        snprintf(sha_hex, sizeof(sha_hex), "none");
+    (void)MciMcCardFlagsText(report->health.card_flags, flags_text,
+                             sizeof(flags_text));
+
+    /* Line-oriented key=value. Keys from 0.4.0 keep their names and order so
+     * existing parsers continue to work; 0.4.2 only appends keys. */
     length = snprintf(text, sizeof(text),
-                      "Drebin PS2 card image\nformat=%s\nport=mc%d\npage_size=%u\npages_per_cluster=%u\npages_per_block=%u\ntotal_pages=%u\nlogical_bytes=%llu\ncrc32=%08X\nverified=%d\n",
+                      "Drebin PS2 card image\nformat=%s\nport=mc%d\npage_size=%u\npages_per_cluster=%u\npages_per_block=%u\ntotal_pages=%u\nlogical_bytes=%llu\ncrc32=%08X\nverified=%d\n"
+                      "sidecar_version=2\nfile_bytes=%llu\nsha256=%s\necc=%s\n"
+                      "sb_status=%s\nsb_error=%s\nsb_version=%s\ncard_type=%u\ncard_flags=0x%02X\ncard_flags_text=%s\n"
+                      "health=%s\nhealth_flags=0x%04X\nbackup_blocks=%u,%u\nifc_clusters=%u\nbad_blocks=%u\n",
                       MciCardImageFormatName(report->format), report->port,
                       report->geometry.page_size,
                       report->geometry.pages_per_cluster,
                       report->geometry.pages_per_block,
                       report->geometry.total_pages,
                       (unsigned long long)report->geometry.total_pages * IMAGE_PAGE_DATA,
-                      report->logical_crc32, report->verified);
+                      report->logical_crc32, report->verified,
+                      (unsigned long long)report->output_bytes, sha_hex,
+                      report->format != MCI_CARD_IMAGE_PS2 ? "none"
+                          : (report->ecc_legacy_pages ? "legacy-drebin-0.4" : "canonical"),
+                      report->health.validate_rc < 0 ? "invalid" : "valid",
+                      MciMcSuperblockErrorText(report->health.validate_rc),
+                      report->health.version,
+                      (unsigned int)report->health.card_type,
+                      (unsigned int)report->health.card_flags, flags_text,
+                      MciMcHealthVerdict(&report->health),
+                      (unsigned int)report->health.flags,
+                      report->health.backup_block1, report->health.backup_block2,
+                      report->health.ifc_count, report->health.bad_block_count);
     if (length <= 0 || (unsigned int)length >= sizeof(text))
         return -1;
+    if (report->health.bad_block_count != 0u) {
+        extra = snprintf(text + length, sizeof(text) - (unsigned int)length,
+                         "bad_block_list=");
+        if (extra <= 0 || (unsigned int)(length + extra) >= sizeof(text))
+            return -1;
+        length += extra;
+        for (i = 0u; i < report->health.bad_block_count; i++) {
+            extra = snprintf(text + length, sizeof(text) - (unsigned int)length,
+                             i ? ",%u" : "%u", report->health.bad_blocks[i]);
+            if (extra <= 0 || (unsigned int)(length + extra) >= sizeof(text))
+                return -1;
+            length += extra;
+        }
+        if ((unsigned int)length + 1u >= sizeof(text))
+            return -1;
+        text[length++] = '\n';
+        text[length] = '\0';
+    }
     (void)fileXioRemove(path);
     fd = fileXioOpen(path, FIO_O_WRONLY | FIO_O_CREAT);
     if (fd < 0)
@@ -334,6 +350,8 @@ int MciCardImageVerifyFile(const char *path, MciCardImageFormat format,
     u32 pages;
     u32 page;
     u32 crc = 0u;
+    u32 legacy_pages = 0u;
+    sha256_context_t sha;
     int fd;
     int rc;
 
@@ -363,6 +381,7 @@ int MciCardImageVerifyFile(const char *path, MciCardImageFormat format,
         return fd;
     }
     memset(&sb_geometry, 0, sizeof(sb_geometry));
+    sha256_init(&sha);
     for (page = 0u; page < pages; page++) {
         rc = ReadExact(fd, raw, stride);
         if (rc < 0) {
@@ -371,12 +390,20 @@ int MciCardImageVerifyFile(const char *path, MciCardImageFormat format,
             report->verify_rc = rc;
             return rc;
         }
-        if (format == MCI_CARD_IMAGE_PS2 && !SpareMatches(raw, raw + IMAGE_PAGE_DATA)) {
-            fileXioClose(fd);
-            report->result = MCI_CARD_IMAGE_VERIFY_ERROR;
-            report->verify_rc = -4;
-            return -4;
+        if (format == MCI_CARD_IMAGE_PS2) {
+            MciCardMathEccMatch match = SpareMatches(raw, raw + IMAGE_PAGE_DATA);
+            if (match == MCI_ECC_MATCH_NONE) {
+                fileXioClose(fd);
+                report->result = MCI_CARD_IMAGE_VERIFY_ERROR;
+                report->verify_rc = -4;
+                return -4;
+            }
+            if (match == MCI_ECC_MATCH_LEGACY_DREBIN04)
+                legacy_pages++;
         }
+        sha256_update(&sha, raw, stride);
+        if (page == 0u)
+            (void)MciMcHealthDecode(raw, &report->health);
         if (page == 0u && ParseSuperblock(raw, &sb_geometry) == 0 &&
             sb_geometry.total_pages != pages) {
             fileXioClose(fd);
@@ -406,6 +433,9 @@ int MciCardImageVerifyFile(const char *path, MciCardImageFormat format,
     report->pages_total = pages;
     report->output_bytes = stat.size;
     report->logical_crc32 = crc;
+    report->ecc_legacy_pages = legacy_pages;
+    sha256_final(&sha, report->sha256);
+    report->has_sha256 = 1;
     report->verified = 1;
     report->verify_rc = 0;
     report->result = MCI_CARD_IMAGE_OK;
@@ -527,6 +557,10 @@ int MciCardImageExport(int port, MciCardImageFormat format,
         return rc < 0 ? rc : -6;
     }
     report->verified = 1;
+    report->ecc_legacy_pages = verify.ecc_legacy_pages;
+    report->has_sha256 = verify.has_sha256;
+    memcpy(report->sha256, verify.sha256, sizeof(report->sha256));
+    report->health = verify.health;
     report->result = MCI_CARD_IMAGE_OK;
     (void)WriteSidecar(report);
     MciProgressUpdate(MCI_PROGRESS_CARD_TOOLS, 100,

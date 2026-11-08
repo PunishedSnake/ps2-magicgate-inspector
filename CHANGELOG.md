@@ -3,6 +3,50 @@
 All notable changes to PS2 Memory Card Inspector are documented here.
 
 
+## [Unreleased] — 0.4.2 foundation
+
+### Fixed
+
+- **`.ps2` ECC now matches PCSX2 and mymc.** The second ECC byte of every
+  128-byte chunk (line parity 0) is a 7-bit value; PCSX2
+  `FolderMemoryCard::CalculateECC` and mymc both mask it with `0x7F`. 0.4.0/0.4.1
+  left bit 7 set for chunks with an odd number of odd-parity bytes, so roughly
+  15 of every 16 exported pages carried non-standard spare bytes. New exports
+  are canonical. Verify, Exact Restore and the ECC mismatch locator still
+  accept 0.4.x images and count the affected pages as `ecc=legacy-drebin-0.4`.
+- **`icon.sys` titles decode again.** The title is a 68-byte Shift-JIS byte
+  string with `nlOffset` in bytes (mymc: `"68s"` + `decode("shift_jis")`).
+  The old decoder read it as 16-bit little-endian units, so nearly every retail
+  title failed and the browser fell back to directory names. Full-width roman
+  letters, digits and common punctuation are now folded to ASCII.
+- Title resolution now uses the same superblock rules as the image browser
+  (it previously skipped the `pages_per_block` and root-directory checks).
+
+### Added
+
+- `src/mc_fs_format.{h,c}`: one shared on-media superblock/directory-entry
+  layout with compile-time size gates, two validation levels
+  (geometry / filesystem) and a read-only superblock health decoder (card
+  type/flags, bad-block table, backup blocks, indirect FAT clusters).
+- SHA-256 of the complete image file, computed during the existing full
+  read-back pass (`src/sha256.c`, vendored from fhdb-bootstrap-manager).
+- `.mci.txt` sidecar v2: appends `file_bytes`, `sha256`, `ecc`, superblock
+  status and health keys. All 0.4.0 keys keep their names and order.
+- Image reports and `DREBIN.LOG` carry the SHA-256, legacy-ECC page count
+  and health verdict.
+- Host unit tests under `tests/` (`make -C tests`, `make -C tests SAN=1`)
+  covering CRC32/ECC against PCSX2- and mymc-equivalent oracles, superblock
+  layout/validation/health, SHA-256 vectors and the title decoder. CI runs
+  them with and without ASan/UBSan before the PS2 build.
+
+### Removed
+
+- Unbuilt Performance Lab sources (`r5900_bench`, `r5900_perf`,
+  `image_write_slot_probe`), the default-off bench hooks in `raw_bulk_read.c`,
+  one-off `apply/fix-drebin-*` and `p0-*` workflows and their scripts. They
+  are preserved unchanged on the `research/perf-lab` branch.
+- Four duplicated superblock struct definitions.
+
 ## [0.4.1] — 2026-09-21 — "Drebin"
 
 ### USB/FMCB hotfix

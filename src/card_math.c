@@ -105,15 +105,23 @@ u32 MciCardMathCrc32Update(u32 crc, const unsigned char *data,
     return ~crc;
 }
 
-u32 MciCardMathEcc128(const unsigned char data[128])
+/*
+ * Hamming code over one 128-byte chunk.
+ *
+ * The second byte (line parity 0) is a 7-bit value: PCSX2
+ * (FolderMemoryCard::CalculateECC, `ecc[1] &= 0x7f`) and mymc
+ * (`line_parity_0 & 0x7F`) both mask it. Drebin 0.4.0/0.4.1 left bit 7 set
+ * whenever the chunk held an odd number of odd-parity bytes, which is about
+ * half of all chunks. `legacy_bit7` reports that bit so 0.4.x images remain
+ * verifiable; new images always carry the canonical 7-bit value.
+ */
+static u32 EccCore(const unsigned char data[128], unsigned char *legacy_bit7)
 {
     unsigned char column = 0x77;
     unsigned char line0 = 0x7F;
     unsigned char line1 = 0x7F;
     unsigned int i;
 
-    if (data == NULL)
-        return 0u;
     EnsureTables();
 
     for (i = 0u; i < 128u; i++) {
@@ -126,7 +134,17 @@ u32 MciCardMathEcc128(const unsigned char data[128])
         line1 ^= (unsigned char)(((unsigned char)i) & parity_mask);
     }
 
+    if (legacy_bit7 != NULL)
+        *legacy_bit7 = (unsigned char)(line0 & 0x80u);
+    line0 &= 0x7Fu;
     return (u32)column | ((u32)line0 << 8) | ((u32)line1 << 16);
+}
+
+u32 MciCardMathEcc128(const unsigned char data[128])
+{
+    if (data == NULL)
+        return 0u;
+    return EccCore(data, NULL);
 }
 
 void MciCardMathBuildEcc12(const unsigned char data[512],
@@ -151,4 +169,33 @@ void MciCardMathBuildSpare(const unsigned char data[512],
         return;
     MciCardMathBuildEcc12(data, spare);
     memset(spare + 12, 0, 4u);
+}
+
+MciCardMathEccMatch MciCardMathSpareCompare(const unsigned char data[512],
+                                            const unsigned char stored[12])
+{
+    MciCardMathEccMatch match = MCI_ECC_MATCH_CANONICAL;
+    unsigned int chunk;
+
+    if (data == NULL || stored == NULL)
+        return MCI_ECC_MATCH_NONE;
+    for (chunk = 0u; chunk < 4u; chunk++) {
+        unsigned char legacy_bit7 = 0u;
+        u32 value = EccCore(data + chunk * 128u, &legacy_bit7);
+        const unsigned char *s = stored + chunk * 3u;
+        unsigned char c0 = (unsigned char)(value & 0xFFu);
+        unsigned char c1 = (unsigned char)((value >> 8) & 0xFFu);
+        unsigned char c2 = (unsigned char)((value >> 16) & 0xFFu);
+
+        if (s[0] != c0 || s[2] != c2)
+            return MCI_ECC_MATCH_NONE;
+        if (s[1] == c1)
+            continue;
+        if (legacy_bit7 != 0u && s[1] == (unsigned char)(c1 | legacy_bit7)) {
+            match = MCI_ECC_MATCH_LEGACY_DREBIN04;
+            continue;
+        }
+        return MCI_ECC_MATCH_NONE;
+    }
+    return match;
 }

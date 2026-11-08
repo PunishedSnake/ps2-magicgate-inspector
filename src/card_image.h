@@ -3,6 +3,8 @@
 
 #include <tamtypes.h>
 
+#include "mc_fs_format.h"
+
 /* Interoperable image formats used by Drebin's hardware-facing Card Tools. */
 #define MCI_CARD_IMAGE_PATH_MAX 256
 
@@ -46,6 +48,14 @@ typedef struct MciCardImageReport {
     int verify_rc;
     int format_rc;
     int verified;
+    /* 0.4.2: pages whose .ps2 ECC carries the Drebin 0.4.0/0.4.1 bit-7
+     * artefact. Accepted for verify/restore; new exports are canonical. */
+    u32 ecc_legacy_pages;
+    /* SHA-256 of the complete file as stored (what `sha256sum` reports). */
+    int has_sha256;
+    unsigned char sha256[32];
+    /* Read-only superblock health decoded from logical page 0. */
+    MciMcHealth health;
     char path[MCI_CARD_IMAGE_PATH_MAX];
 } MciCardImageReport;
 
