@@ -10,51 +10,19 @@
 #include <string.h>
 
 #include "image_save_title.h"
+#include "mc_fs_format.h"
 #include "save_title.h"
 
 #define TITLE_PAGE_SIZE 512u
 #define TITLE_PS2_STRIDE 528u
 #define TITLE_MAX_CLUSTER_BYTES 1024u
-#define TITLE_FAT_END 0xFFFFFFFFu
-#define TITLE_FAT_NEXT_MASK 0x7FFFFFFFu
-#define TITLE_MODE_FILE 0x0010u
-#define TITLE_MODE_EXISTS 0x8000u
+#define TITLE_FAT_END MCI_MC_FAT_END
+#define TITLE_FAT_NEXT_MASK MCI_MC_FAT_NEXT_MASK
+#define TITLE_MODE_FILE MCI_MC_MODE_FILE
+#define TITLE_MODE_EXISTS MCI_MC_MODE_EXISTS
 
-#pragma pack(push, 1)
-typedef struct TitleSuperblock {
-    char magic[28];
-    char version[12];
-    u16 page_len;
-    u16 pages_per_cluster;
-    u16 pages_per_block;
-    u16 unused;
-    u32 clusters_per_card;
-    u32 alloc_offset;
-    u32 alloc_end;
-    u32 rootdir_cluster;
-    u32 backup_block1;
-    u32 backup_block2;
-    u64 padding0x48;
-    u32 ifc_list[32];
-    u32 bad_block_list[32];
-    u8 card_type;
-    u8 card_flags;
-} TitleSuperblock;
-
-typedef struct TitleDirEntry {
-    u16 mode;
-    u16 unused;
-    u32 length;
-    u8 created[8];
-    u32 cluster;
-    u32 dir_entry;
-    u8 modified[8];
-    u32 attr;
-    u32 unused2[7];
-    char name[32];
-    u8 unused3[416];
-} TitleDirEntry;
-#pragma pack(pop)
+typedef MciMcSuperblock TitleSuperblock;
+typedef MciMcDirEntry TitleDirEntry;
 
 typedef struct TitleImage {
     int fd;
@@ -297,13 +265,9 @@ static int open_image(const MciImageSaveList *list, TitleImage *image)
     if (rc < 0)
         goto fail;
     memcpy(&image->sb, first, sizeof(image->sb));
-    if (memcmp(image->sb.magic, "Sony PS2 Memory Card Format ", 28u) != 0 ||
-        image->sb.page_len != TITLE_PAGE_SIZE ||
-        (image->sb.pages_per_cluster != 1u && image->sb.pages_per_cluster != 2u) ||
-        image->sb.clusters_per_card == 0u ||
-        image->sb.alloc_offset >= image->sb.clusters_per_card ||
-        image->sb.alloc_end == 0u ||
-        image->sb.alloc_offset + image->sb.alloc_end > image->sb.clusters_per_card)
+    /* Same FILESYSTEM rules as the image browser, so a title can never be
+     * resolved from an image the browser itself would reject. */
+    if (MciMcSuperblockValidate(&image->sb, MCI_MC_VALIDATE_FILESYSTEM) < 0)
         goto fail_invalid;
     image->cluster_bytes = image->sb.page_len * image->sb.pages_per_cluster;
     if (image->cluster_bytes == 0u ||

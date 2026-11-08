@@ -23,7 +23,7 @@ Not yet exposed as the final Card Tools workflow:
 - the unified **Import Save** and **Export Save** menu entries;
 - MAX/PWS, CBS, SPS/XPS and PSV decoders;
 - PS1 MCS/GME/PSX/PSV importers;
-- full Shift-JIS rendering. The first title pass is ASCII-first and falls back to the raw directory identifier if a useful title cannot be represented safely.
+- full Shift-JIS rendering. Since 0.4.2 the title decoder walks the 68-byte Shift-JIS title correctly and folds full-width roman text to ASCII; kana/kanji are still skipped and the raw directory identifier is used when fewer than three ASCII characters survive.
 
 A temporary integration detail remains while the old Card Tools controller is still present: cancelling the new image picker at its root returns an explicit cancellation code, but the legacy caller currently turns every negative lookup result into its old "image not found" warning. The Card Tools v2 controller must consume cancellation separately.
 

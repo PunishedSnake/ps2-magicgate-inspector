@@ -19,56 +19,28 @@
 #include <string.h>
 
 #include "card_image_fs.h"
+#include "mc_fs_format.h"
 #include "progress.h"
 #include "save_title.h"
 
 #define FS_PAGE_SIZE 512u
 #define FS_PS2_STRIDE 528u
 #define FS_MAX_CLUSTER_BYTES 1024u
-#define FS_MODE_FILE 0x0010u
-#define FS_MODE_DIR 0x0020u
-#define FS_MODE_EXISTS 0x8000u
-#define FS_FAT_END 0xFFFFFFFFu
-#define FS_FAT_NEXT_MASK 0x7FFFFFFFu
+#define FS_MODE_FILE MCI_MC_MODE_FILE
+#define FS_MODE_DIR MCI_MC_MODE_DIR
+#define FS_MODE_EXISTS MCI_MC_MODE_EXISTS
+#define FS_FAT_END MCI_MC_FAT_END
+#define FS_FAT_NEXT_MASK MCI_MC_FAT_NEXT_MASK
 #define FS_IMPORT_CREATED_MAX 384
 #define FS_MAX_DEPTH 12
 #define FS_ICON_PREFIX_MAX 1024u
 
-#pragma pack(push, 1)
-typedef struct MciFsSuperblock {
-    char magic[28];
-    char version[12];
-    u16 page_len;
-    u16 pages_per_cluster;
-    u16 pages_per_block;
-    u16 unused;
-    u32 clusters_per_card;
-    u32 alloc_offset;
-    u32 alloc_end;
-    u32 rootdir_cluster;
-    u32 backup_block1;
-    u32 backup_block2;
-    u64 padding0x48;
-    u32 ifc_list[32];
-    u32 bad_block_list[32];
-    u8 card_type;
-    u8 card_flags;
-} MciFsSuperblock;
-
-typedef struct MciFsDirEntry {
-    u16 mode;
-    u16 unused;
-    u32 length;
-    sceMcStDateTime created;
-    u32 cluster;
-    u32 dir_entry;
-    sceMcStDateTime modified;
-    u32 attr;
-    u32 unused2[7];
-    char name[32];
-    u8 unused3[416];
-} MciFsDirEntry;
-#pragma pack(pop)
+/* On-media layout lives in mc_fs_format.h (shared with card_image.c, quick
+ * verify and the title resolver). Local aliases keep this file's history
+ * readable. */
+typedef MciMcSuperblock MciFsSuperblock;
+typedef MciMcDirEntry MciFsDirEntry;
+typedef char MciFsDateTimeAbiCheck[(sizeof(sceMcStDateTime) == sizeof(MciMcDateTime)) ? 1 : -1];
 
 typedef struct MciFsImage {
     int fd;
@@ -102,7 +74,6 @@ typedef struct MciImportTxn {
     int created_count;
 } MciImportTxn;
 
-static const char SuperblockMagic[28] __attribute__((nonstring)) = "Sony PS2 Memory Card Format ";
 
 static int McResult(void)
 {
@@ -368,15 +339,7 @@ static int OpenImage(const char *path, MciCardImageFormat format,
     memcpy(&image->sb, first, sizeof(image->sb));
     /* pages_per_block is physical erase geometry, not a filesystem-browser
      * constraint. The browser never erases the source image. */
-    if (memcmp(image->sb.magic, SuperblockMagic, sizeof(SuperblockMagic)) != 0 ||
-        image->sb.page_len != FS_PAGE_SIZE ||
-        (image->sb.pages_per_cluster != 1u && image->sb.pages_per_cluster != 2u) ||
-        image->sb.pages_per_block == 0u ||
-        image->sb.clusters_per_card == 0u ||
-        image->sb.alloc_offset >= image->sb.clusters_per_card ||
-        image->sb.alloc_end == 0u ||
-        image->sb.alloc_offset + image->sb.alloc_end > image->sb.clusters_per_card ||
-        image->sb.rootdir_cluster != 0u) {
+    if (MciMcSuperblockValidate(&image->sb, MCI_MC_VALIDATE_FILESYSTEM) < 0) {
         fileXioClose(image->fd);
         image->fd = -1;
         return -3;
@@ -621,8 +584,9 @@ static int SetMetadata(int port, const char *path, const MciFsDirEntry *entry)
     int rc;
 
     memset(&info, 0, sizeof(info));
-    info._Create = entry->created;
-    info._Modify = entry->modified;
+    /* MciMcDateTime is byte-compatible with sceMcStDateTime. */
+    memcpy(&info._Create, &entry->created, sizeof(info._Create));
+    memcpy(&info._Modify, &entry->modified, sizeof(info._Modify));
     info.AttrFile = entry->mode;
     mcSetFileInfo(port, 0, path, &info,
                   sceMcFileInfoCreate | sceMcFileInfoModify | sceMcFileInfoAttr);

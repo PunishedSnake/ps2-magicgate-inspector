@@ -155,8 +155,32 @@ Verify:
 The release workflow must:
 
 - run card/FMCB/Settings source invariants;
+- run the host unit tests (`make -C tests`) and the ASan/UBSan pass
+  (`make -C tests SAN=1`);
 - build only one production ELF;
 - keep `-mtune=r5900` in the production hot-object profile;
 - force async transport flags to zero;
-- exclude `r5900_bench` and `r5900_perf` from the public ELF;
+- exclude `r5900_bench` and `r5900_perf` from the public ELF (they live only
+  on the `research/perf-lab` branch);
 - package SHA-256, provenance and license files.
+
+## Host unit tests
+
+`tests/` builds the portable EE sources with the host compiler. No PS2SDK is
+needed; `tests/include/tamtypes.h` supplies the integer types.
+
+```sh
+make -C tests          # build and run
+make -C tests SAN=1    # same with AddressSanitizer + UBSan
+```
+
+| Test | Covers |
+| --- | --- |
+| `test_card_math` | CRC32 vectors and split updates; `.ps2` ECC against PCSX2- and mymc-equivalent oracles on 20k pages; legacy 0.4.x ECC acceptance and single-bit rejection |
+| `test_mc_fs_format` | superblock/dir-entry offsets, geometry vs filesystem validation (including the 64 MiB `pages_per_block=32` regression), health flags |
+| `test_sha256` | FIPS 180-2 vectors and streaming in 528-byte records |
+| `test_save_title` | full-width/half-width Shift-JIS titles, `nlOffset`, truncation and bounds |
+
+Anything moved into a portable module should gain a test here before its
+behaviour changes. Hardware qualification still decides timing, IOP and
+CardAuth questions.

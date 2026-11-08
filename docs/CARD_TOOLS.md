@@ -33,6 +33,18 @@ Each PS2 NAND page is stored as 528 bytes:
 
 libmc exposes corrected 512-byte page data rather than arbitrary physical spare bytes, so Drebin regenerates the standard ECC records and writes zero to the remaining four spare bytes. The resulting image follows the ordinary PCSX2 raw-card layout while remaining independent of undocumented physical spare contents.
 
+### ECC byte layout (0.4.2)
+
+Each 3-byte record is `column parity (& 0x77)`, `line parity 0 (& 0x7F)`,
+`line parity 1 (& 0x7F)`, matching PCSX2 `FolderMemoryCard::CalculateECC` and
+mymc `ps2mc_ecc`. Drebin 0.4.0/0.4.1 did not mask bit 7 of the second byte.
+Consumers accept that legacy form so older Drebin images remain restorable;
+producers only write the canonical form. The verifier reports which form it
+saw (`ecc=canonical` or `ecc=legacy-drebin-0.4` in the sidecar).
+
+To convert a legacy image to canonical ECC, restore it to a card and export it
+again, or rewrite it on a PC with any tool that regenerates ECC.
+
 ### OPL-style `.vmc`
 
 Each page is stored as 512 logical data bytes with no ECC/spare area. This is the compact logical-page layout commonly used for PS2 VMC files.
@@ -62,6 +74,32 @@ Keep physical erase-geometry policy in the raw exact-restore/format layer. Do no
 An export is not reported as successful after the last write alone. Drebin closes the image, reopens it, reads the entire file back, validates size and layout, validates every `.ps2` ECC record, calculates CRC32 over the complete logical page stream and compares that value with the CRC captured from the physical card while dumping it.
 
 A small `<image>.mci.txt` sidecar records geometry, format, CRC32 and verification state without modifying the standard `.ps2` or `.vmc` file itself.
+
+Since 0.4.2 the sidecar is `sidecar_version=2`. It appends, without renaming
+or reordering the 0.4.0 keys:
+
+```text
+file_bytes=<size of the image file>
+sha256=<SHA-256 of the whole file as stored; equals `sha256sum`>
+ecc=canonical | legacy-drebin-0.4 | none (.vmc)
+sb_status=valid | invalid
+sb_error=<validator message>
+sb_version=1.2.0.0
+card_type=2
+card_flags=0x52
+card_flags_text=ERASE0
+health=ok | warn | invalid
+health_flags=0x0000
+backup_blocks=1023,1022
+ifc_clusters=1
+bad_blocks=0
+bad_block_list=12,345        (only when non-empty)
+```
+
+`health` is decoded from the superblock only (read-only). `warn` means the
+superblock lists bad blocks, its backup-block or indirect-FAT fields are out of
+range, or the card type/version is non-standard. `card_flags=0x52` on Sony
+cards does not set the `0x01` ECC bit, so that bit is reported but not judged.
 
 ### 64 MiB `.ps2` failure evidence, 2026-08-24
 

@@ -10,30 +10,13 @@
 #include <string.h>
 
 #include "card_math.h"
+#include "mc_fs_format.h"
 #include "image_quick_verify.h"
 
 #define QV_PAGE_DATA 512u
 #define QV_PAGE_RAW 528u
 #define QV_MAX_PAGES 262144u
 
-#pragma pack(push, 1)
-typedef struct MciQuickSuperblock {
-    char magic[28];
-    char version[12];
-    u16 page_len;
-    u16 pages_per_cluster;
-    u16 pages_per_block;
-    u16 unused;
-    u32 clusters_per_card;
-    u32 alloc_offset;
-    u32 alloc_end;
-    u32 rootdir_cluster;
-    u32 backup_block1;
-    u32 backup_block2;
-} MciQuickSuperblock;
-#pragma pack(pop)
-
-static const char SuperblockMagic[28] __attribute__((nonstring)) = "Sony PS2 Memory Card Format ";
 
 int __real_fileXioRead(int fd, void *buffer, int size);
 
@@ -72,30 +55,28 @@ static int ReadExactDirect(int fd, void *buffer, unsigned int size)
 
 static int KnownPageCount(u32 pages)
 {
-    return pages == 8192u || pages == 16384u || pages == 32768u ||
-           pages == 65536u || pages == 131072u || pages == 262144u;
+    return MciMcKnownPageCount(pages);
 }
 
 static int ParseGeometry(const unsigned char page[QV_PAGE_DATA],
                          MciCardGeometry *geometry)
 {
-    const MciQuickSuperblock *sb = (const MciQuickSuperblock *)page;
-    u64 pages;
+    MciMcSuperblock sb;
+    u32 pages;
 
-    if (memcmp(sb->magic, SuperblockMagic, sizeof(SuperblockMagic)) != 0 ||
-        sb->page_len != QV_PAGE_DATA || sb->pages_per_cluster == 0u ||
-        sb->pages_per_block == 0u || sb->clusters_per_card == 0u)
+    memcpy(&sb, page, sizeof(sb));
+    if (MciMcSuperblockValidate(&sb, MCI_MC_VALIDATE_GEOMETRY) < 0)
         return -1;
-    pages = (u64)sb->pages_per_cluster * sb->clusters_per_card;
-    if (pages == 0u || pages > QV_MAX_PAGES || !KnownPageCount((u32)pages))
+    pages = MciMcSuperblockTotalPages(&sb);
+    if (pages == 0u || pages > QV_MAX_PAGES || !KnownPageCount(pages))
         return -2;
 
     memset(geometry, 0, sizeof(*geometry));
-    geometry->page_size = sb->page_len;
-    geometry->pages_per_cluster = sb->pages_per_cluster;
-    geometry->pages_per_block = sb->pages_per_block;
-    geometry->clusters_per_card = sb->clusters_per_card;
-    geometry->total_pages = (u32)pages;
+    geometry->page_size = sb.page_len;
+    geometry->pages_per_cluster = sb.pages_per_cluster;
+    geometry->pages_per_block = sb.pages_per_block;
+    geometry->clusters_per_card = sb.clusters_per_card;
+    geometry->total_pages = pages;
     geometry->from_superblock = 1;
     return 0;
 }
@@ -138,6 +119,7 @@ int MciCardImageQuickReopenVerify(const char *path,
     if (ParseGeometry(first, &geometry) < 0 || geometry.total_pages != pages)
         goto invalid;
 
+    (void)MciMcHealthDecode(first, &report->health);
     report->geometry = geometry;
     report->pages_total = pages;
     report->pages_done = 1u;
@@ -181,8 +163,10 @@ int MciCardImageFindFirstEccMismatch(const char *path, u32 *page_out,
             fileXioClose(fd);
             return -4;
         }
-        MciCardMathBuildEcc12(raw, expected);
-        if (memcmp(raw + QV_PAGE_DATA, expected, 12u) != 0) {
+        /* Legacy 0.4.x bit-7 ECC is accepted here exactly as by the full
+         * verifier; only a real mismatch is reported. */
+        if (MciCardMathSpareCompare(raw, raw + QV_PAGE_DATA) == MCI_ECC_MATCH_NONE) {
+            MciCardMathBuildEcc12(raw, expected);
             memcpy(actual, raw + QV_PAGE_DATA, 12u);
             *page_out = page;
             fileXioClose(fd);

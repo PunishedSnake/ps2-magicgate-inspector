@@ -86,7 +86,7 @@ def ecc128_reference(data: bytes) -> int:
         if parity8_reference(value):
             line0 ^= (~index) & 0xFF
             line1 ^= index
-    return column | (line0 << 8) | (line1 << 16)
+    return column | ((line0 & 0x7F) << 8) | (line1 << 16)
 
 
 def ecc128_table_branchless(data: bytes) -> int:
@@ -100,7 +100,26 @@ def ecc128_table_branchless(data: bytes) -> int:
         column ^= entry & 0xFF
         line0 ^= ((~index) & 0xFF) & parity_mask
         line1 ^= index & parity_mask
-    return column | (line0 << 8) | (line1 << 16)
+    return column | ((line0 & 0x7F) << 8) | (line1 << 16)
+
+
+def ecc128_mymc(data: bytes) -> int:
+    """Independent port of mymc ps2mc_ecc._ecc_calculate (column masks built
+    from cpmasks, final 0x7F mask on line parity 0). PCSX2's
+    FolderMemoryCard::CalculateECC produces the same bytes."""
+    cpmasks = (0x55, 0x33, 0x0F, 0x00, 0xAA, 0xCC, 0xF0)
+    column = 0x77
+    line0 = 0x7F
+    line1 = 0x7F
+    for index, value in enumerate(data):
+        mask = 0
+        for bit, cp in enumerate(cpmasks):
+            mask |= parity8_reference(value & cp) << bit
+        column ^= mask
+        if parity8_reference(value):
+            line0 ^= ~index
+            line1 ^= index
+    return column | ((line0 & 0x7F) << 8) | (line1 << 16)
 
 
 def deterministic_pages() -> list[bytes]:
@@ -140,11 +159,12 @@ def main() -> None:
 
     for page in deterministic_pages():
         assert ecc128_table_branchless(page) == ecc128_reference(page)
+        assert ecc128_reference(page) == ecc128_mymc(page)
 
     print(
         "card math equivalence PASS: "
         "CRC table=256x32-bit, ECC table=256x9-bit semantics, "
-        "4096 deterministic pseudo-random ECC pages"
+        "4096 deterministic pseudo-random ECC pages, mymc/PCSX2 ECC parity"
     )
 
 

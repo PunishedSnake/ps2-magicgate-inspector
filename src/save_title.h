@@ -5,10 +5,11 @@
 #define MCI_SAVE_TITLE_MAX 96
 
 /* Decode the human-readable title stored in a PS2 icon.sys (mcIcon) record.
- * The current renderer/font path is ASCII-first: valid ASCII Shift-JIS code
- * points are preserved, line breaks are flattened to spaces, and titles that
- * contain no useful ASCII text fail so callers can retain the raw directory
- * name rather than display question-mark soup. */
+ * The title is a 68-byte Shift-JIS byte string. The renderer is ASCII-only, so
+ * single-byte ASCII is kept, full-width roman letters/digits/punctuation are
+ * folded to ASCII, the nlOffset line break becomes a space, and titles with
+ * fewer than three printable characters fail so callers keep the raw
+ * directory name rather than display question-mark soup. */
 int MciSaveTitleDecodeIconSys(const void *data, unsigned int size,
                               char *out, unsigned int out_size);
 

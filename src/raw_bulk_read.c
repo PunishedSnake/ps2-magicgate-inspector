@@ -19,13 +19,10 @@
 #include <timer.h>
 #include <string.h>
 
+#include "mc_fs_format.h"
 #include "diag_log.h"
 #include "raw_bulk_read.h"
 #include "r5900_memops.h"
-
-#ifndef MCI_ENABLE_R5900_BENCH
-#define MCI_ENABLE_R5900_BENCH 0
-#endif
 
 #ifndef MCI_RAW_BULK_PAGES
 #define MCI_RAW_BULK_PAGES 16
@@ -45,10 +42,6 @@
 #define MCI_CACHE_SLOTS 1
 #endif
 
-#if MCI_ENABLE_R5900_BENCH
-#include "r5900_bench.h"
-#endif
-
 #define MCI_MCSERV_RPC_ID 0x80000400
 #define MCI_MCSERV_BULK_READ_CMD 0x81
 #define MCI_PAGE_BYTES 512
@@ -57,7 +50,7 @@
 #define MCI_LATENCY_BUCKETS 256u
 #define MCI_TICKS_PER_MS (kBUSCLK / 1000u)
 
-static const char SuperblockMagic[28] __attribute__((nonstring)) = "Sony PS2 Memory Card Format ";
+static const char SuperblockMagic[MCI_MC_SUPERBLOCK_MAGIC_LEN] __attribute__((nonstring)) = MCI_MC_SUPERBLOCK_MAGIC;
 
 /* High 16 bits returned by the IOP encode one ECC-warning bit per prefetched
  * page. Low 8 bits contain the number of pages DMA-transferred. */
@@ -112,42 +105,6 @@ static u64 AsyncIssueTicks;
 static int AsyncSema = -1;
 #endif
 
-#if MCI_ENABLE_R5900_BENCH
-static int CpuBenchDone;
-
-static void RunCpuBenchOnce(void)
-{
-    MciR5900BenchReport report;
-    int rc;
-
-    if (CpuBenchDone)
-        return;
-    CpuBenchDone = 1;
-
-    rc = MciR5900BenchRun(&report);
-    if (rc < 0) {
-        MciDiagLogPrintf("R5900-PERF", "kernel benchmark failed rc=%d", rc);
-        return;
-    }
-
-    MciDiagLogPrintf(
-        "R5900-PERF",
-        "steady-state copy8k iter=%u cycles=%u dual=%u icmiss=%u dcmiss=%u branch=%u bpmiss=%u; crc8k iter=%u cycles=%u dual=%u icmiss=%u dcmiss=%u branch=%u bpmiss=%u; ecc512 iter=%u cycles=%u dual=%u icmiss=%u dcmiss=%u branch=%u bpmiss=%u hash=%08X",
-        report.copy_iterations,
-        report.copy_8k.cycles, report.copy_8k.dual_issues,
-        report.copy_8k.icache_misses, report.copy_8k.dcache_misses,
-        report.copy_8k.branches, report.copy_8k.branch_mispredicts,
-        report.crc_iterations,
-        report.crc_8k.cycles, report.crc_8k.dual_issues,
-        report.crc_8k.icache_misses, report.crc_8k.dcache_misses,
-        report.crc_8k.branches, report.crc_8k.branch_mispredicts,
-        report.ecc_iterations,
-        report.ecc_512.cycles, report.ecc_512.dual_issues,
-        report.ecc_512.icache_misses, report.ecc_512.dcache_misses,
-        report.ecc_512.branches, report.ecc_512.branch_mispredicts,
-        report.result_hash);
-}
-#endif
 
 static int KnownPageCount(u32 pages)
 {
@@ -514,12 +471,6 @@ int MciRawBulkReadBind(void)
     InvalidateAllCaches();
     Pending = 0;
 
-#if MCI_ENABLE_R5900_BENCH
-    /* Development/performance-lab build only. Normal backup latency and cache
-     * state must not include a synthetic CPU benchmark before every first raw
-     * session. Whole-operation telemetry is the production measurement path. */
-    RunCpuBenchOnce();
-#endif
 
     for (attempt = 0; attempt < 64; attempt++) {
         rc = sceSifBindRpc(&Client, MCI_MCSERV_RPC_ID, 0);
