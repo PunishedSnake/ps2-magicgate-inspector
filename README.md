@@ -4,18 +4,22 @@ PS2 Memory Card Inspector is a standalone PlayStation 2 homebrew utility for
 memory-card diagnostics, MagicGate/CardAuth qualification, card imaging/save
 transfer, and verified cross-region FreeMcBoot installation.
 
-## v0.4.1 "Drebin"
+## v0.4.2-rc1 "Drebin" (pre-release)
 
 Drebin is the write-capable release line.
 
-0.4.1 is a targeted maintenance hotfix for the 0.4.0 feature set. It prevents
-the FMCB installer and persistent diagnostic logger from interleaving USB FAT
-traffic across repeated MagicGate/IOP handoffs, reuses preflight-bound KELFs in
-RAM during the transaction, and keeps PADMAN out of the temporary security IOP
-personality.
+0.4.2-rc1 is a **pre-release** that adds save-format work on top of the 0.4.1
+feature set: PS1 memory-card support, imports from the common PC/emulator save
+containers (PSU, MAX, CBS, SharkPort/X-Port, PSV, GME, VGS/MCS, AR `.psx`,
+VMP, MCX and raw saves), signed-format export (PSV/VMP), cross-format
+conversion, a raw PS1 save-name editor and a PS2 replace-file tool. Every
+codec is verified byte-for-byte against independent tools on the host, but
+the new card-writing paths still need hardware confirmation. See
+[RELEASE_NOTES.md](RELEASE_NOTES.md) before using it on cards you care about.
 
-There is **one public 0.4.1 build**. Development-only USB speed-test variants,
-async candidates and Performance Lab binaries are not part of the release.
+There is **one public 0.4.2-rc1 build**. Development-only USB speed-test
+variants, async candidates and Performance Lab binaries are not part of the
+release.
 
 ### Release build profile
 
@@ -201,10 +205,10 @@ The security stack is pinned to PS2SDK source commit:
 a13b5971ec0e39c7ba8b8559b80a4e81c8425352
 ```
 
-The public 0.4.1 build is a single P0 production ELF:
+The public 0.4.2-rc1 build is a single P0 production ELF:
 
 ```text
-MC_INSPECTOR-0.4.1-Drebin.ELF
+MC_INSPECTOR-0.4.2-rc1-Drebin.ELF
 ```
 
 No USB speed-test or Performance Lab variants are published.

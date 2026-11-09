@@ -97,6 +97,32 @@ A raw `FMCB.XLF` and any wider FMCB package used for testing are supplied by the
 
 In 0.2.0 the KELF is used only as RAM-resident test input. The bound result is not written back to the card.
 
+## Save-format components (0.4.2)
+
+### tinf 1.2.1 (zlib License)
+
+```text
+https://github.com/jibsen/tinf
+Copyright (c) 2003-2019 Joergen Ibsen
+```
+
+Vendored unmodified in `src/tinf/` for CodeBreaker (`.cbs`) inflate. License
+text: `licenses/tinf-zlib.txt`.
+
+### Formats, constants and algorithms
+
+- LZARI decompression is written from Haruhiko Okumura's published algorithm
+  (1989, public domain).
+- PS2 container layouts (PSU, MAX, CBS, SharkPort) and the CodeBreaker RC4
+  state follow mymc by Ross Ridge (public domain).
+- PS1 card, DexDrive, VGS, VMP, MCX and PSV layouts and the public
+  save-container keys were taken as facts from MemcardRex (GPL-3.0), Apollo
+  Save Tool (GPL-3.0) and psdevwiki. No code from MemcardRex, Apollo, mymc++
+  or PCSX2 is included. Their output files are used only as test oracles under
+  `tests/fixtures/oracle`.
+- AES-128, SHA-1 and HMAC-SHA1 (`src/mci_crypto.c`) are original
+  implementations of the public standards.
+
 ## Project license
 
 Original PS2 Memory Card Inspector code is released under the MIT License in the repository `LICENSE` file, except where a source file or third-party component states otherwise.
