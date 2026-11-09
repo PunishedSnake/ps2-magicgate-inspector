@@ -35,7 +35,7 @@
 
 #define AR_CHUNK 16384u
 #define AR_MAX_SOURCE (MCI_SAVE_MAX_BYTES + 1024u * 1024u)
-#define AR_MAX_CREATED (MCI_SAVE_MAX_FILES + 2)
+#define AR_MAX_CREATED ((int)MCI_SAVE_MAX_FILES + 2)
 
 static unsigned char ArVerify[AR_CHUNK] __attribute__((aligned(64)));
 static unsigned char ArWrite[AR_CHUNK] __attribute__((aligned(64)));
@@ -264,8 +264,9 @@ static int HasTimestamp(const MciMcDateTime *t)
 static int ImportPs2Archive(int port, const MciSaveArchive *a,
                             MciSaveTransferReport *report)
 {
-    char dir[MCI_SAVE_TRANSFER_FAILED_PATH_MAX];
-    char file[MCI_SAVE_TRANSFER_FAILED_PATH_MAX];
+    /* "/" + 32-char directory and "/" + 32-char name: always fits. */
+    char dir[2u + MCI_SAVE_NAME_MAX + 1u];
+    char file[sizeof(dir) + 1u + MCI_SAVE_NAME_MAX + 1u];
     char (*created)[MCI_SAVE_TRANSFER_FAILED_PATH_MAX];
     int created_count = 0;
     int free_clusters = -1;

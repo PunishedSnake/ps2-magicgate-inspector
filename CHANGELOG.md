@@ -3,6 +3,29 @@
 All notable changes to PS2 Memory Card Inspector are documented here.
 
 
+## [Unreleased] — 0.4.2 save formats + PS1 cards
+
+### Added
+
+- **Import every common save container** to a physical card, detected by
+  content: PS2 `.psu .max .pws .cbs .sps .xps .psv`; PS1 `.mcs .ps1 .psx .mcb
+  .mcx .pda .psv`, raw/headerless saves, and whole PS1 cards `.mcd .mcr .mc
+  .bin .ddf .gme .dex .mem .vgs .vmp` and POPStarter `.VMC`.
+- **PS1 card support**: PS1 containers write to PS1 cards through mcman's
+  PS1 file API with the same preflight / read-back / rollback contract; card
+  images import all saves or none.
+- **Convert on USB**: PS2 save → `.psu`, PS1 save → `.mcs`, PS1 card →
+  `.mcd`, verified, never overwriting.
+- Portable codecs (`save_archive`, `save_codec_ps2`, `ps1_card`, `lzari`,
+  `save_detect`) with fixture tests cross-checked against mymc++, plus
+  truncation and bit-flip fuzzing under ASan/UBSan.
+
+### Changed
+
+- The probe reads 4 KiB and identifies formats by structure; the save picker
+  also lists `.bin`, `.sav`, `.vmc` and extensionless files.
+- Card Tools grid gains a ninth tile (CONVERT SAVE ON USB).
+
 ## [Unreleased] — 0.4.2 foundation
 
 ### Fixed

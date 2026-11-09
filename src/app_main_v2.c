@@ -100,7 +100,7 @@ static void ShowSaveTransferResultV2(const char *title,
                                      const MciSaveTransferReport *report,
                                      int rc)
 {
-    char message[1024];
+    char message[1600];
     MciGuiTone tone;
 
     if (report->result == MCI_SAVE_TRANSFER_OK)
