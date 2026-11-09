@@ -86,6 +86,13 @@ static int accept_file(const char *name, MciUsbPickerFilter filter,
             *format = MCI_SAVE_FORMAT_UNKNOWN;
             return 1;
         }
+        /* GameFAQs/emulator downloads often arrive as .bin/.sav or as a bare
+         * PS1 product-code name; the importer identifies them by content. */
+        if (ends_with_icase(name, ".bin") || ends_with_icase(name, ".sav") ||
+            ends_with_icase(name, ".vmc") || strchr(name, '.') == NULL) {
+            *format = MCI_SAVE_FORMAT_UNKNOWN;
+            return 1;
+        }
     }
     return 0;
 }

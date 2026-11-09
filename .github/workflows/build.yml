@@ -35,6 +35,17 @@ jobs:
           python3 tools/verify_fmcb_cross_region.py
           python3 tools/verify_settings_config.py
 
+      - name: Save fixtures reproduce (mymc++ oracle)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 -m pip install --quiet --break-system-packages mymcplusplus 2>/dev/null ||
+             python3 -m pip install --quiet mymcplusplus; then
+            python3 tools/gen_save_fixtures.py --check > /dev/null
+          else
+            echo "::warning::mymcplusplus unavailable; committed fixtures used as-is"
+          fi
+
       - name: Host unit tests
         shell: bash
         run: |

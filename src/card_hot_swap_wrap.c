@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 
+#include <libmc.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -27,8 +28,19 @@ int __wrap_MciImageFsRefreshTargetConflicts(int target_port,
 int __wrap_MciSaveTransferImportFile(int target_port, const char *path,
                                      MciSaveTransferReport *report)
 {
+    MciSaveTransferProbe probe;
     MciSaveTransferFormat format = MciSaveTransferFormatFromPath(path);
-    int rc = MciNormalCardProbeFormatted(target_port, NULL);
+    int expected = MC_TYPE_PS2;
+    int rc;
+
+    /* Settle the slot for the card generation the container needs: PS1
+     * containers go to PS1 cards, everything else to PS2 cards. */
+    if (path != NULL && MciSaveTransferProbeFile(path, &probe) == 0) {
+        format = probe.format;
+        if (probe.generation == 1)
+            expected = MC_TYPE_PSX;
+    }
+    rc = MciNormalCardProbeFormattedType(target_port, expected, NULL);
 
     if (rc < 0) {
         if (report != NULL) {

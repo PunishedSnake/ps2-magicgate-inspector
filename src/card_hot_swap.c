@@ -31,7 +31,8 @@ static int ProbeOnce(int port, int *type_out, int *free_out, int *formatted_out)
     return result;
 }
 
-int MciNormalCardProbeFormatted(int port, int *free_clusters)
+int MciNormalCardProbeFormattedType(int port, int expected_type,
+                                     int *free_clusters)
 {
     int attempt;
     int type = MC_TYPE_NONE;
@@ -48,7 +49,7 @@ int MciNormalCardProbeFormatted(int port, int *free_clusters)
         MciDiagLogPrintf("CARD-HOTSWAP",
                          "probe port=mc%d attempt=%d rc=%d type=%d free=%d formatted=%d",
                          port, attempt + 1, rc, type, free_value, formatted);
-        if (rc >= sceMcResNoFormat && type == MC_TYPE_PS2 && formatted) {
+        if (rc >= sceMcResNoFormat && type == expected_type && formatted) {
             if (free_clusters != NULL)
                 *free_clusters = free_value;
             return 0;
@@ -75,7 +76,7 @@ int MciNormalCardProbeFormatted(int port, int *free_clusters)
         MciDiagLogPrintf("CARD-HOTSWAP",
                          "post-reinit probe port=mc%d attempt=%d rc=%d type=%d free=%d formatted=%d",
                          port, attempt + 1, rc, type, free_value, formatted);
-        if (rc >= sceMcResNoFormat && type == MC_TYPE_PS2 && formatted) {
+        if (rc >= sceMcResNoFormat && type == expected_type && formatted) {
             if (free_clusters != NULL)
                 *free_clusters = free_value;
             return 0;
@@ -88,4 +89,9 @@ int MciNormalCardProbeFormatted(int port, int *free_clusters)
     if (rc < sceMcResNoFormat)
         return rc;
     return formatted ? sceMcResFailDetect : sceMcResNoFormat;
+}
+
+int MciNormalCardProbeFormatted(int port, int *free_clusters)
+{
+    return MciNormalCardProbeFormattedType(port, MC_TYPE_PS2, free_clusters);
 }

@@ -112,14 +112,19 @@ static void ShowSaveTransferResultV2(const char *title,
         tone = MCI_GUI_TONE_DANGER;
 
     snprintf(message, sizeof(message),
-             "Result: %s (rc=%d)\nFormat: %s\nCard: mc%d\n\nSource: %s\nDestination: %s\nSave directory: %s\nFiles: %d/%d  verified: %d\nBytes: %u\nRequired clusters: %d  target free: %d\nRollback rc: %d\nFailed path: %s",
+             "Result: %s (rc=%d)\nFormat: %s%s\nCard: mc%d%s\n\nSource: %s\nDestination: %s\nSave: %s%s%s\nSaves: %d/%d  files: %d/%d  verified: %d\nBytes: %u\nRequired %s: %d  target free: %d\nRollback rc: %d\nFailed path: %s",
              MciSaveTransferResultText(report->result), rc,
-             MciSaveTransferFormatName(report->format), report->card_port,
+             MciSaveTransferFormatName(report->format),
+             report->checksum_ok == 0 ? "  (container CRC mismatch)" : "",
+             report->card_port, report->generation == 1 ? " (PS1)" : "",
              report->source_path[0] ? report->source_path : "n/a",
              report->destination[0] ? report->destination : "n/a",
              report->save_directory[0] ? report->save_directory : "n/a",
+             report->title[0] ? "  " : "", report->title,
+             report->saves_written, report->saves_total,
              report->files_written, report->files_total,
              report->files_verified, report->bytes_written,
+             report->generation == 1 ? "blocks" : "clusters",
              report->required_clusters, report->target_free_clusters,
              report->rollback_rc,
              report->failed_path[0] ? report->failed_path : "none");
@@ -249,7 +254,7 @@ static void RunSaveImportV2(int *active_port)
         return;
     }
 
-    if (probe.format != MCI_SAVE_FORMAT_PSU) {
+    if (!probe.importable) {
         MciSaveTransferResetReport(&report, target_port, probe.format);
         report.result = MCI_SAVE_TRANSFER_UNSUPPORTED_FORMAT;
         snprintf(report.source_path, sizeof(report.source_path), "%s", path);
@@ -258,10 +263,16 @@ static void RunSaveImportV2(int *active_port)
         return;
     }
 
-    snprintf(confirm, sizeof(confirm),
-             "Import this save to mc%d?\n\nSource: %s\nFormat: %s\nSize: %u KiB\n\nThe destination must be a formatted PS2 card. Existing top-level save directories are never overwritten. Every new file is reopened and compared byte-for-byte before PASS; a failed transaction rolls back only objects it created.",
-             target_port, path, MciSaveTransferFormatName(probe.format),
-             (unsigned int)((probe.size + 1023u) / 1024u));
+    if (probe.generation == 1)
+        snprintf(confirm, sizeof(confirm),
+                 "Import to the PS1 card in mc%d?\n\nSource: %s\nFormat: %s\nSize: %u KiB\n\nThe destination must be a formatted PS1 card. A card image imports every save it holds, all-or-nothing. Saves whose name already exists are never overwritten. Each save is read back and compared before PASS.\n\nNOTE: creating a PS1 save clears deleted (undeletable) entries on that card.",
+                 target_port, path, MciSaveTransferFormatName(probe.format),
+                 (unsigned int)((probe.size + 1023u) / 1024u));
+    else
+        snprintf(confirm, sizeof(confirm),
+                 "Import this save to mc%d?\n\nSource: %s\nFormat: %s\nSize: %u KiB\n\nThe destination must be a formatted PS2 card. The container is decoded and validated in RAM first. Existing top-level save directories are never overwritten. Every new file is reopened and compared byte-for-byte before PASS; a failed transaction rolls back only objects it created.",
+                 target_port, path, MciSaveTransferFormatName(probe.format),
+                 (unsigned int)((probe.size + 1023u) / 1024u));
     if (!ConfirmCrossV2("SAVE IMPORT CONFIRMATION", confirm,
                         MCI_GUI_TONE_WARNING))
         return;
@@ -302,6 +313,45 @@ static void RunSaveExportV2(int *active_port)
 
     rc = MciSaveTransferExportPsu(source_port, directory, path, &report);
     ShowSaveTransferResultV2("PSU export", &report, rc);
+}
+
+static void RunSaveConvertV2(int *active_port)
+{
+    MciSaveTransferReport report;
+    MciSaveTransferProbe probe;
+    MciSaveTransferFormat picked_format = MCI_SAVE_FORMAT_UNKNOWN;
+    char path[MCI_SAVE_TRANSFER_PATH_MAX];
+    char out_path[MCI_SAVE_TRANSFER_PATH_MAX];
+    char confirm[640];
+    int port = *active_port;
+    int rc;
+
+    rc = MciUsbPickerChoose(MCI_USB_PICKER_SAVE_ANY,
+                            "CONVERT SAVE ON USB", "SOURCE",
+                            &port, path, sizeof(path), &picked_format);
+    *active_port = port;
+    if (rc != 0)
+        return;
+    memset(&probe, 0, sizeof(probe));
+    if (MciSaveTransferProbeFile(path, &probe) < 0 || !probe.importable) {
+        MciSaveTransferResetReport(&report, -1, probe.format);
+        report.result = MCI_SAVE_TRANSFER_UNSUPPORTED_FORMAT;
+        snprintf(report.source_path, sizeof(report.source_path), "%s", path);
+        ShowSaveTransferResultV2("Save conversion", &report, -300);
+        return;
+    }
+    snprintf(confirm, sizeof(confirm),
+             "Convert this file on USB?\n\nSource: %s\nFormat: %s\n\nOutput (next to the source): %s\n\nNo memory card is touched. The source is never modified; an existing output file is never overwritten. The output is re-read and compared before PASS.",
+             path, MciSaveTransferFormatName(probe.format),
+             probe.generation == 2 ? ".psu (EMS/uLaunchELF)"
+             : (probe.format == MCI_SAVE_FORMAT_IMAGE_PS1 ||
+                probe.format == MCI_SAVE_FORMAT_GME_PS1)
+                   ? ".mcd (raw 128 KiB PS1 card: POPStarter, DuckStation, ePSXe)"
+                   : ".mcs (PS1 single save: MemcardRex, PSXGameEdit)");
+    if (!ConfirmCrossV2("SAVE CONVERSION", confirm, MCI_GUI_TONE_INFO))
+        return;
+    rc = MciSaveTransferConvertFile(path, out_path, sizeof(out_path), &report);
+    ShowSaveTransferResultV2("Save conversion", &report, rc);
 }
 
 static void RunSelectiveRestorePickerV2(int *active_port)
@@ -531,12 +581,13 @@ static int RunCardToolsMenuV2(int port)
             active_port = 0;
         else if (pressed & PAD_R1)
             active_port = 1;
-        if (pressed & (PAD_LEFT | PAD_RIGHT))
+        /* 9 tiles in a 2-column grid; tile 8 (RETURN) sits alone. */
+        if ((pressed & (PAD_LEFT | PAD_RIGHT)) && item < 8)
             item = (item & ~1) | ((item & 1) ^ 1);
         if (pressed & PAD_UP)
-            item = item < 2 ? item + 6 : item - 2;
+            item = item < 2 ? 8 : (item == 8 ? 6 : item - 2);
         else if (pressed & PAD_DOWN)
-            item = item >= 6 ? item - 6 : item + 2;
+            item = item >= 8 ? 0 : (item + 2 > 8 ? 8 : item + 2);
         if (!(pressed & PAD_CROSS))
             continue;
 
@@ -561,6 +612,9 @@ static int RunCardToolsMenuV2(int port)
                 break;
             case 6:
                 RunForceFormatWithBackupV2(active_port);
+                break;
+            case 7:
+                RunSaveConvertV2(&active_port);
                 break;
             default:
                 return active_port;
