@@ -67,6 +67,10 @@ static int accept_file(const char *name, MciUsbPickerFilter filter,
     MciSaveTransferFormat f = MciSaveTransferFormatFromPath(name);
     MciSaveTransferFamily family = MciSaveTransferFormatFamily(f);
 
+    if (filter == MCI_USB_PICKER_FILE_ANY) {
+        *format = f;
+        return 1;
+    }
     if (filter == MCI_USB_PICKER_IMAGE_PS2)
         return f == MCI_SAVE_FORMAT_IMAGE_PS2 ? (*format = f, 1) : 0;
     if (filter == MCI_USB_PICKER_IMAGE_VMC)

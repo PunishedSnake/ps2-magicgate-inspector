@@ -14,7 +14,8 @@ typedef enum MciUsbPickerFilter {
     MCI_USB_PICKER_IMAGE_PS2 = 0,
     MCI_USB_PICKER_IMAGE_VMC,
     MCI_USB_PICKER_IMAGE_ANY,
-    MCI_USB_PICKER_SAVE_ANY
+    MCI_USB_PICKER_SAVE_ANY,
+    MCI_USB_PICKER_FILE_ANY   /* every regular file (raw data replacement) */
 } MciUsbPickerFilter;
 
 typedef struct MciUsbPickerEntry {

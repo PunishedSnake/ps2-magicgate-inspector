@@ -18,9 +18,13 @@
 #include <io_common.h>
 
 #include "card_save_picker.h"
+#include "ps1_card.h"
+#include "save_replace_card.h"
 #include "save_transfer.h"
 #include "usb_file_picker.h"
 #include "usb_file_picker_ui.h"
+
+static int PreparePs1RawNameV2(const MciSaveTransferProbe *probe, const char *path);
 
 void MciGuiRenderCardToolsV2(int selected, int selected_item);
 
@@ -264,6 +268,8 @@ static void RunSaveImportV2(int *active_port)
         return;
     }
 
+    if (!PreparePs1RawNameV2(&probe, path))
+        return;
     if (probe.generation == 1)
         snprintf(confirm, sizeof(confirm),
                  "Import to the PS1 card in mc%d?\n\nSource: %s\nFormat: %s\nSize: %u KiB\n\nThe destination must be a formatted PS1 card. A card image imports every save it holds, all-or-nothing. Saves whose name already exists are never overwritten. Each save is read back and compared before PASS.\n\nNOTE: creating a PS1 save clears deleted (undeletable) entries on that card.",
@@ -275,10 +281,13 @@ static void RunSaveImportV2(int *active_port)
                  target_port, path, MciSaveTransferFormatName(probe.format),
                  (unsigned int)((probe.size + 1023u) / 1024u));
     if (!ConfirmCrossV2("SAVE IMPORT CONFIRMATION", confirm,
-                        MCI_GUI_TONE_WARNING))
+                        MCI_GUI_TONE_WARNING)) {
+        MciSaveTransferSetPs1NameOverride(NULL);
         return;
+    }
 
     rc = MciSaveTransferImportFile(target_port, path, &report);
+    MciSaveTransferSetPs1NameOverride(NULL);
     if (rc == 0)
         ResetSlotReports(target_port);
     ShowSaveTransferResultV2("Save import", &report, rc);
@@ -314,6 +323,114 @@ static void RunSaveExportV2(int *active_port)
 
     rc = MciSaveTransferExportPsu(source_port, directory, path, &report);
     ShowSaveTransferResultV2("PSU export", &report, rc);
+}
+
+/* Pad-driven PS1 save-name editor. Returns 1 when confirmed (name updated),
+ * 0 when cancelled. */
+static int EditPs1NameV2(char name[MCI_PS1_SAVE_NAME_MAX + 1u], const char *source)
+{
+    static const char Charset[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_ "
+        "abcdefghijklmnopqrstuvwxyz.!#$%&()+,;=@[]^{}~'";
+    char guess[MCI_PS1_SAVE_NAME_MAX + 1u];
+    char body[900];
+    char shown[64];
+    int have_guess = MciPs1GuessNameFromText(source, guess);
+    int cursor = 0;
+    u32 held;
+    u32 pressed;
+
+    WaitForPadNeutralV2();
+    for (;;) {
+        int len = (int)strlen(name);
+        int i;
+        int used = 0;
+        const char *verdict;
+
+        for (i = 0; i <= len && i < (int)MCI_PS1_SAVE_NAME_MAX && used < (int)sizeof(shown) - 4; i++) {
+            char c = i < len ? name[i] : ' ';
+            if (i == cursor)
+                used += snprintf(shown + used, sizeof(shown) - (unsigned int)used, "[%c]", c);
+            else if (i < len)
+                shown[used++] = c;
+        }
+        shown[used] = '\0';
+        verdict = len == 0 ? "EMPTY - a name is required"
+                  : MciPs1NameLooksLikeProductCode(name)
+                        ? "looks like a PS1 save name"
+                        : "WARNING: not a product-code name; games will not find it";
+        snprintf(body, sizeof(body),
+                 "This raw PS1 save has no header, so its name comes from the file name. PS1 games only see a save whose name matches exactly, e.g. BASCUS-94163FF7S01 (B + region A/E/I + product code + the game's own suffix). Copy the name from another save of the same game if you have one.\n\nSource: %s\n\nName: %s\n%s\n%s%s",
+                 source, shown, verdict,
+                 have_guess ? "SQUARE: use product code found in the file name: " : "",
+                 have_guess ? guess : "");
+        MciGuiRenderMessage("PS1 SAVE NAME", body,
+                            "LEFT/RIGHT move  UP/DOWN char  TRIANGLE delete  X OK  O cancel",
+                            MciPs1NameLooksLikeProductCode(name) ? MCI_GUI_TONE_INFO
+                                                                  : MCI_GUI_TONE_WARNING);
+        for (;;) {
+            pressed = ReadPadPressed(&held);
+            if (pressed != 0u)
+                break;
+            DelayThread(16000);
+        }
+        if (pressed & PAD_CIRCLE)
+            return 0;
+        if ((pressed & PAD_CROSS) && len > 0 && MciPs1NameIsSafe(name))
+            return 1;
+        if ((pressed & PAD_SQUARE) && have_guess) {
+            /* Keep any identifier suffix the user already typed. */
+            char merged[MCI_PS1_SAVE_NAME_MAX + 1u];
+            const char *suffix = MciPs1NameLooksLikeProductCode(name) ? name + 12 : "";
+            snprintf(merged, sizeof(merged), "%s%s", guess, suffix);
+            memcpy(name, merged, strlen(merged) + 1u);
+            cursor = (int)strlen(name) < (int)MCI_PS1_SAVE_NAME_MAX ? (int)strlen(name) : (int)MCI_PS1_SAVE_NAME_MAX - 1;
+            continue;
+        }
+        if (pressed & PAD_LEFT)
+            cursor = cursor > 0 ? cursor - 1 : 0;
+        if ((pressed & PAD_RIGHT) && cursor < len && cursor + 1 < (int)MCI_PS1_SAVE_NAME_MAX)
+            cursor++;
+        if ((pressed & PAD_TRIANGLE) && cursor < len) {
+            memmove(name + cursor, name + cursor + 1, (size_t)(len - cursor));
+            if (cursor > 0 && cursor >= (int)strlen(name))
+                cursor--;
+        }
+        if (pressed & (PAD_UP | PAD_DOWN)) {
+            const char *at = cursor < len ? strchr(Charset, name[cursor]) : NULL;
+            int idx = at != NULL ? (int)(at - Charset) : -1;
+            int n = (int)sizeof(Charset) - 1;
+            idx = (pressed & PAD_UP) ? (idx + 1) % n : (idx <= 0 ? n - 1 : idx - 1);
+            if (cursor >= len) {
+                if (len >= (int)MCI_PS1_SAVE_NAME_MAX)
+                    continue;
+                name[len] = Charset[idx];
+                name[len + 1] = '\0';
+            } else {
+                name[cursor] = Charset[idx];
+            }
+        }
+    }
+}
+
+/* For raw PS1 saves: confirm or edit the save name and arm the override.
+ * Returns 1 to continue, 0 when the user cancelled. */
+static int PreparePs1RawNameV2(const MciSaveTransferProbe *probe, const char *path)
+{
+    char name[MCI_PS1_SAVE_NAME_MAX + 1u];
+
+    MciSaveTransferSetPs1NameOverride(NULL);
+    if (probe->format != MCI_SAVE_FORMAT_RAW_PS1)
+        return 1;
+    MciPs1NameFromPath(path, name);
+    if (!MciPs1NameLooksLikeProductCode(name)) {
+        char guess[MCI_PS1_SAVE_NAME_MAX + 1u];
+        if (MciPs1GuessNameFromText(path, guess))
+            memcpy(name, guess, strlen(guess) + 1u);
+    }
+    if (!EditPs1NameV2(name, path))
+        return 0;
+    return MciSaveTransferSetPs1NameOverride(name) == 0;
 }
 
 /* Small list chooser on top of the message renderer. Returns the chosen
@@ -378,6 +495,8 @@ static void RunSaveConvertV2(int *active_port)
         ShowSaveTransferResultV2("Save conversion", &report, -300);
         return;
     }
+    if (!PreparePs1RawNameV2(&probe, path))
+        return;
     {
         MciSaveConvertTarget targets[8];
         const char *names[8];
@@ -391,12 +510,117 @@ static void RunSaveConvertV2(int *active_port)
                  "Source: %s\nFormat: %s\n\nChoose the output format. It is written next to the source and re-read before PASS; signed formats are verified after signing. No memory card is touched and nothing is overwritten.",
                  path, MciSaveTransferFormatName(probe.format));
         choice = n > 0 ? ChooseOptionV2("CONVERT SAVE ON USB", confirm, names, n) : -1;
-        if (choice < 0)
+        if (choice < 0) {
+            MciSaveTransferSetPs1NameOverride(NULL);
             return;
+        }
         rc = MciSaveTransferConvertFileTo(path, targets[choice], out_path,
                                           sizeof(out_path), &report);
+        MciSaveTransferSetPs1NameOverride(NULL);
     }
     ShowSaveTransferResultV2("Save conversion", &report, rc);
+}
+
+static void RunReplaceFileV2(int *active_port)
+{
+    static char names[24][33];
+    static u32 sizes[24];
+    const char *labels[24];
+    char label_text[24][64];
+    char directory[MCI_CARD_SAVE_DIRECTORY_MAX];
+    char usb_path[MCI_SAVE_TRANSFER_PATH_MAX];
+    char backup_path[MCI_SAVE_TRANSFER_PATH_MAX];
+    char backup_base[48];
+    char body[1100];
+    MciSaveTransferFormat picked = MCI_SAVE_FORMAT_UNKNOWN;
+    MciReplaceReport report;
+    iox_stat_t st;
+    int port = *active_port;
+    int usb_port;
+    int count;
+    int choice;
+    int i;
+    int rc;
+
+    rc = MciCardSavePickerChoose(&port, directory, sizeof(directory));
+    *active_port = port;
+    if (rc != 0)
+        return;
+    count = MciSaveListFiles(port, directory, names, sizes, 24);
+    if (count <= 0) {
+        MciGuiRenderMessage("Replace file", "The save has no files or could not be listed.",
+                            "CROSS or CIRCLE returns to Card Tools.", MCI_GUI_TONE_DANGER);
+        WaitForPadNeutralV2();
+        WaitForModalDismiss();
+        return;
+    }
+    for (i = 0; i < count; i++) {
+        snprintf(label_text[i], sizeof(label_text[i]), "%-24.32s %8u B", names[i], sizes[i]);
+        labels[i] = label_text[i];
+    }
+    snprintf(body, sizeof(body), "mc%d:/%s\nChoose the file to replace:", port, directory);
+    choice = ChooseOptionV2("REPLACE FILE IN SAVE", body, labels, count);
+    if (choice < 0)
+        return;
+
+    usb_port = port;
+    rc = MciUsbPickerChoose(MCI_USB_PICKER_FILE_ANY, "REPLACEMENT DATA", "SOURCE",
+                            &usb_port, usb_path, sizeof(usb_path), &picked);
+    if (rc != 0)
+        return;
+    memset(&st, 0, sizeof(st));
+    if (fileXioGetStat(usb_path, &st) < 0 || !FIO_S_ISREG(st.mode)) {
+        MciGuiRenderMessage("Replace file", "The replacement file cannot be read.",
+                            "CROSS or CIRCLE returns to Card Tools.", MCI_GUI_TONE_DANGER);
+        WaitForPadNeutralV2();
+        WaitForModalDismiss();
+        return;
+    }
+    snprintf(backup_base, sizeof(backup_base), "%s_BEFORE_REPLACE", directory);
+    if (PreparePsuExportPathV2(backup_base, backup_path, sizeof(backup_path)) < 0) {
+        MciGuiRenderMessage("Replace file", "No writable USB location for the backup. Nothing was changed.",
+                            "CROSS or CIRCLE returns to Card Tools.", MCI_GUI_TONE_DANGER);
+        WaitForPadNeutralV2();
+        WaitForModalDismiss();
+        return;
+    }
+    snprintf(body, sizeof(body),
+             "Replace mc%d:/%s/%s\nwith %s?\n\nCurrent size: %u bytes\nNew size:     %u bytes%s\n\n1. The whole save is first exported to %s and verified.\n2. The new data is written to a temporary file and verified.\n3. The original is removed and the copy takes its name, attributes and dates.\n\nThe data is written exactly as given: Drebin cannot check that the game accepts it.",
+             port, directory, names[choice], usb_path, sizes[choice], (u32)st.size,
+             (u32)st.size != sizes[choice]
+                 ? "\nWARNING: sizes differ. Many games reject a data file of the wrong size."
+                 : "",
+             backup_path);
+    if (!ConfirmCrossV2("REPLACE FILE CONFIRMATION", body, MCI_GUI_TONE_WARNING))
+        return;
+
+    rc = MciSaveReplaceFile(port, directory, names[choice], usb_path, backup_path, &report);
+    if (report.ok) {
+        snprintf(body, sizeof(body),
+                 "Replaced mc%d:/%s/%s (%u -> %u bytes).\nRead back and compared: PASS.\n%s\n\nBackup of the previous save: %s",
+                 port, directory, names[choice], report.plan.old_size, report.plan.new_size,
+                 report.used_rename ? "Renamed in place." : "Rename unsupported: final file rewritten and verified.",
+                 backup_path);
+        ResetSlotReports(port);
+    } else {
+        snprintf(body, sizeof(body),
+                 "Replace FAILED at: %s (rc=%d)\n\nOriginal file: %s\nTemporary copy: %s\nBackup: %s\n\n%s",
+                 MciReplaceStageText(report.failed_stage), rc,
+                 report.original_intact ? "untouched" : "removed",
+                 report.temp_left_on_card ? report.plan.temp_name : "none",
+                 report.failed_stage > MCI_REPLACE_STAGE_BACKUP ? backup_path : "not needed / not written",
+                 report.original_intact ? "The save is unchanged."
+                     : "Restore the save from the backup with IMPORT SAVE (delete the damaged save first in the PS2 browser).");
+        if (report.failed_stage == MCI_REPLACE_STAGE_PREFLIGHT && report.rc < 0 &&
+            report.rc >= MCI_REPLACE_E_BAD_ICONSYS) {
+            size_t len = strlen(body);
+            snprintf(body + len, sizeof(body) - len, "\nReason: %s", MciReplaceErrorText(report.rc));
+        }
+    }
+    MciGuiRenderMessage("Replace file", body, "CROSS or CIRCLE returns to Card Tools.",
+                        report.ok ? MCI_GUI_TONE_SUCCESS : MCI_GUI_TONE_DANGER);
+    WaitForPadNeutralV2();
+    WaitForModalDismiss();
 }
 
 static void RunSelectiveRestorePickerV2(int *active_port)
@@ -626,13 +850,13 @@ static int RunCardToolsMenuV2(int port)
             active_port = 0;
         else if (pressed & PAD_R1)
             active_port = 1;
-        /* 9 tiles in a 2-column grid; tile 8 (RETURN) sits alone. */
-        if ((pressed & (PAD_LEFT | PAD_RIGHT)) && item < 8)
+        /* 10 tiles, 2 columns x 5 rows. */
+        if (pressed & (PAD_LEFT | PAD_RIGHT))
             item = (item & ~1) | ((item & 1) ^ 1);
         if (pressed & PAD_UP)
-            item = item < 2 ? 8 : (item == 8 ? 6 : item - 2);
+            item = item < 2 ? item + 8 : item - 2;
         else if (pressed & PAD_DOWN)
-            item = item >= 8 ? 0 : (item + 2 > 8 ? 8 : item + 2);
+            item = item >= 8 ? item - 8 : item + 2;
         if (!(pressed & PAD_CROSS))
             continue;
 
@@ -660,6 +884,9 @@ static int RunCardToolsMenuV2(int port)
                 break;
             case 7:
                 RunSaveConvertV2(&active_port);
+                break;
+            case 8:
+                RunReplaceFileV2(&active_port);
                 break;
             default:
                 return active_port;

@@ -142,6 +142,25 @@ int MciPs1EncodeAr(const MciSaveArchive *archive, unsigned char *out,
 /* Last MCX/VMP integrity result from MciPs1CardLoad: MCI_SIG_* value. */
 int MciPs1LastIntegrity(void);
 
+/*
+ * PS1 save names. Games find their saves by exact name:
+ *
+ *   B + region (A America, E Europe, I Japan/Asia) + product code
+ *   (4 letters, '-', 5 digits) + game-chosen identifier (0..8 chars)
+ *   e.g. "BASCUS-94163FF7S01"
+ *
+ * Headerless raw saves carry no name, so it comes from the file name.
+ */
+int MciPs1NameLooksLikeProductCode(const char *name);
+/* File-name stem (no directory, no extension), max 20 chars. */
+void MciPs1NameFromPath(const char *path, char out[MCI_PS1_SAVE_NAME_MAX + 1u]);
+/* Finds a product code anywhere in free text ("Final Fantasy VII
+ * (SCUS-94163).bin", "SCUS_941.63") and writes "BASCUS-94163". Returns 1
+ * if found. The game identifier suffix cannot be guessed. */
+int MciPs1GuessNameFromText(const char *text, char out[MCI_PS1_SAVE_NAME_MAX + 1u]);
+/* Rename a decoded PS1 archive (validated). */
+int MciPs1ArchiveRename(MciSaveArchive *archive, const char *name);
+
 /* Validate a PS1 archive body (non-empty, multiple of 8 KiB, <= 15 blocks,
  * "SC" title frame) and name. */
 int MciPs1ArchiveValidate(const MciSaveArchive *archive);

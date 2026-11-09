@@ -48,6 +48,35 @@ static int McResult(void)
     return rc < 0 ? rc : result;
 }
 
+/* -------------------------------------------------- PS1 name override */
+
+static char Ps1NameOverride[MCI_PS1_SAVE_NAME_MAX + 1u];
+
+int MciSaveTransferSetPs1NameOverride(const char *name)
+{
+    if (name == NULL || name[0] == '\0') {
+        Ps1NameOverride[0] = '\0';
+        return 0;
+    }
+    if (!MciPs1NameIsSafe(name))
+        return -1;
+    snprintf(Ps1NameOverride, sizeof(Ps1NameOverride), "%s", name);
+    return 0;
+}
+
+/* Each entry point takes the override first thing, so an early return can
+ * never leave it armed for an unrelated later operation. */
+static void TakePs1Override(char out[MCI_PS1_SAVE_NAME_MAX + 1u])
+{
+    memcpy(out, Ps1NameOverride, sizeof(Ps1NameOverride));
+    Ps1NameOverride[0] = '\0';
+}
+
+static int ApplyPs1Override(MciSaveArchive *archive, const char *name)
+{
+    return name[0] != '\0' ? MciPs1ArchiveRename(archive, name) : 0;
+}
+
 /* ------------------------------------------------------------ file I/O */
 
 static int LoadSource(const char *path, unsigned char **out, u32 *out_size)
@@ -484,9 +513,11 @@ int MciSaveTransferImportDecoded(int target_port, const char *path,
     u32 count = 0u;
     int generation = 0;
     MciSaveTransferFormat format;
+    char ps1_name[MCI_PS1_SAVE_NAME_MAX + 1u];
     int rc;
     u32 i;
 
+    TakePs1Override(ps1_name);
     rc = LoadSource(path, &data, &size);
     format = rc == 0 ? MciSaveTransferDetectBuffer(data, size, size, path, &generation)
                      : MCI_SAVE_FORMAT_UNKNOWN;
@@ -529,6 +560,8 @@ int MciSaveTransferImportDecoded(int target_port, const char *path,
             list = (MciSaveArchive *)malloc(sizeof(*list));
             rc = list == NULL ? MCI_SAVE_E_NOMEM
                               : MciPs1DecodeSingle(data, size, path, list, NULL);
+            if (rc == 0)
+                rc = ApplyPs1Override(list, ps1_name);
             count = rc == 0 ? 1u : 0u;
         }
     } else {
@@ -585,8 +618,11 @@ int MciSaveTransferConvertFileTo(const char *path, MciSaveConvertTarget target,
                                  MciSaveTransferReport *report)
 {
     MciSaveConvertTarget allowed[8];
+    char ps1_name[MCI_PS1_SAVE_NAME_MAX + 1u];
     int allowed_n;
     int a;
+
+    TakePs1Override(ps1_name);
     unsigned char *data = NULL;
     unsigned char *out = NULL;
     u32 size = 0u;
@@ -666,6 +702,8 @@ int MciSaveTransferConvertFileTo(const char *path, MciSaveConvertTarget target,
         free(card);
     } else {
         rc = MciPs1DecodeSingle(data, size, path, &archive, NULL);
+        if (rc == 0)
+            rc = ApplyPs1Override(&archive, ps1_name);
         if (rc == 0) {
             if (target == MCI_CONVERT_PS1_PSV) {
                 out_size = MciPs1PsvSize(&archive);

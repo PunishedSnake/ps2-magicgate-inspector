@@ -2,6 +2,7 @@
 /* PS1 memory-card filesystem and container codecs. See ps1_card.h. */
 
 #include <tamtypes.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -649,4 +650,119 @@ int MciPs1EncodeAr(const MciSaveArchive *archive, unsigned char *out,
     memcpy(out + 21u, archive->title, tl);
     memcpy(out + 54u, f->data, f->size);
     return (int)need;
+}
+
+/* ------------------------------------------------------------ naming */
+
+static int IsUpper(char c) { return c >= 'A' && c <= 'Z'; }
+static int IsDigit(char c) { return c >= '0' && c <= '9'; }
+
+int MciPs1NameLooksLikeProductCode(const char *name)
+{
+    size_t n;
+    unsigned int i;
+
+    if (name == NULL || !MciPs1NameIsSafe(name))
+        return 0;
+    n = strlen(name);
+    if (n < 12u || n > MCI_PS1_SAVE_NAME_MAX)
+        return 0;
+    if (name[0] != 'B' || (name[1] != 'A' && name[1] != 'E' && name[1] != 'I'))
+        return 0;
+    for (i = 2u; i < 6u; i++)
+        if (!IsUpper(name[i]))
+            return 0;
+    if (name[6] != '-')
+        return 0;
+    for (i = 7u; i < 12u; i++)
+        if (!IsDigit(name[i]))
+            return 0;
+    return 1;
+}
+
+void MciPs1NameFromPath(const char *path, char out[MCI_PS1_SAVE_NAME_MAX + 1u])
+{
+    NameFromPath(out, path);
+}
+
+static char RegionForPrefix(const char p[4])
+{
+    /* Third letter of Sony product prefixes: U = America, E = Europe,
+     * P/J/M/K/A = Japan and Asia (SLPS, SCPS, SLPM, SIPS, SLKA...). */
+    switch (p[2]) {
+        case 'U': return 'A';
+        case 'E': return 'E';
+        case 'P': case 'J': case 'M': case 'K': case 'A': return 'I';
+        default: return 0;
+    }
+}
+
+int MciPs1GuessNameFromText(const char *text, char out[MCI_PS1_SAVE_NAME_MAX + 1u])
+{
+    size_t n;
+    size_t i;
+
+    out[0] = '\0';
+    if (text == NULL)
+        return 0;
+    n = strlen(text);
+    for (i = 0u; i + 9u <= n; i++) {
+        char prefix[4];
+        char digits[6];
+        size_t j = i;
+        unsigned int d = 0u;
+        unsigned int k;
+        char region;
+
+        /* Four letters at a word start (or after "B?"/punctuation). */
+        if (i > 0u && isalpha((unsigned char)text[i - 1]))
+            continue;
+        for (k = 0u; k < 4u; k++) {
+            if (!isalpha((unsigned char)text[j + k]))
+                break;
+            prefix[k] = (char)toupper((unsigned char)text[j + k]);
+        }
+        if (k != 4u || (prefix[0] != 'S' && prefix[0] != 'P'))
+            continue;
+        j += 4u;
+        if (j < n && (text[j] == '-' || text[j] == '_' || text[j] == ' '))
+            j++;
+        /* Five digits, allowing the "941.63" style dot after three. */
+        while (j < n && d < 5u) {
+            if (IsDigit(text[j])) {
+                digits[d++] = text[j++];
+            } else if (text[j] == '.' && d == 3u) {
+                j++;
+            } else {
+                break;
+            }
+        }
+        if (d != 5u || (j < n && IsDigit(text[j])))
+            continue;
+        digits[5] = '\0';
+        region = RegionForPrefix(prefix);
+        if (region == 0)
+            continue;
+        out[0] = 'B';
+        out[1] = region;
+        memcpy(out + 2, prefix, 4u);
+        out[6] = '-';
+        memcpy(out + 7, digits, 5u);
+        out[12] = '\0';
+        return 1;
+    }
+    return 0;
+}
+
+int MciPs1ArchiveRename(MciSaveArchive *archive, const char *name)
+{
+    size_t n;
+
+    if (archive == NULL || archive->generation != MCI_SAVE_GEN_PS1 ||
+        archive->file_count != 1u || !MciPs1NameIsSafe(name))
+        return MCI_SAVE_E_NAME;
+    n = strlen(name);
+    memcpy(archive->files[0].name, name, n + 1u);
+    memcpy(archive->directory, name, n + 1u);
+    return MCI_SAVE_OK;
 }
