@@ -11,21 +11,24 @@
 
 void MciGuiRenderCardToolsV2(int selected, int selected_item)
 {
-    static const char *const titles[8] = {
+    static const char *const titles[10] = {
         "BACKUP  PCSX2 .ps2", "BACKUP  OPL .vmc",
         "BROWSE / RESTORE IMAGE", "EXACT RESTORE IMAGE",
-        "IMPORT SINGLE SAVE", "EXPORT SAVE TO .psu",
-        "FORCE FORMAT + BACKUP", "RETURN"
+        "IMPORT SAVE  PS2 / PS1", "EXPORT SAVE TO .psu",
+        "FORCE FORMAT + BACKUP", "CONVERT SAVE ON USB",
+        "RETURN", ""
     };
-    static const char *const hints[8] = {
+    static const char *const hints[10] = {
         "Create a full verified raw image with regenerated ECC.",
         "Create a full verified 512-byte-page VMC image.",
         "Pick any compatible .ps2/.vmc file and restore selected saves.",
         "Pick an image for destructive same-geometry page restore.",
-        "Pick a supported historical save container and import it.",
+        "PSU MAX CBS SPS XPS PSV, PS1 MCS GME PSX MCD VGS VMP.",
         "Choose one save on the active card and export interoperable PSU.",
         "Create and verify a .ps2 recovery image before formatting.",
-        "Return to the Card dashboard."
+        "Any PS2 save to .psu, PS1 save to .mcs, PS1 card to .mcd.",
+        "Return to the Card dashboard.",
+        ""
     };
     packet_t *packet;
     qword_t *q;
@@ -36,7 +39,7 @@ void MciGuiRenderCardToolsV2(int selected, int selected_item)
         return;
     if (selected < 0 || selected > 1)
         selected = 0;
-    if (selected_item < 0 || selected_item >= 8)
+    if (selected_item < 0 || selected_item >= 9)
         selected_item = 0;
     ActiveHeaderSlot = selected;
 
@@ -49,13 +52,13 @@ void MciGuiRenderCardToolsV2(int selected, int selected_item)
              "active mc%d   L1 mc0   R1 mc1", selected);
     q = text_box(q, 355, 39, 620, 48, context, Theme.muted);
 
-    for (i = 0; i < 8; i++) {
+    for (i = 0; i < 9; i++) {
         int col = i & 1;
         int row = i >> 1;
         float x0 = col ? 322.0f : 16.0f;
         float x1 = col ? 624.0f : 318.0f;
-        float y0 = 54.0f + (float)row * 35.0f;
-        float y1 = y0 + 31.0f;
+        float y0 = 52.0f + (float)row * 30.0f;
+        float y1 = y0 + 27.0f;
         UiRgb border = i == selected_item ? Theme.accent : Theme.border;
         UiRgb title_color = (i == 3 || i == 6)
                                 ? Theme.warning : Theme.text;
@@ -67,7 +70,7 @@ void MciGuiRenderCardToolsV2(int selected, int selected_item)
             q = rect_fill(q, x0, y0, x0 + 5, y1, Theme.accent);
         q = text_box(q, x0 + 12, y0 + 5, x1 - 8, y0 + 13,
                      titles[i], title_color);
-        q = text_box(q, x0 + 12, y0 + 17, x1 - 8, y0 + 26,
+        q = text_box(q, x0 + 12, y0 + 15, x1 - 8, y0 + 24,
                      hints[i], Theme.muted);
     }
 

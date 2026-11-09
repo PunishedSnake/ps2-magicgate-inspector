@@ -13,4 +13,11 @@
 int MciSaveTitleDecodeIconSys(const void *data, unsigned int size,
                               char *out, unsigned int out_size);
 
+/* Fold a Shift-JIS byte string to ASCII using the same rules. `break_at` is a
+ * byte offset that becomes a space (pass 0xFFFFFFFF for none). Returns the
+ * number of printable characters written, or -1 on bad arguments. Shared with
+ * the PS1 "SC" title frame decoder. */
+int MciSjisFoldToAscii(const unsigned char *sjis, unsigned int max_bytes,
+                       unsigned int break_at, char *out, unsigned int out_size);
+
 #endif /* MCI_SAVE_TITLE_H */

@@ -71,24 +71,73 @@ The picker is shared by Image Browser, Exact Restore and Save Import. Full-card 
 
 These remain image sources and are not treated as single-save archives.
 
-### PS2 single-save import
+### PS2 single-save import (0.4.2: all implemented)
 
-Initial target set:
+| Container | Extensions | Notes |
+| --- | --- | --- |
+| EMS / uLaunchELF | `.psu` | streamed from USB, no RAM copy |
+| Action Replay MAX / MAX Drive | `.max`, `.pws` | header CRC32 checked and reported; LZARI; no timestamps in the format, so the card assigns the creation time |
+| CodeBreaker | `.cbs` | fixed-state RC4 + zlib (vendored `tinf`) |
+| SharkPort / X-Port / Xploder | `.sps`, `.xps` | byte-swapped modes handled |
+| PS3 export | `.psv` (type 2) | import only; PSV signatures are not checked |
 
-- `.psu` - EMS/uLaunchELF;
-- `.max` / `.pws` - Action Replay MAX / MAX Drive;
-- `.cbs` - CodeBreaker;
-- `.sps` - SharkPort;
-- `.xps` - X-Port/Xploder;
-- `.psv` - PS3-exported PS2 save.
+Detection is by content (`src/save_detect.c`). The extension only picks between
+variants that share one layout (MAX vs PWS, SharkPort vs X-Port), so a
+GameFAQs download renamed to `save.bin` is still recognised.
 
-Reference implementations are taken from public PS2 tooling, especially Apollo Save Tool / CheatDevicePS2 and mymc, then adapted to Drebin's fail-closed transaction model. Proprietary containers are decoded into one internal directory/files/metadata representation before anything is written to a card.
+### PS1 saves and cards (0.4.2)
 
-### PS1 formats in the same picker
+Single saves import to a **PS1 card** through mcman's PS1 file API:
 
-`.mcs` and DexDrive `.gme` are PS1 formats, not PS2 save containers. They may share the picker, but only a PS1 destination card may accept them. The same applies to PS1 `.psx` and the PS1 variant of `.psv`.
+| Container | Extensions |
+| --- | --- |
+| MCS (PSXGameEdit, MemcardRex) | `.mcs`, `.ps1` |
+| Action Replay / GameShark / Xploder / Caetla | `.psx`, `.mcb`, `.mcx`, `.pda` |
+| Raw save body (no header; name from file name) | `.bin`, none, e.g. `BESLES-01234GAME` |
+| PS3 export | `.psv` (type 1) |
 
-A PS2 card must reject these before creating a destination directory. Likewise a PS1 card must reject PS2 PSU/MAX/CBS/SPS/XPS payloads.
+Whole PS1 cards can be imported (every save, all-or-nothing) or converted:
+
+| Card container | Extensions |
+| --- | --- |
+| Raw 128 KiB | `.mcd`, `.mcr`, `.mc`, `.bin`, `.ddf`, `.psm`, `.mci`, `.srm`, POPStarter `.VMC` |
+| DexDrive | `.gme`, `.dex` |
+| VGS / bleem! | `.mem`, `.vgs` |
+| PSP | `.vmp` (import only; signed) |
+
+PS1 rules:
+
+- PS2 cards reject PS1 containers and PS1 cards reject PS2 containers before
+  any write (the hot-swap probe settles the slot for the right card type).
+- Free space on a PS1 card is counted in 8 KiB blocks (mcman `findfree1`).
+- **mcman clears deleted-save records on a PS1 card whenever a save is
+  created** (`ps1mc_fio.c`, O_CREAT path). Undeleting such saves in another
+  tool is impossible afterwards; the confirmation screen says so.
+- mcman's PS1 O_CREAT would also silently replace a save with the same name,
+  so the importer checks every name first and refuses conflicts.
+- A card image imports all of its saves or none: names and total blocks are
+  checked before the first write; any failure deletes what was created.
+
+### Convert on USB (0.4.2)
+
+`CONVERT SAVE ON USB` never touches a memory card:
+
+- any PS2 container → `.psu`;
+- any PS1 single save → `.mcs`;
+- any PS1 card container → raw `.mcd` (POPStarter, DuckStation, ePSXe, MemcardRex).
+
+The output is written next to the source, re-read and compared; an existing
+file is never overwritten (`*.conv.<ext>` is used when the source already has
+the target extension).
+
+### Not yet supported
+
+- PS1 `.mcx` files from the PS Vita/PSP "MCX" encrypted format (MemcardRex
+  `.mcx` variant), PocketStation execution metadata, and Shift-JIS kana/kanji
+  rendering (titles fold to ASCII).
+- Writing signed formats (`.psv`, `.vmp`).
+- Adding a PS1 save into a POPStarter `.VMC` in place (convert to `.mcd`
+  works; in-place insertion is the next step).
 
 ## Default single-save export
 
@@ -146,6 +195,12 @@ The persistent diagnostic logger follows the same USB isolation rule as full-car
 
 Useful public references include:
 
+- mymc (Ross Ridge, public domain) `ps2save.py` for PSU/MAX/SPS/CBS layouts and the CodeBreaker RC4 state; mymc++ is used only as an external test oracle (`tools/gen_save_fixtures.py`), never linked;
+- Okumura's LZARI (1989, public domain) for the MAX decompressor;
+- `tinf` 1.2.1 by Jørgen Ibsen (zlib licence, `src/tinf/LICENSE.txt`) for CodeBreaker inflate;
+- psdevwiki and mymc++ `format_psv` for the PSV header layout;
+- Martin Korth's nocash PSX specs for the PS1 card filesystem, and MemcardRex for GME/VGS/VMP header facts (no MemcardRex code is used);
+- PS2SDK mcman `ps1mc_fio.c` / `mcserv.c` for PS1 card behaviour on PS2;
 - Apollo Save Tool PS2 `source/import_ps2.c` for native PS2 implementations of MAX, CBS, XPS, PSU and PSV workflows;
 - CheatDevicePS2 / PS2SaveUtility for MAX/CBS/PSU/XPS container definitions;
 - ps2dev/mymc for documented PSU/MAX/SPS/CBS parsing and PS2 memory-card filesystem behavior;

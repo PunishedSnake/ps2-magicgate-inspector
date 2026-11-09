@@ -36,7 +36,12 @@ typedef enum MciSaveTransferFormat {
     MCI_SAVE_FORMAT_MCS_PS1,
     MCI_SAVE_FORMAT_GME_PS1,
     MCI_SAVE_FORMAT_PSX_PS1,
-    MCI_SAVE_FORMAT_PSV_PS1
+    MCI_SAVE_FORMAT_PSV_PS1,
+
+    /* 0.4.2: whole PS1 card images (.mcd/.mcr/.mc/.ddf/.mem/.vgs/.vmp/...)
+     * and headerless raw PS1 single saves. GME stays GME_PS1 above. */
+    MCI_SAVE_FORMAT_IMAGE_PS1,
+    MCI_SAVE_FORMAT_RAW_PS1
 } MciSaveTransferFormat;
 
 typedef enum MciSaveTransferFamily {
@@ -65,6 +70,8 @@ typedef struct MciSaveTransferProbe {
     u64 size;
     int readable;
     int format_confidence; /* 0 extension only, 1 signature/structure confirmed */
+    int generation;        /* 1 = PS1, 2 = PS2, 0 = unknown */
+    int importable;        /* decoder exists and reaches the import contract */
     char path[MCI_SAVE_TRANSFER_PATH_MAX];
 } MciSaveTransferProbe;
 
@@ -83,6 +90,13 @@ typedef struct MciSaveTransferReport {
     char destination[MCI_SAVE_TRANSFER_PATH_MAX];
     char save_directory[33];
     char failed_path[MCI_SAVE_TRANSFER_FAILED_PATH_MAX];
+    /* 0.4.2 */
+    int generation;              /* 1 = PS1 card target, 2 = PS2 */
+    int decode_rc;               /* MCI_SAVE_E_* from the container decoder */
+    int checksum_ok;             /* -1 n/a, 0 bad, 1 good (MAX CRC32) */
+    int saves_total;             /* PS1 card images carry several saves */
+    int saves_written;
+    char title[MCI_SAVE_TRANSFER_TITLE_MAX];
 } MciSaveTransferReport;
 
 const char *MciSaveTransferFormatName(MciSaveTransferFormat format);
@@ -101,10 +115,30 @@ int MciSaveTransferImportPsu(int target_port, const char *path,
 int MciSaveTransferExportPsu(int source_port, const char *save_directory,
                              const char *path, MciSaveTransferReport *report);
 
-/* Unified dispatcher. Other historical containers remain explicitly
- * UNSUPPORTED until their decoder reaches the same transactional contract. */
+/* Unified dispatcher. Detects the container from its content (extension is
+ * only a hint), decodes it fully in RAM, then writes it with the same
+ * fail-closed contract as PSU: conflicts refused, every file re-read and
+ * compared, partial objects rolled back. PS1 containers require a PS1 card. */
 int MciSaveTransferImportFile(int target_port, const char *path,
                               MciSaveTransferReport *report);
+
+/* Content-based detection on a file prefix (>= 4096 bytes or the whole
+ * file) plus its real size. Returns UNKNOWN when nothing matches. */
+MciSaveTransferFormat MciSaveTransferDetectBuffer(const unsigned char *prefix,
+                                                  u32 prefix_size, u64 file_size,
+                                                  const char *path,
+                                                  int *generation);
+int MciSaveTransferFormatImportable(MciSaveTransferFormat format);
+
+/* USB-side conversion (never touches a memory card). The output is written
+ * next to the source with a new extension and re-read for verification:
+ *   any PS2 container      -> .psu
+ *   PS1 single save        -> .mcs
+ *   PS1 card image (any)   -> .mcd (raw 128 KiB, POPStarter/emulators)
+ * `out_path` receives the written path. */
+int MciSaveTransferConvertFile(const char *path, char *out_path,
+                               unsigned int out_path_size,
+                               MciSaveTransferReport *report);
 
 /* Default single-save export policy. PSU is uncompressed, metadata-preserving,
  * widely supported and does not depend on proprietary encryption/compression. */

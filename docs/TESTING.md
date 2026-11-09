@@ -180,6 +180,13 @@ make -C tests SAN=1    # same with AddressSanitizer + UBSan
 | `test_mc_fs_format` | superblock/dir-entry offsets, geometry vs filesystem validation (including the 64 MiB `pages_per_block=32` regression), health flags |
 | `test_sha256` | FIPS 180-2 vectors and streaming in 528-byte records |
 | `test_save_title` | full-width/half-width Shift-JIS titles, `nlOffset`, truncation and bounds |
+| `test_lzari` | LZARI decoder vs. streams from mymc++'s independent encoder; truncated input |
+| `test_save_codecs` | every PS2/PS1 container fixture: detect, decode, re-encode (byte-identical PSU/MCS), PS1 card scan/extract/insert/full/clash/corruption, prefix truncation and bit-flip fuzz |
+
+Fixtures live in `tests/fixtures` and are produced by
+`tools/gen_save_fixtures.py`, which writes each container from the published
+layout and then requires mymc++ to load it back unchanged. CI re-runs the
+generator with `--check` when mymc++ can be installed.
 
 Anything moved into a portable module should gain a test here before its
 behaviour changes. Hardware qualification still decides timing, IOP and

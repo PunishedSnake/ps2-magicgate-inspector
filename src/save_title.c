@@ -104,39 +104,30 @@ static char FoldDoubleByte(unsigned char lead, unsigned char trail)
     }
 }
 
-int MciSaveTitleDecodeIconSys(const void *data, unsigned int size,
-                              char *out, unsigned int out_size)
+int MciSjisFoldToAscii(const unsigned char *sjis, unsigned int max_bytes,
+                       unsigned int break_at, char *out, unsigned int out_size)
 {
-    const unsigned char *p = (const unsigned char *)data;
-    const unsigned char *title;
-    unsigned int nl;
     unsigned int i = 0u;
     unsigned int used = 0u;
     unsigned int printable = 0u;
     int pending_space = 0;
 
-    if (data == NULL || out == NULL || out_size < 2u ||
-        size < ICON_SYS_TITLE_OFFSET + ICON_SYS_TITLE_BYTES)
+    if (sjis == NULL || out == NULL || out_size < 2u)
         return -1;
     out[0] = '\0';
-    if (memcmp(p, "PS2D", 4) != 0)
-        return -2;
-    nl = (unsigned int)ReadLe16(p + ICON_SYS_NL_OFFSET);
-    title = p + ICON_SYS_TITLE_OFFSET;
-
-    while (i < ICON_SYS_TITLE_BYTES) {
-        unsigned char b = title[i];
+    while (i < max_bytes) {
+        unsigned char b = sjis[i];
         char c;
 
         if (b == 0u)
             break;
-        if (i == nl && used > 0u)
+        if (i == break_at && used > 0u)
             pending_space = 1;
 
         if (IsSjisLead(b)) {
-            if (i + 1u >= ICON_SYS_TITLE_BYTES || !IsSjisTrail(title[i + 1u]))
+            if (i + 1u >= max_bytes || !IsSjisTrail(sjis[i + 1u]))
                 break; /* truncated or malformed: keep what we have */
-            c = FoldDoubleByte(b, title[i + 1u]);
+            c = FoldDoubleByte(b, sjis[i + 1u]);
             i += 2u;
         } else {
             c = (b >= 0x20u && b <= 0x7Eu) ? (char)b : 0;
@@ -163,5 +154,24 @@ int MciSaveTitleDecodeIconSys(const void *data, unsigned int size,
     while (used > 0u && out[used - 1u] == ' ')
         used--;
     out[used] = '\0';
-    return printable >= 3u ? 0 : -3;
+    return (int)printable;
+}
+
+int MciSaveTitleDecodeIconSys(const void *data, unsigned int size,
+                              char *out, unsigned int out_size)
+{
+    const unsigned char *p = (const unsigned char *)data;
+    int printable;
+
+    if (data == NULL || out == NULL || out_size < 2u ||
+        size < ICON_SYS_TITLE_OFFSET + ICON_SYS_TITLE_BYTES)
+        return -1;
+    out[0] = '\0';
+    if (memcmp(p, "PS2D", 4) != 0)
+        return -2;
+    printable = MciSjisFoldToAscii(p + ICON_SYS_TITLE_OFFSET,
+                                   ICON_SYS_TITLE_BYTES,
+                                   (unsigned int)ReadLe16(p + ICON_SYS_NL_OFFSET),
+                                   out, out_size);
+    return printable >= 3 ? 0 : -3;
 }

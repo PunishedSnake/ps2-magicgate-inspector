@@ -5,7 +5,9 @@ EE_OBJS = src/app_main_v2.o src/gui_v2.o src/gui_message_compat.o src/progress.o
 	src/usb_search.o src/fmcb_transaction.o src/fmcb_recovery.o src/fmcb_recovery_marker.o src/console_profile.o src/fmcb_compat.o \
 	src/magicgate_session.o src/magicgate_diag.o src/video_mode.o src/ui_layout.o src/settings.o \
 	src/kelf_cache.o src/card_raw_session.o src/card_image.o src/card_image_fs.o \
-	src/mc_fs_format.o src/sha256.o
+	src/mc_fs_format.o src/sha256.o \
+	src/save_archive.o src/save_codec_ps2.o src/save_detect.o src/save_transfer_archive.o \
+	src/ps1_card.o src/lzari.o src/tinf/tinflate.o src/tinf/tinfzlib.o src/tinf/adler32.o
 EE_LIBS = -ldebug -ldraw -lgraph -lpacket -ldma -lpad -lmc -lfileXio -lcdvd -lsecr \
 	-lioprpgen -liopreboot -lpatches -lkernel
 EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections \

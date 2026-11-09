@@ -416,6 +416,9 @@ void MciSaveTransferResetReport(MciSaveTransferReport *report, int card_port,
     report->format = format;
     report->card_port = card_port;
     report->target_free_clusters = -1;
+    report->checksum_ok = -1;
+    report->generation =
+        MciSaveTransferFormatFamily(format) == MCI_SAVE_FAMILY_PS1_SAVE ? 1 : 2;
 }
 
 int MciSaveTransferImportPsu(int target_port, const char *path,
@@ -555,6 +558,7 @@ int MciSaveTransferImportPsu(int target_port, const char *path,
         goto rollback;
     }
     report->failed_path[0] = '\0';
+    report->saves_total = report->saves_written = 1;
     report->result = MCI_SAVE_TRANSFER_OK;
     rc = 0;
     goto out;
@@ -823,6 +827,7 @@ int MciSaveTransferExportPsu(int source_port, const char *save_directory,
         goto fail_closed;
     }
     report->failed_path[0] = '\0';
+    report->saves_total = report->saves_written = 1;
     report->result = MCI_SAVE_TRANSFER_OK;
     rc = 0;
     goto out;
@@ -849,17 +854,26 @@ out:
     return rc;
 }
 
+int MciSaveTransferImportDecoded(int target_port, const char *path,
+                                 MciSaveTransferReport *report);
+
 int MciSaveTransferImportFile(int target_port, const char *path,
                               MciSaveTransferReport *report)
 {
-    MciSaveTransferFormat format = MciSaveTransferFormatFromPath(path);
-    if (format == MCI_SAVE_FORMAT_PSU)
+    MciSaveTransferProbe probe;
+
+    if (report == NULL || path == NULL)
+        return -1;
+    /* Content decides. PSU keeps its streaming importer (no RAM copy); every
+     * other container is decoded fully in RAM and written by the archive
+     * importer with the same transactional contract. */
+    if (MciSaveTransferProbeFile(path, &probe) == 0 &&
+        probe.format == MCI_SAVE_FORMAT_PSU)
         return MciSaveTransferImportPsu(target_port, path, report);
-    MciSaveTransferResetReport(report, target_port, format);
-    if (report != NULL) {
-        report->result = MCI_SAVE_TRANSFER_UNSUPPORTED_FORMAT;
-        if (path != NULL)
-            snprintf(report->source_path, sizeof(report->source_path), "%s", path);
-    }
+    if (MciSaveTransferFormatImportable(probe.format))
+        return MciSaveTransferImportDecoded(target_port, path, report);
+    MciSaveTransferResetReport(report, target_port, probe.format);
+    report->result = MCI_SAVE_TRANSFER_UNSUPPORTED_FORMAT;
+    snprintf(report->source_path, sizeof(report->source_path), "%s", path);
     return -300;
 }

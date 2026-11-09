@@ -1,0 +1,8 @@
+# kind name size crc32
+ps2dir BESLES-99999DREBIN
+ps2file icon.sys 964 9bc803f0
+ps2file DATA.BIN 12345 b8036ef7
+ps2file RAND.BIN 3001 932d755e
+ps2file empty.dat 0 00000000
+ps1save BESLES-12345SAVE01 8192 c45ab2c3
+ps1save BASLUS-00001RPGDATA 16384 dd93643d

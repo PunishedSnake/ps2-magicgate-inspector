@@ -51,6 +51,8 @@ MciSaveTransferFamily MciSaveTransferFormatFamily(MciSaveTransferFormat format)
         case MCI_SAVE_FORMAT_GME_PS1:
         case MCI_SAVE_FORMAT_PSX_PS1:
         case MCI_SAVE_FORMAT_PSV_PS1:
+        case MCI_SAVE_FORMAT_IMAGE_PS1:
+        case MCI_SAVE_FORMAT_RAW_PS1:
             return MCI_SAVE_FAMILY_PS1_SAVE;
         default:
             return MCI_SAVE_FAMILY_UNKNOWN;
@@ -73,6 +75,8 @@ const char *MciSaveTransferFormatName(MciSaveTransferFormat format)
         case MCI_SAVE_FORMAT_GME_PS1: return "PS1 DexDrive .gme";
         case MCI_SAVE_FORMAT_PSX_PS1: return "PS1 AR/GS/XP .psx";
         case MCI_SAVE_FORMAT_PSV_PS1: return "PS3 PS1 save .psv";
+        case MCI_SAVE_FORMAT_IMAGE_PS1: return "PS1 card image";
+        case MCI_SAVE_FORMAT_RAW_PS1: return "PS1 raw single save";
         default: return "Unknown";
     }
 }
@@ -91,7 +95,19 @@ MciSaveTransferFormat MciSaveTransferFormatFromPath(const char *path)
     if (EndsWithIcase(path, ".xps")) return MCI_SAVE_FORMAT_XPS;
     if (EndsWithIcase(path, ".mcs")) return MCI_SAVE_FORMAT_MCS_PS1;
     if (EndsWithIcase(path, ".gme")) return MCI_SAVE_FORMAT_GME_PS1;
+    if (EndsWithIcase(path, ".dex")) return MCI_SAVE_FORMAT_GME_PS1;
     if (EndsWithIcase(path, ".psx")) return MCI_SAVE_FORMAT_PSX_PS1;
+    if (EndsWithIcase(path, ".mcb")) return MCI_SAVE_FORMAT_PSX_PS1;
+    if (EndsWithIcase(path, ".mcx")) return MCI_SAVE_FORMAT_PSX_PS1;
+    if (EndsWithIcase(path, ".pda")) return MCI_SAVE_FORMAT_PSX_PS1;
+    if (EndsWithIcase(path, ".ps1")) return MCI_SAVE_FORMAT_MCS_PS1;
+    if (EndsWithIcase(path, ".mcr") || EndsWithIcase(path, ".mcd") ||
+        EndsWithIcase(path, ".mc") || EndsWithIcase(path, ".ddf") ||
+        EndsWithIcase(path, ".mem") || EndsWithIcase(path, ".vgs") ||
+        EndsWithIcase(path, ".vmp") || EndsWithIcase(path, ".psm") ||
+        EndsWithIcase(path, ".mci") || EndsWithIcase(path, ".srm") ||
+        EndsWithIcase(path, ".vm1"))
+        return MCI_SAVE_FORMAT_IMAGE_PS1;
     /* PSV contains a generation discriminator in its header. Until the PSV
      * parser validates that field, keep extension-only PSV deliberately
      * ambiguous instead of guessing PS1 vs PS2. */
@@ -99,28 +115,14 @@ MciSaveTransferFormat MciSaveTransferFormatFromPath(const char *path)
     return MCI_SAVE_FORMAT_UNKNOWN;
 }
 
-static int ContainsBytes(const unsigned char *haystack, unsigned int haystack_size,
-                         const char *needle, unsigned int needle_size)
-{
-    unsigned int i;
-
-    if (haystack == NULL || needle == NULL || needle_size == 0u ||
-        haystack_size < needle_size)
-        return 0;
-    for (i = 0u; i + needle_size <= haystack_size; i++) {
-        if (memcmp(haystack + i, needle, needle_size) == 0)
-            return 1;
-    }
-    return 0;
-}
-
 int MciSaveTransferProbeFile(const char *path, MciSaveTransferProbe *probe)
 {
-    unsigned char head[96];
+    static unsigned char head[4096] __attribute__((aligned(64)));
     iox_stat_t stat;
-    MciSaveTransferFormat by_ext;
+    MciSaveTransferFormat detected;
     int fd;
     int read_rc;
+    int total = 0;
 
     if (path == NULL || probe == NULL)
         return -1;
@@ -138,34 +140,34 @@ int MciSaveTransferProbeFile(const char *path, MciSaveTransferProbe *probe)
     if (fd < 0)
         return fd;
     memset(head, 0, sizeof(head));
-    read_rc = fileXioRead(fd, head, sizeof(head));
+    while (total < (int)sizeof(head)) {
+        read_rc = fileXioRead(fd, head + total, (int)sizeof(head) - total);
+        if (read_rc < 0) {
+            fileXioClose(fd);
+            return read_rc;
+        }
+        if (read_rc == 0)
+            break;
+        total += read_rc;
+    }
     fileXioClose(fd);
-    if (read_rc < 0)
-        return read_rc;
     probe->readable = 1;
 
-    by_ext = MciSaveTransferFormatFromPath(path);
-    probe->format = by_ext;
-
-    /* Confirm the formats with stable public signatures. Importers still do
-     * complete structural validation before creating anything on a card. */
-    if (read_rc >= 12 && memcmp(head, "Ps2PowerSave", 12) == 0) {
-        probe->format = EndsWithIcase(path, ".pws")
-                            ? MCI_SAVE_FORMAT_PWS : MCI_SAVE_FORMAT_MAX;
+    /* Signatures and structure first (0.4.2): a GameFAQs download named
+     * "save.bin" or "BESLUS-00001" is still recognised. */
+    detected = MciSaveTransferDetectBuffer(head, (u32)total, probe->size, path,
+                                           &probe->generation);
+    if (detected != MCI_SAVE_FORMAT_UNKNOWN &&
+        detected != MCI_SAVE_FORMAT_IMAGE_PS2 && detected != MCI_SAVE_FORMAT_IMAGE_VMC) {
+        probe->format = detected;
         probe->format_confidence = 1;
-    } else if (read_rc >= 4 && memcmp(head, "CFU\0", 4) == 0) {
-        probe->format = MCI_SAVE_FORMAT_CBS;
-        probe->format_confidence = 1;
-    } else if (ContainsBytes(head, (unsigned int)read_rc,
-                             "SharkPortSave", 13u)) {
-        probe->format = EndsWithIcase(path, ".sps")
-                            ? MCI_SAVE_FORMAT_SPS : MCI_SAVE_FORMAT_XPS;
-        probe->format_confidence = 1;
-    } else if (by_ext != MCI_SAVE_FORMAT_UNKNOWN) {
+    } else {
+        probe->format = MciSaveTransferFormatFromPath(path);
         probe->format_confidence = 0;
     }
-
     probe->family = MciSaveTransferFormatFamily(probe->format);
+    probe->importable = probe->format_confidence &&
+                        MciSaveTransferFormatImportable(probe->format);
     return 0;
 }
 
