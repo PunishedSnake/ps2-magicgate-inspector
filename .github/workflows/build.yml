@@ -1,4 +1,4 @@
-name: Build PS2 Memory Card Inspector 0.4.1
+name: Build PS2 Memory Card Inspector
 
 on:
   workflow_dispatch:
@@ -8,6 +8,7 @@ on:
     branches:
       - main
       - release/0.4.1-drebin
+      - 'release/**'
 
 permissions:
   contents: write
@@ -110,39 +111,64 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          VERSION="$(tr -d ' \n\r' < VERSION)"
+          echo "MCI_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "MCI_ASSET=MC_INSPECTOR-$VERSION-Drebin.ELF" >> "$GITHUB_ENV"
           mkdir -p artifacts
-          cp MC_INSPECTOR.ELF artifacts/MC_INSPECTOR-0.4.1-Drebin.ELF
+          cp MC_INSPECTOR.ELF "artifacts/MC_INSPECTOR-$VERSION-Drebin.ELF"
+          cp THIRD_PARTY_NOTICES.md artifacts/
+          mkdir -p artifacts/licenses && cp licenses/* artifacts/licenses/
+          (cd artifacts && zip -qr "../MC_INSPECTOR-$VERSION-Drebin.zip" .)
+          mv "MC_INSPECTOR-$VERSION-Drebin.zip" artifacts/
 
       - name: Verify artifact
         shell: bash
         run: |
           set -euo pipefail
-          file artifacts/MC_INSPECTOR-0.4.1-Drebin.ELF
+          file "artifacts/$MCI_ASSET"
           test ! -e artifacts/MC_INSPECTOR-perflab-O2.ELF
           test ! -e artifacts/MC_INSPECTOR-p0-raw-sync4.ELF
+          # The version the user sees must be the version being published.
+          grep -q "v$MCI_VERSION  mc%d" src/gui_core.inc
+          grep -q "Inspector  v$MCI_VERSION Drebin" src/gui_core.inc
+          grep -q "Inspector $MCI_VERSION Drebin" src/app_main_v2.c
+          grep -q "^# PS2 Memory Card Inspector $MCI_VERSION" RELEASE_NOTES.md
+          strings "artifacts/$MCI_ASSET" | grep -q "v$MCI_VERSION"
 
       - name: Upload release candidate
         uses: actions/upload-artifact@v4
         with:
-          name: PS2-Memory-Card-Inspector-0.4.1-Drebin-${{ github.sha }}
-          path: artifacts/MC_INSPECTOR-0.4.1-Drebin.ELF
+          name: PS2-Memory-Card-Inspector-${{ env.MCI_VERSION }}-Drebin-${{ github.sha }}
+          path: |
+            artifacts/${{ env.MCI_ASSET }}
+            artifacts/MC_INSPECTOR-${{ env.MCI_VERSION }}-Drebin.zip
           if-no-files-found: error
           retention-days: 3
 
-      - name: Publish 0.4.1 Drebin
+      - name: Publish release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          TAG="0.4.1-Drebin"
+          TAG="$MCI_VERSION-Drebin"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists; leaving it untouched."
             exit 0
           fi
+          # Versions with a suffix (0.4.2-rc1, 0.5.0-beta2) are pre-releases
+          # and never become "Latest".
+          EXTRA=()
+          TITLE="$MCI_VERSION - Drebin"
+          case "$MCI_VERSION" in
+            *-*) EXTRA+=(--prerelease --latest=false)
+                 TITLE="$MCI_VERSION - Drebin (pre-release)" ;;
+          esac
           gh release create "$TAG" \
             --target "$GITHUB_SHA" \
-            --title "0.4.1 - Drebin" \
+            --title "$TITLE" \
             --notes-file RELEASE_NOTES.md \
-            artifacts/MC_INSPECTOR-0.4.1-Drebin.ELF
+            "${EXTRA[@]}" \
+            "artifacts/$MCI_ASSET" \
+            "artifacts/MC_INSPECTOR-$MCI_VERSION-Drebin.zip"

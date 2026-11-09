@@ -922,7 +922,7 @@ int main(int argc, char *argv[])
     init_scr();
     if (MciGuiInit() < 0) {
         scr_clear();
-        scr_printf("PS2 Memory Card Inspector 0.4.1 Drebin\n\n");
+        scr_printf("PS2 Memory Card Inspector 0.4.2-rc1 Drebin\n\n");
         scr_printf("GS frontend initialization failed.\n");
         SleepThread();
     }

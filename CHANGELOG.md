@@ -3,7 +3,9 @@
 All notable changes to PS2 Memory Card Inspector are documented here.
 
 
-## [Unreleased] — 0.4.2 save formats + PS1 cards
+## [0.4.2-rc1] — 2026-11-09 (pre-release)
+
+### Save formats + PS1 cards
 
 ### Added
 
@@ -35,7 +37,7 @@ All notable changes to PS2 Memory Card Inspector are documented here.
   also lists `.bin`, `.sav`, `.vmc` and extensionless files.
 - Card Tools grid gains a ninth tile (CONVERT SAVE ON USB).
 
-## [Unreleased] — 0.4.2 foundation
+### Foundation
 
 ### Fixed
 
