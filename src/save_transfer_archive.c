@@ -31,6 +31,7 @@
 #include "ps1_card.h"
 #include "save_archive.h"
 #include "save_codec_ps2.h"
+#include "save_sign.h"
 #include "save_transfer.h"
 
 #define AR_CHUNK 16384u
@@ -511,11 +512,20 @@ int MciSaveTransferImportDecoded(int target_port, const char *path,
             count = rc == 0 ? 1u : 0u;
             if (info.checksum_present)
                 report->checksum_ok = info.checksum_ok;
+            if (format == MCI_SAVE_FORMAT_PSV_PS2 &&
+                MciPsvVerify(data, size) == MCI_SIG_BAD)
+                report->checksum_ok = 0;
         }
     } else if (generation == 1) {
         if (format == MCI_SAVE_FORMAT_IMAGE_PS1 || format == MCI_SAVE_FORMAT_GME_PS1) {
             rc = DecodePs1Card(data, size, &list, &count);
+            if (MciPs1LastIntegrity() == MCI_SIG_BAD)
+                report->checksum_ok = 0;
+            else if (MciPs1LastIntegrity() == MCI_SIG_OK)
+                report->checksum_ok = 1;
         } else {
+            if (format == MCI_SAVE_FORMAT_PSV_PS1)
+                report->checksum_ok = MciPsvVerify(data, size) == MCI_SIG_BAD ? 0 : -1;
             list = (MciSaveArchive *)malloc(sizeof(*list));
             rc = list == NULL ? MCI_SAVE_E_NOMEM
                               : MciPs1DecodeSingle(data, size, path, list, NULL);
@@ -570,10 +580,13 @@ static int ReplaceExtension(const char *path, const char *ext, char *out,
     return n > 0 && (unsigned int)n < out_size ? 0 : -1;
 }
 
-int MciSaveTransferConvertFile(const char *path, char *out_path,
-                               unsigned int out_path_size,
-                               MciSaveTransferReport *report)
+int MciSaveTransferConvertFileTo(const char *path, MciSaveConvertTarget target,
+                                 char *out_path, unsigned int out_path_size,
+                                 MciSaveTransferReport *report)
 {
+    MciSaveConvertTarget allowed[8];
+    int allowed_n;
+    int a;
     unsigned char *data = NULL;
     unsigned char *out = NULL;
     u32 size = 0u;
@@ -600,38 +613,80 @@ int MciSaveTransferConvertFile(const char *path, char *out_path,
         return rc;
     }
 
-    if (generation == 2) {
+    allowed_n = MciSaveConvertTargetsFor(format, generation, allowed);
+    if (target == MCI_CONVERT_DEFAULT && allowed_n > 0)
+        target = allowed[0];
+    for (a = 0; a < allowed_n && allowed[a] != target; a++)
+        ;
+    if (allowed_n == 0) {
+        rc = MCI_SAVE_E_FORMAT;
+    } else if (a == allowed_n) {
+        rc = MCI_SAVE_E_UNSUPPORTED;
+    } else if (generation == 2) {
         MciPs2DecodeInfo info;
         rc = MciPs2Decode(data, size, &archive, &info);
         if (info.checksum_present)
             report->checksum_ok = info.checksum_ok;
         if (rc == 0) {
-            out_size = MciPs2PsuSize(&archive);
-            out = (unsigned char *)malloc(out_size);
-            rc = out == NULL ? MCI_SAVE_E_NOMEM : MciPs2EncodePsu(&archive, out, out_size);
-            ext = ".psu";
+            out_size = target == MCI_CONVERT_PS2_PSV ? MciPs2PsvSize(&archive)
+                                                     : MciPs2PsuSize(&archive);
+            out = (unsigned char *)malloc(out_size ? out_size : 1u);
+            if (out == NULL)
+                rc = MCI_SAVE_E_NOMEM;
+            else if (target == MCI_CONVERT_PS2_PSV)
+                rc = MciPs2EncodePsv(&archive, out, out_size);
+            else
+                rc = MciPs2EncodePsu(&archive, out, out_size);
+            ext = target == MCI_CONVERT_PS2_PSV ? ".psv" : ".psu";
         }
     } else if (format == MCI_SAVE_FORMAT_IMAGE_PS1 || format == MCI_SAVE_FORMAT_GME_PS1) {
+        static const struct { MciSaveConvertTarget t; MciPs1Container k; const char *e; } Map[] = {
+            {MCI_CONVERT_CARD_MCD, MCI_PS1_CONTAINER_RAW, ".mcd"},
+            {MCI_CONVERT_CARD_GME, MCI_PS1_CONTAINER_GME, ".gme"},
+            {MCI_CONVERT_CARD_VGS, MCI_PS1_CONTAINER_VGS, ".vgs"},
+            {MCI_CONVERT_CARD_VMP, MCI_PS1_CONTAINER_VMP, ".vmp"},
+            {MCI_CONVERT_CARD_MCX, MCI_PS1_CONTAINER_MCX, ".mcx"},
+        };
         MciPs1Card *card = (MciPs1Card *)malloc(sizeof(*card));
+        unsigned int m;
         rc = card == NULL ? MCI_SAVE_E_NOMEM : MciPs1CardLoad(card, data, size, NULL);
         if (rc == 0) {
-            out_size = MCI_PS1_CARD_BYTES;
+            int integrity = MciPs1LastIntegrity();
+            if (integrity == MCI_SIG_OK || integrity == MCI_SIG_BAD)
+                report->checksum_ok = integrity == MCI_SIG_OK;
+        }
+        for (m = 0u; rc == 0 && m < sizeof(Map) / sizeof(Map[0]); m++) {
+            if (Map[m].t != target)
+                continue;
+            out_size = MciPs1ContainerSize(Map[m].k);
             out = (unsigned char *)malloc(out_size);
-            rc = out == NULL ? MCI_SAVE_E_NOMEM
-                             : MciPs1CardWrite(card, MCI_PS1_CONTAINER_RAW, out, out_size);
-            ext = ".mcd";
+            rc = out == NULL ? MCI_SAVE_E_NOMEM : MciPs1CardWrite(card, Map[m].k, out, out_size);
+            ext = Map[m].e;
         }
         free(card);
-    } else if (generation == 1) {
+    } else {
         rc = MciPs1DecodeSingle(data, size, path, &archive, NULL);
         if (rc == 0) {
-            out_size = MciPs1McsSize(&archive);
-            out = (unsigned char *)malloc(out_size);
-            rc = out == NULL ? MCI_SAVE_E_NOMEM : MciPs1EncodeMcs(&archive, out, out_size);
-            ext = ".mcs";
+            if (target == MCI_CONVERT_PS1_PSV) {
+                out_size = MciPs1PsvSize(&archive);
+                ext = ".psv";
+            } else if (target == MCI_CONVERT_PS1_PSX) {
+                out_size = MciPs1ArSize(&archive);
+                ext = ".psx";
+            } else {
+                out_size = MciPs1McsSize(&archive);
+                ext = ".mcs";
+            }
+            out = (unsigned char *)malloc(out_size ? out_size : 1u);
+            if (out == NULL)
+                rc = MCI_SAVE_E_NOMEM;
+            else if (target == MCI_CONVERT_PS1_PSV)
+                rc = MciPs1EncodePsv(&archive, out, out_size);
+            else if (target == MCI_CONVERT_PS1_PSX)
+                rc = MciPs1EncodeAr(&archive, out, out_size);
+            else
+                rc = MciPs1EncodeMcs(&archive, out, out_size);
         }
-    } else {
-        rc = MCI_SAVE_E_FORMAT;
     }
     free(data);
     report->decode_rc = rc < 0 ? rc : 0;
@@ -648,6 +703,18 @@ int MciSaveTransferConvertFile(const char *path, char *out_path,
         report->result = rc == MCI_SAVE_E_FORMAT ? MCI_SAVE_TRANSFER_UNSUPPORTED_FORMAT
                                                  : MCI_SAVE_TRANSFER_INVALID_CONTAINER;
         return rc == MCI_SAVE_E_FORMAT ? -300 : -200 + rc;
+    }
+    /* Signed outputs must verify before they are written anywhere. */
+    if ((target == MCI_CONVERT_PS2_PSV || target == MCI_CONVERT_PS1_PSV) &&
+        MciPsvVerify(out, out_size) != MCI_SIG_OK) {
+        free(out);
+        report->result = MCI_SAVE_TRANSFER_VERIFY_ERROR;
+        return -122;
+    }
+    if (target == MCI_CONVERT_CARD_VMP && MciVmpVerify(out, out_size) != MCI_SIG_OK) {
+        free(out);
+        report->result = MCI_SAVE_TRANSFER_VERIFY_ERROR;
+        return -122;
     }
     if (ReplaceExtension(path, ext, out_path, out_path_size) < 0 ||
         strcmp(out_path, path) == 0) {
@@ -681,4 +748,12 @@ int MciSaveTransferConvertFile(const char *path, char *out_path,
     report->result = MCI_SAVE_TRANSFER_OK;
     MciDiagLogPrintf("SAVE", "convert ok %s -> %s bytes=%u", path, out_path, out_size);
     return 0;
+}
+
+int MciSaveTransferConvertFile(const char *path, char *out_path,
+                               unsigned int out_path_size,
+                               MciSaveTransferReport *report)
+{
+    return MciSaveTransferConvertFileTo(path, MCI_CONVERT_DEFAULT, out_path,
+                                        out_path_size, report);
 }

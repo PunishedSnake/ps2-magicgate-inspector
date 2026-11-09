@@ -171,8 +171,20 @@ static void test_ps2(void)
     free(oracle);
 }
 
+static void test_targets(void)
+{
+    MciSaveConvertTarget t[8];
+    CHECK_EQ_I(MciSaveConvertTargetsFor(MCI_SAVE_FORMAT_MAX, 2, t), 2);
+    CHECK_EQ_U(t[1], MCI_CONVERT_PS2_PSV);
+    CHECK_EQ_I(MciSaveConvertTargetsFor(MCI_SAVE_FORMAT_GME_PS1, 1, t), 5);
+    CHECK_EQ_U(t[4], MCI_CONVERT_CARD_MCX);
+    CHECK_EQ_I(MciSaveConvertTargetsFor(MCI_SAVE_FORMAT_PSX_PS1, 1, t), 3);
+    CHECK_EQ_I(MciSaveConvertTargetsFor(MCI_SAVE_FORMAT_IMAGE_PS2, 0, t), 0);
+}
+
 int main(void)
 {
+    test_targets();
     test_ps1();
     test_ps2();
     TEST_MAIN_END("test_save_sign");

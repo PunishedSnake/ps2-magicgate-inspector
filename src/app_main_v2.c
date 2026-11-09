@@ -115,7 +115,8 @@ static void ShowSaveTransferResultV2(const char *title,
              "Result: %s (rc=%d)\nFormat: %s%s\nCard: mc%d%s\n\nSource: %s\nDestination: %s\nSave: %s%s%s\nSaves: %d/%d  files: %d/%d  verified: %d\nBytes: %u\nRequired %s: %d  target free: %d\nRollback rc: %d\nFailed path: %s",
              MciSaveTransferResultText(report->result), rc,
              MciSaveTransferFormatName(report->format),
-             report->checksum_ok == 0 ? "  (container CRC mismatch)" : "",
+             report->checksum_ok == 0 ? "  (integrity check FAILED)"
+             : report->checksum_ok == 1 ? "  (integrity verified)" : "",
              report->card_port, report->generation == 1 ? " (PS1)" : "",
              report->source_path[0] ? report->source_path : "n/a",
              report->destination[0] ? report->destination : "n/a",
@@ -315,6 +316,43 @@ static void RunSaveExportV2(int *active_port)
     ShowSaveTransferResultV2("PSU export", &report, rc);
 }
 
+/* Small list chooser on top of the message renderer. Returns the chosen
+ * index, or -1 when cancelled with CIRCLE. */
+static int ChooseOptionV2(const char *title, const char *intro,
+                          const char *const *options, int count)
+{
+    char body[1024];
+    int row = 0;
+    u32 held;
+    u32 pressed;
+
+    WaitForPadNeutralV2();
+    for (;;) {
+        int used = snprintf(body, sizeof(body), "%s\n\n", intro);
+        int i;
+        for (i = 0; i < count && used > 0 && used < (int)sizeof(body); i++)
+            used += snprintf(body + used, sizeof(body) - (unsigned int)used,
+                             "%s %s\n", i == row ? ">" : " ", options[i]);
+        MciGuiRenderMessage(title, body,
+                            "DPAD choose   CROSS confirm   CIRCLE cancel",
+                            MCI_GUI_TONE_INFO);
+        for (;;) {
+            pressed = ReadPadPressed(&held);
+            if (pressed != 0u)
+                break;
+            DelayThread(16000);
+        }
+        if (pressed & PAD_CIRCLE)
+            return -1;
+        if (pressed & PAD_CROSS)
+            return row;
+        if (pressed & PAD_UP)
+            row = row == 0 ? count - 1 : row - 1;
+        else if (pressed & PAD_DOWN)
+            row = row + 1 >= count ? 0 : row + 1;
+    }
+}
+
 static void RunSaveConvertV2(int *active_port)
 {
     MciSaveTransferReport report;
@@ -340,17 +378,24 @@ static void RunSaveConvertV2(int *active_port)
         ShowSaveTransferResultV2("Save conversion", &report, -300);
         return;
     }
-    snprintf(confirm, sizeof(confirm),
-             "Convert this file on USB?\n\nSource: %s\nFormat: %s\n\nOutput (next to the source): %s\n\nNo memory card is touched. The source is never modified; an existing output file is never overwritten. The output is re-read and compared before PASS.",
-             path, MciSaveTransferFormatName(probe.format),
-             probe.generation == 2 ? ".psu (EMS/uLaunchELF)"
-             : (probe.format == MCI_SAVE_FORMAT_IMAGE_PS1 ||
-                probe.format == MCI_SAVE_FORMAT_GME_PS1)
-                   ? ".mcd (raw 128 KiB PS1 card: POPStarter, DuckStation, ePSXe)"
-                   : ".mcs (PS1 single save: MemcardRex, PSXGameEdit)");
-    if (!ConfirmCrossV2("SAVE CONVERSION", confirm, MCI_GUI_TONE_INFO))
-        return;
-    rc = MciSaveTransferConvertFile(path, out_path, sizeof(out_path), &report);
+    {
+        MciSaveConvertTarget targets[8];
+        const char *names[8];
+        int n = MciSaveConvertTargetsFor(probe.format, probe.generation, targets);
+        int i;
+        int choice;
+
+        for (i = 0; i < n; i++)
+            names[i] = MciSaveConvertTargetName(targets[i]);
+        snprintf(confirm, sizeof(confirm),
+                 "Source: %s\nFormat: %s\n\nChoose the output format. It is written next to the source and re-read before PASS; signed formats are verified after signing. No memory card is touched and nothing is overwritten.",
+                 path, MciSaveTransferFormatName(probe.format));
+        choice = n > 0 ? ChooseOptionV2("CONVERT SAVE ON USB", confirm, names, n) : -1;
+        if (choice < 0)
+            return;
+        rc = MciSaveTransferConvertFileTo(path, targets[choice], out_path,
+                                          sizeof(out_path), &report);
+    }
     ShowSaveTransferResultV2("Save conversion", &report, rc);
 }
 

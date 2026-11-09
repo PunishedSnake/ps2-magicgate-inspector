@@ -20,6 +20,11 @@ All notable changes to PS2 Memory Card Inspector are documented here.
   `save_detect`) with fixture tests cross-checked against mymc++, plus
   truncation and bit-flip fuzzing under ASan/UBSan.
 
+- **Signed and encrypted formats**: write and verify PS3 `.psv` (PS1 and
+  PS2), PSP/Vita `.vmp`; read and write encrypted `.mcx` cards. Output is
+  byte-identical to MemcardRex and Apollo Save Tool.
+- Convert on USB lets you choose the output format.
+
 ### Changed
 
 - The probe reads 4 KiB and identifies formats by structure; the save picker

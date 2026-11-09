@@ -23,10 +23,10 @@ void MciGuiRenderCardToolsV2(int selected, int selected_item)
         "Create a full verified 512-byte-page VMC image.",
         "Pick any compatible .ps2/.vmc file and restore selected saves.",
         "Pick an image for destructive same-geometry page restore.",
-        "PSU MAX CBS SPS XPS PSV, PS1 MCS GME PSX MCD VGS VMP.",
+        "PSU MAX CBS SPS XPS PSV, PS1 MCS PSX PSV MCD GME VMP MCX.",
         "Choose one save on the active card and export interoperable PSU.",
         "Create and verify a .ps2 recovery image before formatting.",
-        "Any PS2 save to .psu, PS1 save to .mcs, PS1 card to .mcd.",
+        "PSU/PSV, MCS/PSV/PSX, MCD/GME/VGS/VMP/MCX (signed, encrypted).",
         "Return to the Card dashboard.",
         ""
     };

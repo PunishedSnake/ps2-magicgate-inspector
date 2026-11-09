@@ -126,3 +126,44 @@ MciSaveTransferFormat MciSaveTransferDetectBuffer(const unsigned char *prefix,
         return MCI_SAVE_FORMAT_IMAGE_VMC;
     return MCI_SAVE_FORMAT_UNKNOWN;
 }
+
+const char *MciSaveConvertTargetName(MciSaveConvertTarget target)
+{
+    switch (target) {
+        case MCI_CONVERT_PS2_PSU: return ".psu  EMS / uLaunchELF / OPL";
+        case MCI_CONVERT_PS2_PSV: return ".psv  PS3 (signed)";
+        case MCI_CONVERT_PS1_MCS: return ".mcs  MemcardRex / PSXGameEdit";
+        case MCI_CONVERT_PS1_PSV: return ".psv  PS3 (signed)";
+        case MCI_CONVERT_PS1_PSX: return ".psx  Action Replay / GameShark";
+        case MCI_CONVERT_CARD_MCD: return ".mcd  raw card (POPStarter, emulators)";
+        case MCI_CONVERT_CARD_GME: return ".gme  DexDrive";
+        case MCI_CONVERT_CARD_VGS: return ".vgs  VGS / bleem!";
+        case MCI_CONVERT_CARD_VMP: return ".vmp  PSP / Vita (signed)";
+        case MCI_CONVERT_CARD_MCX: return ".mcx  MCX (encrypted)";
+        default: return "default";
+    }
+}
+
+int MciSaveConvertTargetsFor(MciSaveTransferFormat source, int generation,
+                             MciSaveConvertTarget out[8])
+{
+    int n = 0;
+
+    if (out == NULL)
+        return 0;
+    if (generation == 2) {
+        out[n++] = MCI_CONVERT_PS2_PSU;
+        out[n++] = MCI_CONVERT_PS2_PSV;
+    } else if (source == MCI_SAVE_FORMAT_IMAGE_PS1 || source == MCI_SAVE_FORMAT_GME_PS1) {
+        out[n++] = MCI_CONVERT_CARD_MCD;
+        out[n++] = MCI_CONVERT_CARD_GME;
+        out[n++] = MCI_CONVERT_CARD_VGS;
+        out[n++] = MCI_CONVERT_CARD_VMP;
+        out[n++] = MCI_CONVERT_CARD_MCX;
+    } else if (generation == 1) {
+        out[n++] = MCI_CONVERT_PS1_MCS;
+        out[n++] = MCI_CONVERT_PS1_PSV;
+        out[n++] = MCI_CONVERT_PS1_PSX;
+    }
+    return n;
+}
