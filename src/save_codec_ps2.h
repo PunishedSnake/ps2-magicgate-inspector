@@ -9,7 +9,7 @@
  *   MAX  Action Replay MAX / Drive   "Ps2PowerSave", CRC32, LZARI
  *   CBS  CodeBreaker                 "CFU\0", RC4 (fixed state) + zlib
  *   SPS  SharkPort / X-Port (XPS)    "\x0d\0\0\0SharkPortSave", 98-byte heads
- *   PSV  PS3 export of a PS2 save    "\0VSP", type 2 (import only; signed)
+ *   PSV  PS3 export of a PS2 save    "\0VSP", type 2, HMAC-SHA1 signed
  *
  * Layouts: mymc ps2save.py (Ross Ridge, public domain) and psdevwiki/
  * mymc++ format_psv for PSV. Every decoder bounds-checks against the input
@@ -48,6 +48,11 @@ int MciPs2Decode(const unsigned char *data, u32 size, MciSaveArchive *archive,
 /* PSU encoder for USB-side conversion. Returns bytes written or negative. */
 u32 MciPs2PsuSize(const MciSaveArchive *archive);
 int MciPs2EncodePsu(const MciSaveArchive *archive, unsigned char *out,
+                    u32 out_size);
+
+/* Signed PS3 PSV of a PS2 save (Apollo-compatible layout). */
+u32 MciPs2PsvSize(const MciSaveArchive *archive);
+int MciPs2EncodePsv(const MciSaveArchive *archive, unsigned char *out,
                     u32 out_size);
 
 #endif /* MCI_SAVE_CODEC_PS2_H */

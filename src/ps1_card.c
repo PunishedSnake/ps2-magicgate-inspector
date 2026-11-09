@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "ps1_card.h"
+#include "save_sign.h"
 #include "save_title.h"
 
 #define DIR_FRAME(card, slot) ((card)->image + MCI_PS1_FRAME_BYTES * (1u + (slot)))
@@ -35,6 +36,7 @@ const char *MciPs1ContainerName(MciPs1Container kind)
         case MCI_PS1_CONTAINER_GME: return "DexDrive card (.gme)";
         case MCI_PS1_CONTAINER_VGS: return "VGS card (.mem/.vgs)";
         case MCI_PS1_CONTAINER_VMP: return "PSP card (.vmp)";
+        case MCI_PS1_CONTAINER_MCX: return "MCX encrypted card (.mcx)";
         default: return "none";
     }
 }
@@ -47,6 +49,11 @@ MciPs1Container MciPs1DetectCardContainer(const unsigned char *data, u32 size,
 
     if (data == NULL)
         return MCI_PS1_CONTAINER_NONE;
+    if (size == MCI_MCX_BYTES && MciMcxLooksValid(data, size)) {
+        if (offset != NULL)
+            *offset = 0x80u;
+        return MCI_PS1_CONTAINER_MCX; /* image is encrypted; Load decrypts */
+    }
     if (size >= MCI_GME_HEADER_BYTES + MCI_PS1_CARD_BYTES &&
         memcmp(data, GmeMagic, sizeof(GmeMagic)) == 0) {
         kind = MCI_PS1_CONTAINER_GME;
@@ -104,12 +111,20 @@ void MciPs1CardFormat(MciPs1Card *card)
     memcpy(card->image + MCI_PS1_FRAME_BYTES * 63u, card->image, MCI_PS1_FRAME_BYTES);
 }
 
+static int LastIntegrity = MCI_SIG_UNKNOWN;
+
+int MciPs1LastIntegrity(void)
+{
+    return LastIntegrity;
+}
+
 int MciPs1CardLoad(MciPs1Card *card, const unsigned char *data, u32 size,
                    MciPs1Container *kind_out)
 {
     u32 offset = 0u;
     MciPs1Container kind;
 
+    LastIntegrity = MCI_SIG_UNKNOWN;
     if (card == NULL || data == NULL)
         return MCI_SAVE_E_ARGS;
     kind = MciPs1DetectCardContainer(data, size, &offset);
@@ -117,6 +132,15 @@ int MciPs1CardLoad(MciPs1Card *card, const unsigned char *data, u32 size,
         *kind_out = kind;
     if (kind == MCI_PS1_CONTAINER_NONE)
         return MCI_SAVE_E_FORMAT;
+    if (kind == MCI_PS1_CONTAINER_MCX) {
+        int rc = MciMcxDecrypt(data, size, card->image);
+        if (rc < 0)
+            return MCI_SAVE_E_CORRUPT;
+        LastIntegrity = rc ? MCI_SIG_OK : MCI_SIG_BAD;
+        return MCI_SAVE_OK;
+    }
+    if (kind == MCI_PS1_CONTAINER_VMP && size == MCI_VMP_BYTES)
+        LastIntegrity = MciVmpVerify(data, size);
     memcpy(card->image, data + offset, MCI_PS1_CARD_BYTES);
     return MCI_SAVE_OK;
 }
@@ -385,6 +409,8 @@ u32 MciPs1ContainerSize(MciPs1Container kind)
         case MCI_PS1_CONTAINER_RAW: return MCI_PS1_CARD_BYTES;
         case MCI_PS1_CONTAINER_GME: return MCI_GME_HEADER_BYTES + MCI_PS1_CARD_BYTES;
         case MCI_PS1_CONTAINER_VGS: return MCI_VGS_HEADER_BYTES + MCI_PS1_CARD_BYTES;
+        case MCI_PS1_CONTAINER_VMP: return MCI_VMP_BYTES;
+        case MCI_PS1_CONTAINER_MCX: return MCI_MCX_BYTES;
         default: return 0u;
     }
 }
@@ -402,6 +428,8 @@ int MciPs1CardWrite(const MciPs1Card *card, MciPs1Container kind,
         return MCI_SAVE_E_UNSUPPORTED;
     if (out_size < need)
         return MCI_SAVE_E_LIMIT;
+    if (kind == MCI_PS1_CONTAINER_MCX)
+        return MciMcxEncrypt(card->image, out) < 0 ? MCI_SAVE_E_ARGS : (int)need;
     memset(out, 0, need);
     img = out + (need - MCI_PS1_CARD_BYTES);
     memcpy(img, card->image, MCI_PS1_CARD_BYTES);
@@ -423,6 +451,11 @@ int MciPs1CardWrite(const MciPs1Card *card, MciPs1Container kind,
         out[8] = 0x01u;
         out[12] = 0x01u;
         out[17] = 0x02u;
+    } else if (kind == MCI_PS1_CONTAINER_VMP) {
+        memcpy(out, "\0PMV", 4u);
+        out[4] = 0x80u; /* header length */
+        if (MciVmpSign(out, need) < 0)
+            return MCI_SAVE_E_ARGS;
     }
     return (int)need;
 }
@@ -553,5 +586,67 @@ int MciPs1EncodeMcs(const MciSaveArchive *archive, unsigned char *out,
     memcpy(out + 0x0Au, f->name, strlen(f->name));
     SetFrameXor(out);
     memcpy(out + MCI_PS1_FRAME_BYTES, f->data, f->size);
+    return (int)need;
+}
+
+u32 MciPs1PsvSize(const MciSaveArchive *archive)
+{
+    if (MciPs1ArchiveValidate(archive) < 0)
+        return 0u;
+    return 0x84u + archive->files[0].size;
+}
+
+int MciPs1EncodePsv(const MciSaveArchive *archive, unsigned char *out,
+                    u32 out_size)
+{
+    u32 need = MciPs1PsvSize(archive);
+    const MciSaveFile *f;
+
+    if (need == 0u || out == NULL)
+        return MCI_SAVE_E_ARGS;
+    if (out_size < need)
+        return MCI_SAVE_E_LIMIT;
+    f = &archive->files[0];
+    memset(out, 0, 0x84u);
+    memcpy(out, "\0VSP", 4u);
+    out[0x38] = 0x14u;                 /* header size */
+    out[0x3C] = 0x01u;                 /* PS1 */
+    MciPutLe32(out + 0x40u, f->size);  /* save size */
+    out[0x44] = 0x84u;                 /* data offset */
+    out[0x49] = 0x02u;                 /* 0x200 block size */
+    MciPutLe32(out + 0x5Cu, f->size);  /* data size */
+    out[0x60] = 0x03u;                 /* constant 0x9003 */
+    out[0x61] = 0x90u;
+    memcpy(out + 0x64u, f->name, strlen(f->name));
+    memcpy(out + 0x84u, f->data, f->size);
+    return MciPsvSign(out, need) < 0 ? MCI_SAVE_E_ARGS : (int)need;
+}
+
+u32 MciPs1ArSize(const MciSaveArchive *archive)
+{
+    if (MciPs1ArchiveValidate(archive) < 0)
+        return 0u;
+    return 54u + archive->files[0].size;
+}
+
+int MciPs1EncodeAr(const MciSaveArchive *archive, unsigned char *out,
+                   u32 out_size)
+{
+    u32 need = MciPs1ArSize(archive);
+    const MciSaveFile *f;
+    size_t tl;
+
+    if (need == 0u || out == NULL)
+        return MCI_SAVE_E_ARGS;
+    if (out_size < need)
+        return MCI_SAVE_E_LIMIT;
+    f = &archive->files[0];
+    memset(out, 0, 54u);
+    memcpy(out, f->name, strlen(f->name));
+    tl = strlen(archive->title);
+    if (tl > 32u)
+        tl = 32u;
+    memcpy(out + 21u, archive->title, tl);
+    memcpy(out + 54u, f->data, f->size);
     return (int)need;
 }
