@@ -261,7 +261,8 @@ static void test_ps1_cards(void)
             }
             free(out);
         }
-        CHECK_EQ_I(MciPs1CardWrite(ref, MCI_PS1_CONTAINER_VMP, card->image, 1), MCI_SAVE_E_UNSUPPORTED);
+        CHECK_EQ_I(MciPs1CardWrite(ref, MCI_PS1_CONTAINER_VMP, card->image, 1), MCI_SAVE_E_LIMIT);
+        CHECK_EQ_I(MciPs1CardWrite(ref, MCI_PS1_CONTAINER_NONE, card->image, 1), MCI_SAVE_E_UNSUPPORTED);
     }
 
     /* Insert: name clash, slot preference, full card. */

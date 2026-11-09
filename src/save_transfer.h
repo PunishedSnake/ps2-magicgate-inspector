@@ -140,6 +140,31 @@ int MciSaveTransferConvertFile(const char *path, char *out_path,
                                unsigned int out_path_size,
                                MciSaveTransferReport *report);
 
+/* Explicit output format. Signed (PSV, VMP) and encrypted (MCX) outputs are
+ * produced with the public container keys and re-verified after writing. */
+typedef enum MciSaveConvertTarget {
+    MCI_CONVERT_DEFAULT = 0,
+    MCI_CONVERT_PS2_PSU,
+    MCI_CONVERT_PS2_PSV,
+    MCI_CONVERT_PS1_MCS,
+    MCI_CONVERT_PS1_PSV,
+    MCI_CONVERT_PS1_PSX,
+    MCI_CONVERT_CARD_MCD,
+    MCI_CONVERT_CARD_GME,
+    MCI_CONVERT_CARD_VGS,
+    MCI_CONVERT_CARD_VMP,
+    MCI_CONVERT_CARD_MCX
+} MciSaveConvertTarget;
+
+const char *MciSaveConvertTargetName(MciSaveConvertTarget target);
+/* Targets valid for a source generation/format, in menu order. Returns
+ * the count written to out (max 8). */
+int MciSaveConvertTargetsFor(MciSaveTransferFormat source, int generation,
+                             MciSaveConvertTarget out[8]);
+int MciSaveTransferConvertFileTo(const char *path, MciSaveConvertTarget target,
+                                 char *out_path, unsigned int out_path_size,
+                                 MciSaveTransferReport *report);
+
 /* Default single-save export policy. PSU is uncompressed, metadata-preserving,
  * widely supported and does not depend on proprietary encryption/compression. */
 MciSaveTransferFormat MciSaveTransferDefaultPs2ExportFormat(void);

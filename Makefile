@@ -7,7 +7,8 @@ EE_OBJS = src/app_main_v2.o src/gui_v2.o src/gui_message_compat.o src/progress.o
 	src/kelf_cache.o src/card_raw_session.o src/card_image.o src/card_image_fs.o \
 	src/mc_fs_format.o src/sha256.o \
 	src/save_archive.o src/save_codec_ps2.o src/save_detect.o src/save_transfer_archive.o \
-	src/ps1_card.o src/lzari.o src/tinf/tinflate.o src/tinf/tinfzlib.o src/tinf/adler32.o
+	src/ps1_card.o src/lzari.o src/tinf/tinflate.o src/tinf/tinfzlib.o src/tinf/adler32.o \
+	src/save_sign.o src/mci_crypto.o
 EE_LIBS = -ldebug -ldraw -lgraph -lpacket -ldma -lpad -lmc -lfileXio -lcdvd -lsecr \
 	-lioprpgen -liopreboot -lpatches -lkernel
 EE_CFLAGS = -O2 -G0 -Wall -Wextra -std=gnu99 -fdata-sections -ffunction-sections \

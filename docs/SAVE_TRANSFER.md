@@ -79,7 +79,7 @@ These remain image sources and are not treated as single-save archives.
 | Action Replay MAX / MAX Drive | `.max`, `.pws` | header CRC32 checked and reported; LZARI; no timestamps in the format, so the card assigns the creation time |
 | CodeBreaker | `.cbs` | fixed-state RC4 + zlib (vendored `tinf`) |
 | SharkPort / X-Port / Xploder | `.sps`, `.xps` | byte-swapped modes handled |
-| PS3 export | `.psv` (type 2) | import only; PSV signatures are not checked |
+| PS3 export | `.psv` (type 2) | signature checked and reported; an unsigned or edited PSV still imports |
 
 Detection is by content (`src/save_detect.c`). The extension only picks between
 variants that share one layout (MAX vs PWS, SharkPort vs X-Port), so a
@@ -94,7 +94,7 @@ Single saves import to a **PS1 card** through mcman's PS1 file API:
 | MCS (PSXGameEdit, MemcardRex) | `.mcs`, `.ps1` |
 | Action Replay / GameShark / Xploder / Caetla | `.psx`, `.mcb`, `.mcx`, `.pda` |
 | Raw save body (no header; name from file name) | `.bin`, none, e.g. `BESLES-01234GAME` |
-| PS3 export | `.psv` (type 1) |
+| PS3 export | `.psv` (type 1, signature checked and reported) |
 
 Whole PS1 cards can be imported (every save, all-or-nothing) or converted:
 
@@ -103,7 +103,8 @@ Whole PS1 cards can be imported (every save, all-or-nothing) or converted:
 | Raw 128 KiB | `.mcd`, `.mcr`, `.mc`, `.bin`, `.ddf`, `.psm`, `.mci`, `.srm`, POPStarter `.VMC` |
 | DexDrive | `.gme`, `.dex` |
 | VGS / bleem! | `.mem`, `.vgs` |
-| PSP | `.vmp` (import only; signed) |
+| PSP / Vita | `.vmp` (HMAC-SHA1 signed; signature checked on import, written on export) |
+| MCX | `.mcx` (AES-128-CBC encrypted + SHA-256; decrypted and checked on import) |
 
 PS1 rules:
 
@@ -120,22 +121,33 @@ PS1 rules:
 
 ### Convert on USB (0.4.2)
 
-`CONVERT SAVE ON USB` never touches a memory card:
+`CONVERT SAVE ON USB` never touches a memory card. After picking a file the
+user chooses the output:
 
-- any PS2 container → `.psu`;
-- any PS1 single save → `.mcs`;
-- any PS1 card container → raw `.mcd` (POPStarter, DuckStation, ePSXe, MemcardRex).
+| Source | Outputs |
+| --- | --- |
+| any PS2 save | `.psu`, `.psv` (signed for PS3) |
+| any PS1 single save | `.mcs`, `.psv` (signed for PS3), `.psx` (Action Replay) |
+| any PS1 card | `.mcd`, `.gme`, `.vgs`, `.vmp` (signed for PSP/Vita), `.mcx` (encrypted) |
 
-The output is written next to the source, re-read and compared; an existing
-file is never overwritten (`*.conv.<ext>` is used when the source already has
-the target extension).
+The output is written next to the source, re-read and compared; signed
+outputs are verified after signing; an existing file is never overwritten.
+
+### Signatures and encryption
+
+`src/save_sign.c` implements the PSV/VMP HMAC-SHA1 signature and MCX
+encryption on top of `src/mci_crypto.c` (AES-128, SHA-1, HMAC-SHA1). The
+outputs are byte-identical to MemcardRex (VMP, MCX, PS1 PSV) and to Apollo
+Save Tool's resigner (PS1 and PS2 PSV); see `tests/fixtures/oracle`.
+Signature state is informational on import: saves edited by other tools are
+often unsigned, so a bad signature is reported but does not block the import.
 
 ### Not yet supported
 
-- PS1 `.mcx` files from the PS Vita/PSP "MCX" encrypted format (MemcardRex
-  `.mcx` variant), PocketStation execution metadata, and Shift-JIS kana/kanji
-  rendering (titles fold to ASCII).
-- Writing signed formats (`.psv`, `.vmp`).
+- PocketStation execution metadata and Shift-JIS kana/kanji rendering
+  (titles fold to ASCII).
+- A PS2 `.psv` is signed correctly but has not yet been tested on PS3
+  hardware.
 - Adding a PS1 save into a POPStarter `.VMC` in place (convert to `.mcd`
   works; in-place insertion is the next step).
 

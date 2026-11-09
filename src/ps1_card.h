@@ -21,13 +21,14 @@
  *   raw       .mcr .mcd .mc .bin .ddf .ps .psm .mci .vmc (POPS)  -- "MC" @0
  *   DexDrive  .gme (.dex)  3904-byte header "123-456-STD", comments
  *   VGS       .mem .vgs    64-byte header "VgsM"
- *   PSP       .vmp         128-byte header "\0PMV" (import only; signed)
+ *   PSP       .vmp         128-byte header "\0PMV", HMAC-SHA1 signed
+ *   MCX       .mcx         AES-128-CBC encrypted card + SHA-256 (0x200A0)
  *
  * Single-save containers decode into a one-file MciSaveArchive:
  *   MCS       .mcs .ps1        128-byte directory frame + save body
  *   AR/GS/XP  .psx .mcb .mcx .pda .ps1   54-byte header + save body
  *   raw       (no header)      save body only, "SC" @0; name from filename
- *   PSV       .psv             PS3 export, type 1 (import only; signed)
+ *   PSV       .psv             PS3 export, type 1, HMAC-SHA1 signed
  *
  * Formats from: Martin Korth "Nocash PSX Specs" memory-card chapter; DexDrive
  * GME and VGS header layouts as documented by MemcardRex (facts only, no code
@@ -61,7 +62,8 @@ typedef enum MciPs1Container {
     MCI_PS1_CONTAINER_RAW,
     MCI_PS1_CONTAINER_GME,
     MCI_PS1_CONTAINER_VGS,
-    MCI_PS1_CONTAINER_VMP
+    MCI_PS1_CONTAINER_VMP,
+    MCI_PS1_CONTAINER_MCX
 } MciPs1Container;
 
 typedef struct MciPs1Card {
@@ -105,7 +107,7 @@ int MciPs1CardExtract(const MciPs1Card *card, unsigned int first_slot,
  * there are not enough free (or deleted) slots. Card is unchanged on error. */
 int MciPs1CardInsert(MciPs1Card *card, const MciSaveArchive *archive);
 
-/* Serialise the card in a container. VMP is not writable (it is signed). */
+/* Serialise the card in any container; VMP is signed, MCX encrypted. */
 u32 MciPs1ContainerSize(MciPs1Container kind);
 int MciPs1CardWrite(const MciPs1Card *card, MciPs1Container kind,
                     unsigned char *out, u32 out_size);
@@ -129,6 +131,16 @@ int MciPs1DecodeSingle(const unsigned char *data, u32 size,
 u32 MciPs1McsSize(const MciSaveArchive *archive);
 int MciPs1EncodeMcs(const MciSaveArchive *archive, unsigned char *out,
                     u32 out_size);
+/* Signed PS3 PSV (0x84 + body), MemcardRex-compatible layout. */
+u32 MciPs1PsvSize(const MciSaveArchive *archive);
+int MciPs1EncodePsv(const MciSaveArchive *archive, unsigned char *out,
+                    u32 out_size);
+/* Action Replay / GameShark / Xploder .psx (54 + body). */
+u32 MciPs1ArSize(const MciSaveArchive *archive);
+int MciPs1EncodeAr(const MciSaveArchive *archive, unsigned char *out,
+                   u32 out_size);
+/* Last MCX/VMP integrity result from MciPs1CardLoad: MCI_SIG_* value. */
+int MciPs1LastIntegrity(void);
 
 /* Validate a PS1 archive body (non-empty, multiple of 8 KiB, <= 15 blocks,
  * "SC" title frame) and name. */

@@ -8,6 +8,7 @@
 #include "card_math.h"
 #include "lzari.h"
 #include "save_codec_ps2.h"
+#include "save_sign.h"
 #include "tinf/tinf.h"
 
 #define PSU_ENTRY 512u
@@ -658,4 +659,98 @@ int MciPs2Decode(const unsigned char *data, u32 size, MciSaveArchive *archive,
         case MCI_PS2_CONTAINER_PSV: return DecodePsv(data, size, archive);
         default: return MCI_SAVE_E_FORMAT;
     }
+}
+
+/* ---------------------------------------------------------- PSV writer */
+
+u32 MciPs2PsvSize(const MciSaveArchive *archive)
+{
+    if (archive == NULL || archive->generation != MCI_SAVE_GEN_PS2 ||
+        archive->file_count == 0u)
+        return 0u;
+    return PSV_HEADER + PSV_PS2_HEADER + PSV_DIRINFO +
+           PSV_FILEINFO * archive->file_count + MciSaveArchiveTotalBytes(archive);
+}
+
+static int SameName(const unsigned char *field, const char *name)
+{
+    char tmp[MCI_SAVE_NAME_MAX + 1u];
+    unsigned int i;
+    for (i = 0u; i < 64u && i < MCI_SAVE_NAME_MAX && field[i]; i++)
+        tmp[i] = (char)field[i];
+    tmp[i] = '\0';
+    return tmp[0] != '\0' && strcmp(tmp, name) == 0;
+}
+
+int MciPs2EncodePsv(const MciSaveArchive *archive, unsigned char *out,
+                    u32 out_size)
+{
+    u32 need = MciPs2PsvSize(archive);
+    const unsigned char *iconsys = NULL;
+    unsigned char *ps2h;
+    unsigned char *di;
+    u32 pos;
+    u32 i;
+
+    if (need == 0u || out == NULL || !MciSaveNameIsSafe(archive->directory))
+        return MCI_SAVE_E_ARGS;
+    if (out_size < need)
+        return MCI_SAVE_E_LIMIT;
+    memset(out, 0, PSV_HEADER + PSV_PS2_HEADER + PSV_DIRINFO +
+                   PSV_FILEINFO * archive->file_count);
+    memcpy(out, "\0VSP", 4u);
+    out[0x38] = 0x2Cu;
+    out[0x3C] = 0x02u;
+
+    for (i = 0u; i < archive->file_count; i++)
+        if (strcmp(archive->files[i].name, "icon.sys") == 0 &&
+            archive->files[i].size >= 0x1C4u &&
+            memcmp(archive->files[i].data, "PS2D", 4) == 0)
+            iconsys = archive->files[i].data;
+
+    ps2h = out + PSV_HEADER;
+    MciPutLe32(ps2h + 0u, MciSaveArchiveTotalBytes(archive));
+    MciPutLe32(ps2h + 36u, archive->file_count);
+
+    di = ps2h + PSV_PS2_HEADER;
+    memcpy(di, &archive->created, 8u);
+    memcpy(di + 8u, &archive->modified, 8u);
+    MciPutLe32(di + 16u, archive->file_count + 2u);
+    MciPutLe32(di + 20u, archive->dir_mode ? archive->dir_mode : MCI_PS2_DEFAULT_DIR_MODE);
+    memcpy(di + 24u, archive->directory, strlen(archive->directory));
+
+    pos = PSV_HEADER + PSV_PS2_HEADER + PSV_DIRINFO + PSV_FILEINFO * archive->file_count;
+    for (i = 0u; i < archive->file_count; i++) {
+        const MciSaveFile *f = &archive->files[i];
+        unsigned char *fi = di + PSV_DIRINFO + PSV_FILEINFO * i;
+        memcpy(fi, &f->created, 8u);
+        memcpy(fi + 8u, &f->modified, 8u);
+        MciPutLe32(fi + 16u, f->size);
+        MciPutLe32(fi + 20u, f->mode ? f->mode : MCI_PS2_DEFAULT_FILE_MODE);
+        memcpy(fi + 24u, f->name, strlen(f->name));
+        MciPutLe32(fi + 56u, pos);
+        memcpy(out + pos, f->data, f->size);
+
+        /* Icon locations the PS3 XMB uses for its preview. */
+        if (strcmp(f->name, "icon.sys") == 0) {
+            MciPutLe32(ps2h + 4u, pos);
+            MciPutLe32(ps2h + 8u, f->size);
+        }
+        if (iconsys != NULL) {
+            if (SameName(iconsys + 0x104u, f->name)) {
+                MciPutLe32(ps2h + 12u, pos);
+                MciPutLe32(ps2h + 16u, f->size);
+            }
+            if (SameName(iconsys + 0x144u, f->name)) {
+                MciPutLe32(ps2h + 20u, pos);
+                MciPutLe32(ps2h + 24u, f->size);
+            }
+            if (SameName(iconsys + 0x184u, f->name)) {
+                MciPutLe32(ps2h + 28u, pos);
+                MciPutLe32(ps2h + 32u, f->size);
+            }
+        }
+        pos += f->size;
+    }
+    return MciPsvSign(out, need) < 0 ? MCI_SAVE_E_ARGS : (int)need;
 }
