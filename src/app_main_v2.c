@@ -526,7 +526,7 @@ static void RunReplaceFileV2(int *active_port)
     static char names[24][33];
     static u32 sizes[24];
     const char *labels[24];
-    char label_text[24][48];
+    char label_text[24][64];
     char directory[MCI_CARD_SAVE_DIRECTORY_MAX];
     char usb_path[MCI_SAVE_TRANSFER_PATH_MAX];
     char backup_path[MCI_SAVE_TRANSFER_PATH_MAX];
@@ -555,7 +555,7 @@ static void RunReplaceFileV2(int *active_port)
         return;
     }
     for (i = 0; i < count; i++) {
-        snprintf(label_text[i], sizeof(label_text[i]), "%-24s %8u B", names[i], sizes[i]);
+        snprintf(label_text[i], sizeof(label_text[i]), "%-24.32s %8u B", names[i], sizes[i]);
         labels[i] = label_text[i];
     }
     snprintf(body, sizeof(body), "mc%d:/%s\nChoose the file to replace:", port, directory);

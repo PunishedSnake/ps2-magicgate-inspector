@@ -92,7 +92,7 @@ static int LoadUsb(const char *path, unsigned char **out, u32 *size)
 
     *out = NULL;
     memset(&st, 0, sizeof(st));
-    if (fileXioGetStat(path, &st) < 0 || !FIO_S_ISREG(st.mode) || st.size < 0 ||
+    if (fileXioGetStat(path, &st) < 0 || !FIO_S_ISREG(st.mode) ||
         (u64)st.size > MCI_SAVE_MAX_BYTES)
         return -100;
     buf = (unsigned char *)malloc(st.size > 0 ? (u32)st.size : 1u);
