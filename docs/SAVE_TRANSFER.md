@@ -142,6 +142,35 @@ Save Tool's resigner (PS1 and PS2 PSV); see `tests/fixtures/oracle`.
 Signature state is informational on import: saves edited by other tools are
 often unsigned, so a bad signature is reported but does not block the import.
 
+### Raw PS1 saves: naming (0.4.2)
+
+A headerless PS1 save has no name inside it, and PS1 games only find a save
+whose name matches exactly (`BASCUS-94163FF7S01`: `B`, region `A`/`E`/`I`,
+product code, game suffix). Before importing or converting a raw save Drebin
+shows the name it will use and lets you edit it on the pad. It warns when the
+name is not a product-code name, and offers a product code found in the file
+name (`Final Fantasy VII (SCUS-94163).bin` → `BASCUS-94163`). The game's own
+suffix cannot be guessed; copy it from another save of the same game.
+
+### Replace one file inside a PS2 save (0.4.2)
+
+`REPLACE FILE IN SAVE` swaps one raw data file (for example an edited save
+from a cheat or modding site) inside a save already on the card:
+
+1. pick the save, the file inside it, and the replacement on USB;
+2. the whole save is exported to `MCI/SAVES/<dir>_BEFORE_REPLACE.psu` and
+   verified; nothing continues without that backup;
+3. the new data is written to a temporary sibling and verified;
+4. the original is removed and the copy is renamed (mcman SetFileInfo name
+   change) or, if rename is unsupported, rewritten under the original name
+   and verified;
+5. the original attributes and timestamps are restored and the final file is
+   read back once more.
+
+Different sizes are allowed but flagged (many games reject them). A
+replacement `icon.sys` must be a real `PS2D` icon.sys. The data itself is
+written as given: Drebin cannot know whether the game accepts it.
+
 ### Not yet supported
 
 - PocketStation execution metadata and Shift-JIS kana/kanji rendering

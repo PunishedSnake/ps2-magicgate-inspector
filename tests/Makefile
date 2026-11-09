@@ -17,7 +17,7 @@ endif
 
 BUILD := build
 TESTS := test_card_math test_mc_fs_format test_sha256 test_save_title \
-         test_lzari test_save_codecs test_crypto test_save_sign
+         test_lzari test_save_codecs test_crypto test_save_sign test_save_replace
 
 test_card_math_SRCS := test_card_math.c $(SRC)/card_math.c
 test_mc_fs_format_SRCS := test_mc_fs_format.c $(SRC)/mc_fs_format.c
@@ -31,6 +31,7 @@ test_crypto_SRCS := test_crypto.c $(SRC)/mci_crypto.c
 test_lzari_SRCS := test_lzari.c $(SRC)/lzari.c
 test_save_codecs_SRCS := test_save_codecs.c $(CODEC_SRCS)
 test_save_sign_SRCS := test_save_sign.c $(CODEC_SRCS)
+test_save_replace_SRCS := test_save_replace.c $(SRC)/save_replace.c $(CODEC_SRCS)
 
 .PHONY: all run clean
 all: run

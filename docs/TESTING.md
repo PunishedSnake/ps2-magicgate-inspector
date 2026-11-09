@@ -184,6 +184,7 @@ make -C tests SAN=1    # same with AddressSanitizer + UBSan
 | `test_save_codecs` | every PS2/PS1 container fixture: detect, decode, re-encode (byte-identical PSU/MCS), PS1 card scan/extract/insert/full/clash/corruption, prefix truncation and bit-flip fuzz |
 
 | `test_crypto` | AES-128 (FIPS-197, SP 800-38A CBC), SHA-1, HMAC-SHA1 (RFC 2202) |
+| `test_save_replace` | PS1 product-code check, name-from-path, product-code guess from free text, PS1 rename; replace planning (space, temp names, 32-char limit, icon.sys check) |
 | `test_save_sign` | VMP, MCX and PS1 PSV byte-identical to MemcardRex; PS2 PSV identical to Apollo's signer; tamper and unsigned detection; conversion targets |
 
 Fixtures live in `tests/fixtures` and are produced by

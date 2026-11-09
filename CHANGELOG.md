@@ -24,6 +24,10 @@ All notable changes to PS2 Memory Card Inspector are documented here.
   PS2), PSP/Vita `.vmp`; read and write encrypted `.mcx` cards. Output is
   byte-identical to MemcardRex and Apollo Save Tool.
 - Convert on USB lets you choose the output format.
+- **Raw PS1 saves**: the save name is shown and editable on the pad before
+  import/convert, with a product-code check and a guess from the file name.
+- **Replace file in save**: swap one raw data file inside a PS2 save, after a
+  verified `.psu` backup, through a verified temporary copy.
 
 ### Changed
 

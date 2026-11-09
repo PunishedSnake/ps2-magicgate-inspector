@@ -156,6 +156,11 @@ typedef enum MciSaveConvertTarget {
     MCI_CONVERT_CARD_MCX
 } MciSaveConvertTarget;
 
+/* PS1 headerless saves carry no name. The UI sets the user-confirmed name
+ * here before the next import/convert; it applies to one PS1 single-save
+ * operation and is then cleared. NULL clears it. */
+int MciSaveTransferSetPs1NameOverride(const char *name);
+
 const char *MciSaveConvertTargetName(MciSaveConvertTarget target);
 /* Targets valid for a source generation/format, in menu order. Returns
  * the count written to out (max 8). */

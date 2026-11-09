@@ -16,7 +16,7 @@ void MciGuiRenderCardToolsV2(int selected, int selected_item)
         "BROWSE / RESTORE IMAGE", "EXACT RESTORE IMAGE",
         "IMPORT SAVE  PS2 / PS1", "EXPORT SAVE TO .psu",
         "FORCE FORMAT + BACKUP", "CONVERT SAVE ON USB",
-        "RETURN", ""
+        "REPLACE FILE IN SAVE", "RETURN"
     };
     static const char *const hints[10] = {
         "Create a full verified raw image with regenerated ECC.",
@@ -27,8 +27,8 @@ void MciGuiRenderCardToolsV2(int selected, int selected_item)
         "Choose one save on the active card and export interoperable PSU.",
         "Create and verify a .ps2 recovery image before formatting.",
         "PSU/PSV, MCS/PSV/PSX, MCD/GME/VGS/VMP/MCX (signed, encrypted).",
-        "Return to the Card dashboard.",
-        ""
+        "Swap one raw data file; verified .psu backup first.",
+        "Return to the Card dashboard."
     };
     packet_t *packet;
     qword_t *q;
@@ -39,7 +39,7 @@ void MciGuiRenderCardToolsV2(int selected, int selected_item)
         return;
     if (selected < 0 || selected > 1)
         selected = 0;
-    if (selected_item < 0 || selected_item >= 9)
+    if (selected_item < 0 || selected_item >= 10)
         selected_item = 0;
     ActiveHeaderSlot = selected;
 
@@ -52,7 +52,7 @@ void MciGuiRenderCardToolsV2(int selected, int selected_item)
              "active mc%d   L1 mc0   R1 mc1", selected);
     q = text_box(q, 355, 39, 620, 48, context, Theme.muted);
 
-    for (i = 0; i < 9; i++) {
+    for (i = 0; i < 10; i++) {
         int col = i & 1;
         int row = i >> 1;
         float x0 = col ? 322.0f : 16.0f;
@@ -60,7 +60,7 @@ void MciGuiRenderCardToolsV2(int selected, int selected_item)
         float y0 = 52.0f + (float)row * 30.0f;
         float y1 = y0 + 27.0f;
         UiRgb border = i == selected_item ? Theme.accent : Theme.border;
-        UiRgb title_color = (i == 3 || i == 6)
+        UiRgb title_color = (i == 3 || i == 6 || i == 8)
                                 ? Theme.warning : Theme.text;
 
         q = rect_fill(q, x0, y0, x1, y1,
